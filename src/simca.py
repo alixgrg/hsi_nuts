@@ -62,91 +62,6 @@ def _safe_positive(x, eps=1e-12):
     """
     return np.maximum(np.asarray(x, dtype=float), eps)
 
-def _simca_limits_from_alpha(model, alpha):
-    """
-    Compute H_alpha and Q_alpha from scaled chi-square approximations.
-
-    H_alpha = H0 / NH * chi2.ppf(1-alpha, NH)
-    Q_alpha = Q0 / NQ * chi2.ppf(1-alpha, NQ)
-    """
-    H_lim = model.H0_ / model.NH_ * chi2.ppf(1.0 - alpha, model.NH_)
-    Q_lim = model.Q0_ / model.NQ_ * chi2.ppf(1.0 - alpha, model.NQ_)
-    return max(float(H_lim), model.eps), max(float(Q_lim), model.eps)
-
-def simca_accept_for_rule_alpha(
-    H,
-    Q,
-    model,
-    rule_name="data_driven",
-    alpha=0.05,
-):
-    """
-    Recompute acceptance for a given alpha and rule name.
-
-    Supported rule_name:
-    - "simple"
-    - "alternative"
-    - "combined_index"
-    - "data_driven"
-    """
-    H = np.asarray(H, dtype=float)
-    Q = np.asarray(Q, dtype=float)
-
-    H_lim, Q_lim = simca_limits_from_alpha(model, alpha)
-
-    if rule_name == "simple":
-        stat = np.maximum(H / H_lim, Q / Q_lim)
-        limit = 1.0
-        accepted = (H < H_lim) & (Q < Q_lim)
-
-    elif rule_name == "alternative":
-        stat = H / H_lim + Q / Q_lim
-        limit = 2.0
-        accepted = stat < limit
-
-    elif rule_name == "combined_index":
-        # Moment-matched combined index on training distances
-        H_train = model.H_train_
-        Q_train = model.Q_train_
-
-        C_train = H_train / H_lim + Q_train / Q_lim
-
-        C0 = np.mean(C_train)
-        var_C = np.mean((C_train - C0) ** 2)
-
-        if var_C <= model.eps:
-            NC = 1e6
-        else:
-            NC = 2.0 * C0**2 / var_C
-
-        NC = max(float(NC), model.eps)
-
-        limit = C0 / NC * chi2.ppf(1.0 - alpha, NC)
-
-        stat = H / H_lim + Q / Q_lim
-        accepted = stat < limit
-
-    elif rule_name == "data_driven":
-        ND = model.NH_ + model.NQ_
-        limit = chi2.ppf(1.0 - alpha, ND)
-
-        stat = (
-            model.NH_ * H / max(model.H0_, model.eps)
-            +
-            model.NQ_ * Q / max(model.Q0_, model.eps)
-        )
-
-        accepted = stat < limit
-
-    else:
-        raise ValueError(
-            "rule_name must be one of: "
-            "'simple', 'alternative', 'combined_index', 'data_driven'."
-        )
-
-    return accepted, stat, limit
-
-
 
 
 class SIMCAClassModel:
@@ -352,7 +267,6 @@ class SIMCAClassModel:
             "NH": self.NH_,
             "NQ": self.NQ_,
         }
-
 
 
 

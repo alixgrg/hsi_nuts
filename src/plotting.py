@@ -1,270 +1,208 @@
-import plotly.graph_objects as go
+from typing import Sequence, Any, Mapping
 import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from src.stats import mean_spectrum, hotelling_t2, q_residuals
-from src.simca import simca_limits_from_alpha
+from src.stats import hotelling_t2, q_residuals
 
-# RAW DATA PLOTTING FUNCTIONS
-def plot_bands_slider(cube, title="Image hyperspectrale"):
+# -----------------------------------------------------------------------------
+# Utils
+# -----------------------------------------------------------------------------
+
+def _as_array(values, n: int, default: Any = "") -> np.ndarray:
+    if values is None:
+        return np.asarray([default] * n)
+    arr = np.asarray(values)
+    if arr.shape[0] != n:
+        raise ValueError(f"Expected {n} values, got {arr.shape[0]}.")
+    return arr
+
+
+def _is_float(x) -> bool:
+    try:
+        float(x)
+        return True
+    except Exception:
+        return False
+
+
+def _x_axis(n_features: int, wavelengths=None):
+    if wavelengths is None:
+        return np.arange(n_features), "Band index"
+    return np.asarray(wavelengths), "Wavelength (nm)"
+
+
+def _mask_value_to_nan(arr, mask_value=0):
+    out = np.asarray(arr, dtype=float).copy()
+    out[out == mask_value] = np.nan
+    return out
+
+
+def _show_or_return(fig: go.Figure, show: bool = True):
+    if show:
+        fig.show()
+    return fig
+
+
+def _customdata(n: int, **metadata) -> tuple[np.ndarray, str]:
+    names = [k for k, v in metadata.items() if v is not None]
+    if not names:
+        return np.empty((n, 0), dtype=str), ""
+    cols = [_as_array(metadata[k], n, "").astype(str) for k in names]
+    data = np.stack(cols, axis=1)
+    hover = "".join(f"{name}: %{{customdata[{i}]}}<br>" for i, name in enumerate(names))
+    return data, hover
+
+
+def _mean_spectrum_from_cube(cube: np.ndarray) -> np.ndarray:
+    cube = np.asarray(cube, dtype=float)
+    if cube.ndim != 3:
+        raise ValueError("Expected a hyperspectral cube with shape (H, W, B).")
+    return np.nanmean(cube.reshape(-1, cube.shape[2]), axis=0)
+
+def _extract_spectral_matrix(
+    data,
+    keys: Sequence[str] | None = None,
+    spectral_cols: Sequence[Any] | None = None,
+    label_col: str | None = None,
+    name_col: str | None = None,
+    spectrum_field: str = "mean_spectrum",
+):
+    """Accept an array, a dict of cubes/objects, or a dataframe and return X, labels, names."""
+    if isinstance(data, pd.DataFrame):
+        df = data
+        if spectral_cols is None:
+            # Default used in your Excel-like tables: metadata in first 3 columns.
+            spectral_cols = df.columns[3:]
+        X = df.loc[:, spectral_cols].to_numpy(dtype=float)
+        labels = df[label_col].to_numpy() if label_col and label_col in df.columns else None
+        names = df[name_col].to_numpy() if name_col and name_col in df.columns else None
+        wavelengths = np.asarray(spectral_cols, dtype=float) if all(_is_float(c) for c in spectral_cols) else None
+        return X, labels, names, wavelengths
+
+    if isinstance(data, Mapping):
+        if keys is None:
+            keys = list(data.keys())
+        X_list, labels, names = [], [], []
+        for key in keys:
+            item = data[key]
+            if isinstance(item, Mapping) and spectrum_field in item:
+                X_list.append(np.asarray(item[spectrum_field], dtype=float))
+                labels.append(item.get("object_nut_type", item.get("label", "all")))
+                names.append(str(key))
+            else:
+                arr = np.asarray(item)
+                if arr.ndim == 3:
+                    X_list.append(_mean_spectrum_from_cube(arr))
+                    labels.append(str(key))
+                    names.append(str(key))
+                elif arr.ndim == 1:
+                    X_list.append(arr.astype(float))
+                    labels.append(str(key))
+                    names.append(str(key))
+                else:
+                    raise ValueError(f"Mapping item {key!r} must be a cube, spectrum, or object dict.")
+        return np.vstack(X_list), np.asarray(labels), np.asarray(names), None
+
+    X = np.asarray(data, dtype=float)
+    if X.ndim == 1:
+        X = X.reshape(1, -1)
+    return X, None, None, None
+
+
+def select_objects(object_db: Mapping[str, Mapping[str, Any]], **filters):
+    """Return [(obj_id, obj), ...] matching object fields passed as keyword filters."""
+    selected = []
+    aliases = {"source_image": "source_clean_key", "nut_type": "object_nut_type"}
+    for obj_id, obj in object_db.items():
+        ok = True
+        for key, allowed in filters.items():
+            if allowed is None:
+                continue
+            field = aliases.get(key, key)
+            value = obj.get(field)
+            if isinstance(allowed, (list, tuple, set, np.ndarray)):
+                ok &= value in allowed
+            else:
+                ok &= value == allowed
+        if ok:
+            selected.append((obj_id, obj))
+    return selected
+
+
+# -----------------------------------------------------------------------------
+# Images and hyperspectral cubes
+# -----------------------------------------------------------------------------
+
+# Generic version of plot_band_slider
+def plot_hypercube_band_slider(
+    cube: np.ndarray,
+    wavelengths=None,
+    title: str = "Hyperspectral image",
+    value_name: str = "Value",
+    colorscale: str = "Viridis",
+    width: int = 700,
+    height: int = 700,
+    show: bool = True,
+):
+    """Interactive slider over spectral bands of a HSI cube, shape (H, W, B)."""
+    cube = np.asarray(cube)
     n_bands = cube.shape[2]
+    wavelengths = None if wavelengths is None else np.asarray(wavelengths)
 
     fig = go.Figure()
-
     for i in range(n_bands):
+        label = f"band {i}" if wavelengths is None else f"{wavelengths[i]:.1f} nm"
         fig.add_trace(
             go.Heatmap(
                 z=cube[:, :, i],
                 visible=(i == 0),
-                colorscale="Viridis",
-                colorbar=dict(title="Réflectance")
+                colorscale=colorscale,
+                colorbar=dict(title=value_name),
+                hovertemplate=(
+                    "row: %{y}<br>col: %{x}<br>"
+                    f"{label}<br>{value_name}: %{{z}}<extra></extra>"
+                ),
             )
         )
 
     steps = []
     for i in range(n_bands):
+        label = str(i) if wavelengths is None else f"{wavelengths[i]:.0f}"
+        title_i = f"{title} — band {i}" + ("" if wavelengths is None else f" — {wavelengths[i]:.1f} nm")
         steps.append(
             dict(
                 method="update",
-                args=[
-                    {"visible": [j == i for j in range(n_bands)]},
-                    {"title": f"{title} — bande {i}"}
-                ],
-                label=str(i)
+                args=[{"visible": [j == i for j in range(n_bands)]}, {"title": title_i}],
+                label=label,
             )
         )
-
     fig.update_layout(
-        title=f"{title} — bande 0",
-        sliders=[dict(active=0, currentvalue={"prefix": "Bande : "}, steps=steps)],
-        width=700,
-        height=700
+        title=f"{title} — band 0",
+        sliders=[dict(active=0, currentvalue={"prefix": "Band: "}, steps=steps)],
+        width=width,
+        height=height,
+        xaxis_title="column",
+        yaxis_title="row",
+        yaxis=dict(autorange="reversed", scaleanchor="x"),
     )
-
-    fig.show()
-
-def plot_mean_spectra(data, keys):
-    fig = go.Figure()
-
-    for key in keys:
-        spectrum = mean_spectrum(data[key])
-        fig.add_trace(
-            go.Scatter(
-                y=spectrum,
-                mode="lines",
-                name=key
-            )
-        )
-
-    fig.update_layout(
-        title="Spectres moyens",
-        xaxis_title="Bande spectrale",
-        yaxis_title="Réflectance moyenne"
-    )
-
-    fig.show()
-
-def plot_mean_spectra_from_excel(df, title="Spectres moyens par classe"):
-    spectral_cols = df.columns[3:]
-    wavelengths = spectral_cols.astype(float)
-
-    fig = go.Figure()
-
-    for cls in df["Class"].unique():
-        sub = df[df["Class"] == cls]
-        mean_spectrum = sub[spectral_cols].mean(axis=0)
-
-        fig.add_trace(
-            go.Scatter(
-                x=wavelengths,
-                y=mean_spectrum,
-                mode="lines",
-                name=cls
-            )
-        )
-
-    fig.update_layout(
-        title=title,
-        xaxis_title="Longueur d’onde, nm",
-        yaxis_title="Absorbance"
-    )
-
-    fig.show()
-
-def plot_spectral_distribution(cube, title="Distribution spectrale", n_pixels=2000):
-    _, _, b = cube.shape
-    pixels = cube.reshape(-1, b)
-
-    idx = np.random.choice(pixels.shape[0], size=min(n_pixels, pixels.shape[0]), replace=False)
-    sample = pixels[idx]
-
-    mean = np.nanmean(sample, axis=0)
-    std = np.nanstd(sample, axis=0)
-
-    fig = go.Figure()
-
-    fig.add_trace(go.Scatter(
-        y=mean,
-        mode="lines",
-        name="Moyenne"
-    ))
-
-    fig.add_trace(go.Scatter(
-        y=mean + std,
-        mode="lines",
-        name="+1 écart-type",
-        line=dict(dash="dash")
-    ))
-
-    fig.add_trace(go.Scatter(
-        y=mean - std,
-        mode="lines",
-        name="-1 écart-type",
-        line=dict(dash="dash")
-    ))
-
-    fig.update_layout(
-        title=title,
-        xaxis_title="Bande",
-        yaxis_title="Réflectance"
-    )
-
-    fig.show()
-
-def plot_two_classes(df, class_a="Almond", class_b="Peanut"):
-    spectral_cols = df.columns[3:]
-    wavelengths = spectral_cols.astype(float)
-
-    mean_a = df[df["Class"] == class_a][spectral_cols].mean(axis=0)
-    mean_b = df[df["Class"] == class_b][spectral_cols].mean(axis=0)
-
-    fig = go.Figure()
-
-    fig.add_trace(go.Scatter(
-        x=wavelengths,
-        y=mean_a,
-        mode="lines",
-        name=class_a
-    ))
-
-    fig.add_trace(go.Scatter(
-        x=wavelengths,
-        y=mean_b,
-        mode="lines",
-        name=class_b
-    ))
-
-    fig.update_layout(
-        title=f"{class_a} vs {class_b}",
-        xaxis_title="Longueur d’onde, nm",
-        yaxis_title="Absorbance"
-    )
-
-    fig.show()
-
-def plot_loadings(loadings, lv=["LV 1 (53.85%)"]):
-    fig = go.Figure()
-
-    if not isinstance(lv, list):
-        lv = [lv]
-
-    fig.add_trace(
-        go.Scatter(
-            x=loadings["Wavelength"],
-            y=loadings[lv[0]],
-            mode="lines+markers",
-            name=lv[0]
-        )
-    )
-
-    if len(lv) > 1:
-        for component in lv[1:]:
-            fig.add_trace(
-                go.Scatter(
-                    x=loadings["Wavelength"],
-                    y=loadings[component],
-                    mode="lines+markers",
-                    name=component
-                )
-            )
-
-    fig.update_layout(
-        title=f"Loadings",
-        xaxis_title="Longueur d’onde, nm",
-        yaxis_title="Loading"
-    )
-
-    fig.show()
+    return _show_or_return(fig, show)
 
 
-# DB OBJECT PLOTTING FUNCTIONS
-
-def _masked_array_for_plot(arr, mask_value=0):
-    """
-    Replace background values by NaN so Plotly does not display them.
-    Useful for label overlays.
-    """
-    arr = np.asarray(arr).astype(float)
-    arr[arr == mask_value] = np.nan
-    return arr
-
-
-def plot_db_image(
-    image_db,
-    image_id,
-    image_type="image_ref",
-    band=0,
-    title=None,
-    colorscale="Viridis",
-    height=700,
-    width=800,
+# Generic version of plot_db_image
+def plot_image2d(
+    z: np.ndarray,
+    title: str = "Image",
+    colorscale: str = "Viridis",
+    colorbar_title: str = "Value",
+    width: int = 800,
+    height: int = 700,
+    reverse_y: bool = True,
+    show: bool = True,
 ):
-    """
-    Plot one image stored in image_db.
-
-    Parameters
-    ----------
-    image_db : dict
-        Image-level database.
-    image_id : str
-        Key in image_db, for example "almond1" or "peanut2".
-    image_type : str
-        One of:
-        - "image_ref" : 2D reference image used for segmentation
-        - "mask"      : binary object/background mask
-        - "labels"    : labelled objects image
-        - "band"      : one spectral band from cube
-    band : int
-        Spectral band index if image_type="band".
-    """
-    img = image_db[image_id]
-
-    if image_type == "image_ref":
-        z = img["image_ref"]
-        colorbar_title = "Image ref"
-
-    elif image_type == "mask":
-        z = img["mask"].astype(int)
-        colorbar_title = "Mask"
-
-    elif image_type == "labels":
-        z = img["labels"]
-        colorbar_title = "Label"
-
-    elif image_type == "band":
-        z = img["cube"][:, :, band]
-        colorbar_title = img.get("data_mode", "value")
-
-    else:
-        raise ValueError("image_type must be 'image_ref', 'mask', 'labels' or 'band'.")
-
-    if title is None:
-        title = f"{image_id} — {image_type}"
-        if image_type == "band":
-            title += f" {band}"
-
+    """Generic 2D heatmap."""
     fig = go.Figure()
-
     fig.add_trace(
         go.Heatmap(
             z=z,
@@ -273,1951 +211,702 @@ def plot_db_image(
             hovertemplate="row: %{y}<br>col: %{x}<br>value: %{z}<extra></extra>",
         )
     )
-
     fig.update_layout(
         title=title,
         width=width,
         height=height,
         xaxis_title="column",
         yaxis_title="row",
-        yaxis=dict(autorange="reversed", scaleanchor="x"),
     )
+    if reverse_y:
+        fig.update_yaxes(autorange="reversed", scaleanchor="x")
+    return _show_or_return(fig, show)
 
-    fig.show()
-
-
-def plot_db_labels_overlay(
-    image_db,
-    image_id,
-    base="image_ref",
-    band=0,
-    alpha=0.45,
-    height=700,
-    width=800,
+# Generic version of plot_db_labels_overlay, part of plot_simca_object_map
+def plot_image_overlay(
+    background: np.ndarray,
+    overlay: np.ndarray,
+    title: str = "Image overlay",
+    background_colorscale: str = "Gray",
+    overlay_colorscale: Any = "Turbo",
+    background_title: str = "Background",
+    overlay_title: str = "Overlay",
+    overlay_mask_value=0,
+    alpha: float = 0.45,
+    width: int = 850,
+    height: int = 750,
+    overlay_colorbar: dict | None = None,
+    show: bool = True,
 ):
-    """
-    Plot image with object labels overlay.
-
-    Parameters
-    ----------
-    base : str
-        - "image_ref" : use image_ref as background
-        - "band"      : use cube[:, :, band] as background
-    """
-    img = image_db[image_id]
-
-    if base == "image_ref":
-        background = img["image_ref"]
-        base_title = "image_ref"
-    elif base == "band":
-        background = img["cube"][:, :, band]
-        base_title = f"band {band}"
-    else:
-        raise ValueError("base must be 'image_ref' or 'band'.")
-
-    labels = _masked_array_for_plot(img["labels"], mask_value=0)
+    """Generic image + semi-transparent overlay."""
+    overlay_plot = _mask_value_to_nan(overlay, mask_value=overlay_mask_value)
 
     fig = go.Figure()
-
     fig.add_trace(
         go.Heatmap(
             z=background,
-            colorscale="Gray",
+            colorscale=background_colorscale,
             showscale=True,
-            colorbar=dict(title=base_title),
+            colorbar=dict(title=background_title),
             hovertemplate="row: %{y}<br>col: %{x}<br>value: %{z}<extra></extra>",
         )
     )
-
     fig.add_trace(
         go.Heatmap(
-            z=labels,
-            colorscale="Turbo",
+            z=overlay_plot,
+            colorscale=overlay_colorscale,
             opacity=alpha,
             showscale=True,
-            colorbar=dict(title="Object label", x=1.12),
-            hovertemplate="row: %{y}<br>col: %{x}<br>label: %{z}<extra></extra>",
+            colorbar=overlay_colorbar or dict(title=overlay_title, x=1.12),
+            hovertemplate="row: %{y}<br>col: %{x}<br>overlay: %{z}<extra></extra>",
         )
     )
-
     fig.update_layout(
-        title=f"{image_id} — labels overlay — {img['n_objects']} objects",
+        title=title,
         width=width,
         height=height,
         xaxis_title="column",
         yaxis_title="row",
         yaxis=dict(autorange="reversed", scaleanchor="x"),
     )
+    return _show_or_return(fig, show)
 
-    fig.show()
+
+def plot_label_overlay_from_image_db(
+    image_db: Mapping[str, Mapping[str, Any]],
+    image_id: str,
+    base: str = "image_ref",
+    band: int = 0,
+    title: str | None = None,
+    show: bool = True,
+):
+    img = image_db[image_id]
+    if base == "band":
+        background = img["cube"][:, :, band]
+    else:
+        background = img.get(base, img.get("image_ref"))
+    return plot_image_overlay(background, img["labels"], title=title or f"Labels overlay — {image_id}", overlay_title="label", show=show)
 
 
-def plot_db_object(
-    object_db,
-    object_id,
-    show_spectrum=True,
-    spectrum_field="mean_spectrum",
-    height=500,
-    width=1000,
+
+
+# -----------------------------------------------------------------------------
+# Spectra
+# -----------------------------------------------------------------------------
+
+# Generic version of plot_mean_spectra, plot_mean_spectra_from_excel, plot_two_classes, part of plot_db_object_spectra, part of plot_spectral_distribution
+def plot_spectra(
+    data,
+    wavelengths=None,
+    labels=None,
+    names=None,
+    keys: Sequence[str] | None = None,
+    spectral_cols: Sequence[Any] | None = None,
+    label_col: str | None = None,
+    name_col: str | None = None,
+    spectrum_field: str = "mean_spectrum",
+    mode: str = "lines",
+    reducer: str = "none",
+    show_std: bool = False,
+    max_spectra: int | None = None,
+    title: str = "Spectra",
+    y_title: str = "Value",
+    width: int = 950,
+    height: int = 550,
+    show: bool = True,
 ):
     """
-    Plot one extracted object:
-    - crop reference image
-    - object mask overlay
-    - optional mean spectrum
+    Generic spectral plot.
+
+    data can be:
+    - ndarray (n_spectra, n_bands) or (n_bands,)
+    - dict of cubes/spectra/object records, optionally with keys=[...]
+    - dataframe, with spectral_cols=[...] and optional label_col/name_col
+
+    reducer: "none", "mean", or "mean_std".
     """
-    obj = object_db[object_id]
+    X, inferred_labels, inferred_names, inferred_wavelengths = _extract_spectral_matrix(
+        data, keys=keys, spectral_cols=spectral_cols, label_col=label_col, name_col=name_col, spectrum_field=spectrum_field
+    )
+    if wavelengths is None:
+        wavelengths = inferred_wavelengths
+    if labels is None:
+        labels = inferred_labels
+    if names is None:
+        names = inferred_names
 
-    if show_spectrum:
-        fig = make_subplots(
-            rows=1,
-            cols=2,
-            subplot_titles=(
-                f"{object_id} — crop",
-                f"{spectrum_field}",
-            ),
-        )
+    if max_spectra is not None and reducer == "none":
+        X = X[:max_spectra]
+        if labels is not None:
+            labels = np.asarray(labels)[:max_spectra]
+        if names is not None:
+            names = np.asarray(names)[:max_spectra]
+
+    n, p = X.shape
+    x, x_title = _x_axis(p, wavelengths)
+    labels = _as_array(labels, n, "all").astype(str)
+    names = _as_array(names, n, "").astype(str)
+
+    fig = go.Figure()
+    if reducer == "none":
+        for i in range(n):
+            trace_name = names[i] if names[i] else f"spectrum {i}"
+            if labels[i] != "all" and labels[i] not in trace_name:
+                trace_name = f"{labels[i]} | {trace_name}"
+            fig.add_trace(go.Scatter(x=x, y=X[i], mode=mode, name=trace_name))
+    elif reducer in {"mean", "mean_std"}:
+        for lab in np.unique(labels):
+            Xg = X[labels == lab]
+            mu = np.nanmean(Xg, axis=0)
+            sd = np.nanstd(Xg, axis=0)
+            fig.add_trace(go.Scatter(x=x, y=mu, mode=mode, name=str(lab)))
+            if reducer == "mean_std" or show_std:
+                fig.add_trace(go.Scatter(x=x, y=mu + sd, mode="lines", name=f"{lab} +1 std", line=dict(dash="dash"), opacity=0.35, showlegend=False))
+                fig.add_trace(go.Scatter(x=x, y=mu - sd, mode="lines", name=f"{lab} -1 std", line=dict(dash="dash"), opacity=0.35, showlegend=False))
     else:
-        fig = make_subplots(
-            rows=1,
-            cols=1,
-            subplot_titles=(f"{object_id} — crop",),
-        )
+        raise ValueError("reducer must be 'none', 'mean' or 'mean_std'.")
 
-    fig.add_trace(
-        go.Heatmap(
-            z=obj["image_ref_crop"],
-            colorscale="Gray",
-            showscale=True,
-            colorbar=dict(title="Image ref"),
-            hovertemplate="row: %{y}<br>col: %{x}<br>value: %{z}<extra></extra>",
-        ),
-        row=1,
-        col=1,
-    )
+    fig.update_layout(title=title, xaxis_title=x_title, yaxis_title=y_title, width=width, height=height)
+    return _show_or_return(fig, show)
 
-    mask_overlay = obj["mask"].astype(float)
-    mask_overlay[mask_overlay == 0] = np.nan
+# Merge both ?
+def plot_spectral_distribution(cube, title="Spectral distribution", n_pixels=2000, wavelengths=None, random_state=42, show=True):
+    rng = np.random.default_rng(random_state)
+    pixels = np.asarray(cube).reshape(-1, cube.shape[2])
+    idx = rng.choice(pixels.shape[0], size=min(n_pixels, pixels.shape[0]), replace=False)
+    return plot_spectra(pixels[idx], wavelengths=wavelengths, reducer="mean_std", title=title, y_title="Reflectance", show=show)
 
-    fig.add_trace(
-        go.Heatmap(
-            z=mask_overlay,
-            colorscale="Reds",
-            opacity=0.35,
-            showscale=False,
-            hovertemplate="row: %{y}<br>col: %{x}<br>mask: %{z}<extra></extra>",
-        ),
-        row=1,
-        col=1,
-    )
+
+def plot_object_spectra(
+    object_db: Mapping[str, Mapping[str, Any]],
+    source_image: str | None = None,
+    nut_type: str | None = None,
+    spectrum_field: str = "mean_spectrum",
+    reducer: str = "none",
+    title: str | None = None,
+    show: bool = True,
+):
+    objects = select_objects(object_db, source_image=source_image, nut_type=nut_type)
+    if not objects:
+        raise ValueError("No object found with these filters.")
+    X = np.vstack([obj[spectrum_field] for _, obj in objects])
+    labels = np.asarray([obj.get("object_nut_type", "unknown") for _, obj in objects])
+    names = np.asarray([oid for oid, _ in objects])
+    wavelengths = objects[0][1].get("wavelengths")
+    if title is None:
+        suffix = ""
+        if source_image is not None:
+            suffix += f" — source={source_image}"
+        if nut_type is not None:
+            suffix += f" — type={nut_type}"
+        title = f"Object spectra{suffix}"
+    return plot_spectra(X, wavelengths=wavelengths, labels=labels, names=names, reducer=reducer, title=title, show=show)
+
+
+# -----------------------------------------------------------------------------
+# Object database functions
+# -----------------------------------------------------------------------------
+
+def plot_object_view(
+    object_db_or_obj,
+    object_id: str | None = None,
+    spectrum_field: str = "mean_spectrum",
+    show_spectrum: bool = True,
+    show_std: bool = True,
+    height: int = 500,
+    width: int = 1000,
+    show: bool = True,
+):
+    obj = object_db_or_obj[object_id] if object_id is not None else object_db_or_obj
+    object_label = object_id or "object"
+
+    fig = make_subplots(rows=1, cols=2 if show_spectrum else 1, subplot_titles=(f"{object_label} — crop", spectrum_field) if show_spectrum else (f"{object_label} — crop",))
+    fig.add_trace(go.Heatmap(z=obj["image_ref_crop"], colorscale="Gray", showscale=True, colorbar=dict(title="Image ref")), row=1, col=1)
+    fig.add_trace(go.Heatmap(z=_mask_value_to_nan(obj["mask"], 0), colorscale="Reds", opacity=0.35, showscale=False), row=1, col=1)
+    fig.update_yaxes(autorange="reversed", scaleanchor="x", row=1, col=1)
 
     if show_spectrum:
-        wavelengths = obj.get("wavelengths", None)
-
-        if wavelengths is None:
-            x = np.arange(obj[spectrum_field].shape[0])
-            x_title = "band"
-        else:
-            x = wavelengths
-            x_title = "wavelength (nm)"
-
-        fig.add_trace(
-            go.Scatter(
-                x=x,
-                y=obj[spectrum_field],
-                mode="lines",
-                name=spectrum_field,
-                hovertemplate=f"{x_title}: %{{x}}<br>value: %{{y}}<extra></extra>",
-            ),
-            row=1,
-            col=2,
-        )
-
-        if "std_spectrum" in obj and spectrum_field == "mean_spectrum":
-            mean = obj["mean_spectrum"]
-            std = obj["std_spectrum"]
-
-            fig.add_trace(
-                go.Scatter(
-                    x=x,
-                    y=mean + std,
-                    mode="lines",
-                    name="+1 std",
-                    line=dict(dash="dash"),
-                    opacity=0.5,
-                ),
-                row=1,
-                col=2,
-            )
-
-            fig.add_trace(
-                go.Scatter(
-                    x=x,
-                    y=mean - std,
-                    mode="lines",
-                    name="-1 std",
-                    line=dict(dash="dash"),
-                    opacity=0.5,
-                ),
-                row=1,
-                col=2,
-            )
-
+        spectrum = np.asarray(obj[spectrum_field])
+        x, x_title = _x_axis(spectrum.shape[0], obj.get("wavelengths"))
+        fig.add_trace(go.Scatter(x=x, y=spectrum, mode="lines", name=spectrum_field), row=1, col=2)
+        if show_std and spectrum_field == "mean_spectrum" and "std_spectrum" in obj:
+            std = np.asarray(obj["std_spectrum"])
+            fig.add_trace(go.Scatter(x=x, y=spectrum + std, mode="lines", name="+1 std", line=dict(dash="dash"), opacity=0.5), row=1, col=2)
+            fig.add_trace(go.Scatter(x=x, y=spectrum - std, mode="lines", name="-1 std", line=dict(dash="dash"), opacity=0.5), row=1, col=2)
         fig.update_xaxes(title_text=x_title, row=1, col=2)
         fig.update_yaxes(title_text=obj.get("data_mode", "value"), row=1, col=2)
 
-    fig.update_yaxes(autorange="reversed", scaleanchor="x", row=1, col=1)
-
     fig.update_layout(
-        title=(
-            f"{object_id} | "
-            f"type={obj.get('object_nut_type')} | "
-            f"source={obj.get('source_clean_key')} | "
-            f"area={obj.get('area_pixels')}"
-        ),
-        height=height,
-        width=width,
+        title=f"{object_label} | type={obj.get('object_nut_type')} | source={obj.get('source_clean_key')} | area={obj.get('area_pixels')}",
+        height=height, width=width,
     )
+    return _show_or_return(fig, show)
 
-    fig.show()
-
-
-def plot_db_object_grid(
-    object_db,
-    source_image,
-    max_objects=40,
-    n_cols=5,
-    height_per_row=220,
-    width=1100,
+# Generic version of plot_db_object_grid
+def plot_object_grid(
+    objects_or_db,
+    source_image: str | None = None,
+    nut_type: str | None = None,
+    title: str = "Object grid",
+    max_objects: int = 40,
+    n_cols: int = 5,
+    height_per_row: int = 220,
+    width: int = 1100,
+    show: bool = True,
 ):
-    """
-    Plot crops of all objects extracted from one source image.
-    """
-    selected = [
-        (obj_id, obj)
-        for obj_id, obj in object_db.items()
-        if obj.get("source_clean_key") == source_image
-    ]
+    if isinstance(objects_or_db, Mapping):
+        objects = select_objects(objects_or_db, source_image=source_image, nut_type=nut_type)
+    else:
+        objects = list(objects_or_db)
+    selected = objects[:max_objects]
+    if not selected:
+        raise ValueError("No object to plot.")
 
-    selected = selected[:max_objects]
-
-    if len(selected) == 0:
-        print(f"No object found for source_image={source_image}")
-        return
-
-    n_objects = len(selected)
-    n_rows = int(np.ceil(n_objects / n_cols))
-
-    fig = make_subplots(
-        rows=n_rows,
-        cols=n_cols,
-        subplot_titles=[
-            f"{obj_id}<br>area={obj['area_pixels']}"
-            for obj_id, obj in selected
-        ],
-    )
-
-    for idx, (obj_id, obj) in enumerate(selected):
+    n_rows = int(np.ceil(len(selected) / n_cols))
+    fig = make_subplots(rows=n_rows, cols=n_cols, subplot_titles=[f"{oid}<br>area={obj.get('area_pixels')}" for oid, obj in selected])
+    for idx, (_, obj) in enumerate(selected):
         row = idx // n_cols + 1
         col = idx % n_cols + 1
-
-        fig.add_trace(
-            go.Heatmap(
-                z=obj["image_ref_crop"],
-                colorscale="Gray",
-                showscale=False,
-                hovertemplate="row: %{y}<br>col: %{x}<br>value: %{z}<extra></extra>",
-            ),
-            row=row,
-            col=col,
-        )
-
-        mask_overlay = obj["mask"].astype(float)
-        mask_overlay[mask_overlay == 0] = np.nan
-
-        fig.add_trace(
-            go.Heatmap(
-                z=mask_overlay,
-                colorscale="Reds",
-                opacity=0.35,
-                showscale=False,
-                hovertemplate="row: %{y}<br>col: %{x}<br>mask<extra></extra>",
-            ),
-            row=row,
-            col=col,
-        )
-
+        fig.add_trace(go.Heatmap(z=obj["image_ref_crop"], colorscale="Gray", showscale=False), row=row, col=col)
+        fig.add_trace(go.Heatmap(z=_mask_value_to_nan(obj["mask"], 0), colorscale="Reds", opacity=0.35, showscale=False), row=row, col=col)
         fig.update_yaxes(autorange="reversed", row=row, col=col)
-
-    fig.update_layout(
-        title=f"Objects extracted from {source_image} — {n_objects} objects",
-        height=height_per_row * n_rows,
-        width=width,
-    )
-
-    fig.show()
+    fig.update_layout(title=title, height=height_per_row * n_rows, width=width)
+    return _show_or_return(fig, show)
 
 
-def plot_db_object_spectra(
-    object_db,
-    source_image=None,
-    nut_type=None,
-    spectrum_field="mean_spectrum",
-    show_std=False,
-    max_objects=100,
-    title=None,
-):
-    """
-    Plot spectra of extracted objects.
-
-    You can filter by:
-    - source_image, for example "almond1"
-    - nut_type, for example "almond" or "peanut"
-    """
-    selected = []
-
-    for obj_id, obj in object_db.items():
-        if source_image is not None and obj.get("source_clean_key") != source_image:
-            continue
-
-        if nut_type is not None and obj.get("object_nut_type") != nut_type:
-            continue
-
-        selected.append((obj_id, obj))
-
-    selected = selected[:max_objects]
-
-    if len(selected) == 0:
-        print("No objects found with these filters.")
-        return
-
-    fig = go.Figure()
-
-    for obj_id, obj in selected:
-        wavelengths = obj.get("wavelengths", None)
-
-        if wavelengths is None:
-            x = np.arange(obj[spectrum_field].shape[0])
-            x_title = "band"
-        else:
-            x = wavelengths
-            x_title = "wavelength (nm)"
-
-        fig.add_trace(
-            go.Scatter(
-                x=x,
-                y=obj[spectrum_field],
-                mode="lines",
-                name=obj_id,
-                hovertemplate=(
-                    f"object: {obj_id}<br>"
-                    f"{x_title}: %{{x}}<br>"
-                    "value: %{y}<extra></extra>"
-                ),
-            )
-        )
-
-        if show_std and spectrum_field == "mean_spectrum":
-            mean = obj["mean_spectrum"]
-            std = obj["std_spectrum"]
-
-            fig.add_trace(
-                go.Scatter(
-                    x=x,
-                    y=mean + std,
-                    mode="lines",
-                    name=f"{obj_id} + std",
-                    line=dict(dash="dash"),
-                    opacity=0.25,
-                    showlegend=False,
-                )
-            )
-
-            fig.add_trace(
-                go.Scatter(
-                    x=x,
-                    y=mean - std,
-                    mode="lines",
-                    name=f"{obj_id} - std",
-                    line=dict(dash="dash"),
-                    opacity=0.25,
-                    showlegend=False,
-                )
-            )
-
-    if title is None:
-        title = "Object spectra"
-        if source_image is not None:
-            title += f" — {source_image}"
-        if nut_type is not None:
-            title += f" — {nut_type}"
-
-    fig.update_layout(
-        title=title,
-        xaxis_title=x_title,
-        yaxis_title=selected[0][1].get("data_mode", "value"),
-        height=550,
-        width=950,
-    )
-
-    fig.show()
-
-
-def plot_db_object_areas(object_db, source_image=None, nut_type=None):
-    """
-    Plot histogram of object areas.
-    Useful to diagnose min_area and segmentation quality.
-    """
-    areas = []
-    labels = []
-
-    for obj_id, obj in object_db.items():
-        if source_image is not None and obj.get("source_clean_key") != source_image:
-            continue
-
-        if nut_type is not None and obj.get("object_nut_type") != nut_type:
-            continue
-
-        areas.append(obj["area_pixels"])
-        labels.append(obj_id)
-
-    if len(areas) == 0:
-        print("No objects found with these filters.")
-        return
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Bar(
-            x=labels,
-            y=areas,
-            hovertemplate="object: %{x}<br>area: %{y}<extra></extra>",
-        )
-    )
-
-    title = "Object areas"
+def plot_object_areas(object_db, source_image=None, nut_type=None, show=True):
+    objects = select_objects(object_db, source_image=source_image, nut_type=nut_type)
+    if not objects:
+        raise ValueError("No object found with these filters.")
+    labels = [oid for oid, _ in objects]
+    areas = [obj["area_pixels"] for _, obj in objects]
+    suffix = ""
     if source_image is not None:
-        title += f" — {source_image}"
+        suffix += f" — {source_image}"
     if nut_type is not None:
-        title += f" — {nut_type}"
+        suffix += f" — {nut_type}"
+    return plot_bar_values(labels, areas, title=f"Object areas{suffix}", x_title="object_id", y_title="area_pixels", show=show)
 
-    fig.update_layout(
-        title=title,
-        xaxis_title="object_id",
-        yaxis_title="area_pixels",
-        height=500,
-        width=1000,
-    )
 
-    fig.show()
 
-    
-# PCA PLOTTING FUNCTIONS
 
-def plot_pca_explained_variance(
-    pca_res,
-    n_components_to_show=None,
-    title="PCA explained variance",
+# -----------------------------------------------------------------------------
+# PCA / score-space functions
+# -----------------------------------------------------------------------------
+
+def _pca_scores_from_args(scores=None, pca_res=None):
+    if scores is not None:
+        return np.asarray(scores, dtype=float)
+    if pca_res is not None:
+        return np.asarray(pca_res["scores"], dtype=float)
+    raise ValueError("Provide scores or pca_res.")
+
+
+def _pca_loadings_from_args(loadings=None, pca_res=None):
+    if loadings is not None:
+        return np.asarray(loadings, dtype=float)
+    if pca_res is not None:
+        return np.asarray(pca_res["loadings"], dtype=float)
+    raise ValueError("Provide loadings or pca_res.")
+
+# Previously plot_pca_explained_variance
+def plot_explained_variance(
+    explained_variance_ratio,
+    cumulative_explained_variance_ratio=None,
+    n_components_to_show: int | None = None,
+    title: str = "Explained variance",
+    width: int = 850,
+    height: int = 500,
+    show: bool = True,
 ):
-    """
-    Plot explained variance ratio and cumulative explained variance.
-
-    Parameters
-    ----------
-    pca_res : dict
-        Output of pca_from_cov or pca_sklearn.
-        Must contain:
-        - explained_variance_ratio
-        - cumulative_explained_variance_ratio
-    n_components_to_show : int or None
-        Number of PCs to show. If None, show all.
-    """
-    evr = np.asarray(pca_res["explained_variance_ratio"])
-    cum = np.asarray(pca_res["cumulative_explained_variance_ratio"])
-
+    evr = np.asarray(explained_variance_ratio, dtype=float)
+    cum = np.cumsum(evr) if cumulative_explained_variance_ratio is None else np.asarray(cumulative_explained_variance_ratio, dtype=float)
     if n_components_to_show is not None:
         evr = evr[:n_components_to_show]
         cum = cum[:n_components_to_show]
-
     pcs = np.arange(1, len(evr) + 1)
 
     fig = go.Figure()
-
-    fig.add_trace(
-        go.Bar(
-            x=pcs,
-            y=evr,
-            name="Explained variance",
-            hovertemplate="PC%{x}<br>variance: %{y:.4f}<extra></extra>",
-        )
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            x=pcs,
-            y=cum,
-            mode="lines+markers",
-            name="Cumulative variance",
-            hovertemplate="PC%{x}<br>cumulative: %{y:.4f}<extra></extra>",
-        )
-    )
-
-    fig.update_layout(
-        title=title,
-        xaxis_title="Principal component",
-        yaxis_title="Variance ratio",
-        width=850,
-        height=500,
-    )
-
-    fig.show()
+    fig.add_trace(go.Bar(x=pcs, y=evr, name="Explained variance", hovertemplate="PC%{x}<br>variance: %{y:.4f}<extra></extra>"))
+    fig.add_trace(go.Scatter(x=pcs, y=cum, mode="lines+markers", name="Cumulative variance", hovertemplate="PC%{x}<br>cumulative: %{y:.4f}<extra></extra>"))
+    fig.update_layout(title=title, xaxis_title="Component", yaxis_title="Variance ratio", width=width, height=height)
+    return _show_or_return(fig, show)
 
 
-def plot_pca_scores_2d(
-    pca_res,
+# Merged version of plot_pca_scores_2d, plot_pca_scores_3d
+def plot_scores(
+    scores=None,
+    pca_res=None,
+    dims: Sequence[int] | None = None,
+    pcx: int = 1,
+    pcy: int = 2,
+    pcz: int | None = None,
     labels=None,
+    color_values=None,
+    color_by: str = "label",
     object_ids=None,
     source_images=None,
     batches=None,
     areas=None,
-    pcx=1,
-    pcy=2,
-    color_by="label",
-    title=None,
+    title: str | None = None,
+    width: int = 850,
+    height: int = 650,
+    show: bool = True,
+    **metadata,
 ):
-    """
-    Plot PCA scores PCx vs PCy.
+    T = _pca_scores_from_args(scores, pca_res)
+    if dims is None:
+        dims = (pcx, pcy) if pcz is None else (pcx, pcy, pcz)
+    dims = tuple(dims)
+    idx = [d - 1 for d in dims]
+    n = T.shape[0]
 
-    Parameters
-    ----------
-    pca_res : dict
-        PCA result dict with key "scores".
-    labels : array-like or None
-        Class labels, for example y.
-    object_ids : array-like or None
-        Object IDs.
-    source_images : array-like or None
-        Source image names.
-    batches : array-like or None
-        Batch numbers.
-    areas : array-like or None
-        Object areas.
-    color_by : str
-        "label", "source_image", "batch", or "none".
-    """
-    T = np.asarray(pca_res["scores"])
-
-    ix = pcx - 1
-    iy = pcy - 1
-
-    if title is None:
-        title = f"PCA scores: PC{pcx} vs PC{pcy}"
-
-    if color_by == "label" and labels is not None:
-        color_values = np.asarray(labels)
-        color_name = "label"
-    elif color_by == "source_image" and source_images is not None:
-        color_values = np.asarray(source_images)
-        color_name = "source image"
-    elif color_by == "batch" and batches is not None:
-        color_values = np.asarray(batches).astype(str)
-        color_name = "batch"
-    else:
-        color_values = np.array(["all"] * T.shape[0])
-        color_name = "all"
-
-    custom_cols = []
-
-    if object_ids is not None:
-        custom_cols.append(np.asarray(object_ids).astype(str))
-    else:
-        custom_cols.append(np.array([""] * T.shape[0]))
-
-    if labels is not None:
-        custom_cols.append(np.asarray(labels).astype(str))
-    else:
-        custom_cols.append(np.array([""] * T.shape[0]))
-
-    if source_images is not None:
-        custom_cols.append(np.asarray(source_images).astype(str))
-    else:
-        custom_cols.append(np.array([""] * T.shape[0]))
-
-    if batches is not None:
-        custom_cols.append(np.asarray(batches).astype(str))
-    else:
-        custom_cols.append(np.array([""] * T.shape[0]))
-
-    if areas is not None:
-        custom_cols.append(np.asarray(areas).astype(str))
-    else:
-        custom_cols.append(np.array([""] * T.shape[0]))
-
-    customdata = np.stack(custom_cols, axis=1)
+    if color_values is None:
+        if color_by == "source_image":
+            color_values = source_images
+        elif color_by == "batch":
+            color_values = batches
+        else:
+            color_values = labels
+    groups = _as_array(color_values, n, "all").astype(str)
+    meta = dict(object_id=object_ids, label=labels, source_image=source_images, batch=batches, area=areas)
+    meta.update(metadata)
+    custom, hover_meta = _customdata(n, **meta)
 
     fig = go.Figure()
-
-    for value in np.unique(color_values):
-        mask = color_values == value
-
-        fig.add_trace(
-            go.Scatter(
-                x=T[mask, ix],
-                y=T[mask, iy],
-                mode="markers",
-                name=f"{color_name}: {value}",
-                customdata=customdata[mask],
+    if len(dims) == 2:
+        if title is None:
+            title = f"Scores: C{dims[0]} vs C{dims[1]}"
+        for group in np.unique(groups):
+            mask = groups == group
+            fig.add_trace(go.Scatter(
+                x=T[mask, idx[0]], y=T[mask, idx[1]], mode="markers", name=str(group), customdata=custom[mask],
                 marker=dict(size=9, opacity=0.8),
-                hovertemplate=(
-                    f"PC{pcx}: %{{x:.4f}}<br>"
-                    f"PC{pcy}: %{{y:.4f}}<br>"
-                    "object_id: %{customdata[0]}<br>"
-                    "label: %{customdata[1]}<br>"
-                    "source: %{customdata[2]}<br>"
-                    "batch: %{customdata[3]}<br>"
-                    "area: %{customdata[4]}"
-                    "<extra></extra>"
-                ),
-            )
-        )
-
-    fig.update_layout(
-        title=title,
-        xaxis_title=f"PC{pcx}",
-        yaxis_title=f"PC{pcy}",
-        width=850,
-        height=650,
-    )
-
-    fig.show()
+                hovertemplate=f"C{dims[0]}: %{{x:.4f}}<br>C{dims[1]}: %{{y:.4f}}<br>" + hover_meta + "<extra></extra>",
+            ))
+        fig.update_layout(title=title, xaxis_title=f"C{dims[0]}", yaxis_title=f"C{dims[1]}", width=width, height=height)
+    elif len(dims) == 3:
+        if title is None:
+            title = f"Scores: C{dims[0]} vs C{dims[1]} vs C{dims[2]}"
+        for group in np.unique(groups):
+            mask = groups == group
+            fig.add_trace(go.Scatter3d(
+                x=T[mask, idx[0]], y=T[mask, idx[1]], z=T[mask, idx[2]], mode="markers", name=str(group), customdata=custom[mask],
+                marker=dict(size=5, opacity=0.85),
+                hovertemplate=f"C{dims[0]}: %{{x:.4f}}<br>C{dims[1]}: %{{y:.4f}}<br>C{dims[2]}: %{{z:.4f}}<br>" + hover_meta + "<extra></extra>",
+            ))
+        fig.update_layout(title=title, width=width, height=height, scene=dict(xaxis_title=f"C{dims[0]}", yaxis_title=f"C{dims[1]}", zaxis_title=f"C{dims[2]}"))
+    else:
+        raise ValueError("dims must contain 2 or 3 components.")
+    return _show_or_return(fig, show)
 
 
-def plot_pca_scores_3d(
-    pca_res,
+# Generic version of plot_pca_loadings, and old plot_loadings
+def plot_loadings(
+    loadings: np.ndarray,
+    pca_res=None,
+    wavelengths=None,
+    components: Sequence[int] = (1, 2, 3),
+    component_names: Sequence[str] | None = None,
+    title: str = "Loadings",
+    width: int = 900,
+    height: int = 500,
+    show: bool = True,
+):
+    if component_names is None and pca_res is not None and not isinstance(pca_res, Mapping):
+        maybe_names = list(pca_res) if isinstance(pca_res, (list, tuple, np.ndarray)) else None
+        if maybe_names and all(isinstance(v, str) for v in maybe_names):
+            component_names = maybe_names
+            pca_res = None
+            components = tuple(range(1, len(component_names) + 1))
+    P = _pca_loadings_from_args(loadings, pca_res)
+    x, x_title = _x_axis(P.shape[0], wavelengths)
+    fig = go.Figure()
+    for k, comp in enumerate(components):
+        j = comp - 1
+        name = component_names[k] if component_names is not None and k < len(component_names) else f"{component_prefix}{comp}"
+        fig.add_trace(go.Scatter(x=x, y=P[:, j], mode="lines+markers", name=name))
+    fig.update_layout(title=title, xaxis_title=x_title, yaxis_title="Loading", width=width, height=height)
+    return _show_or_return(fig, show)
+
+# Generic version of plot_pca_biplot_2D
+def plot_biplot(
+    scores: np.ndarray=None,
+    pca_res=None,
+    loadings: np.ndarray=None,
+    dims: Sequence[int] = (1, 2),
     labels=None,
+    color_by: str = "label",
+    color_values=None,
     object_ids=None,
     source_images=None,
-    pcx=1,
-    pcy=2,
-    pcz=3,
-    color_by="label",
-    title=None,
-):
-    """
-    3D PCA scores plot.
-    """
-    T = np.asarray(pca_res["scores"])
-
-    ix = pcx - 1
-    iy = pcy - 1
-    iz = pcz - 1
-
-    if title is None:
-        title = f"PCA scores: PC{pcx} vs PC{pcy} vs PC{pcz}"
-
-    if color_by == "label" and labels is not None:
-        color_values = np.asarray(labels)
-        color_name = "label"
-    elif color_by == "source_image" and source_images is not None:
-        color_values = np.asarray(source_images)
-        color_name = "source image"
-    else:
-        color_values = np.array(["all"] * T.shape[0])
-        color_name = "all"
-
-    if object_ids is None:
-        object_ids = np.array([""] * T.shape[0])
-    if labels is None:
-        labels = np.array([""] * T.shape[0])
-    if source_images is None:
-        source_images = np.array([""] * T.shape[0])
-
-    customdata = np.stack(
-        [
-            np.asarray(object_ids).astype(str),
-            np.asarray(labels).astype(str),
-            np.asarray(source_images).astype(str),
-        ],
-        axis=1,
-    )
-
-    fig = go.Figure()
-
-    for value in np.unique(color_values):
-        mask = color_values == value
-
-        fig.add_trace(
-            go.Scatter3d(
-                x=T[mask, ix],
-                y=T[mask, iy],
-                z=T[mask, iz],
-                mode="markers",
-                name=f"{color_name}: {value}",
-                customdata=customdata[mask],
-                marker=dict(size=5, opacity=0.85),
-                hovertemplate=(
-                    f"PC{pcx}: %{{x:.4f}}<br>"
-                    f"PC{pcy}: %{{y:.4f}}<br>"
-                    f"PC{pcz}: %{{z:.4f}}<br>"
-                    "object_id: %{customdata[0]}<br>"
-                    "label: %{customdata[1]}<br>"
-                    "source: %{customdata[2]}"
-                    "<extra></extra>"
-                ),
-            )
-        )
-
-    fig.update_layout(
-        title=title,
-        width=900,
-        height=700,
-        scene=dict(
-            xaxis_title=f"PC{pcx}",
-            yaxis_title=f"PC{pcy}",
-            zaxis_title=f"PC{pcz}",
-        ),
-    )
-
-    fig.show()
-
-
-def plot_pca_loadings(
-    pca_res,
     wavelengths=None,
-    components=(1, 2, 3),
-    title="PCA loadings",
+    n_loadings: int = 10,
+    loading_scale: float = 1.0,
+    title: str | None = None,
+    show: bool = True,
+    **metadata,
 ):
-    """
-    Plot PCA loadings as a function of wavelength or band index.
-
-    Parameters
-    ----------
-    pca_res : dict
-        PCA result dict with key "loadings".
-    wavelengths : array-like or None
-        Wavelength axis. If None, use band index.
-    components : tuple
-        Components to plot, e.g. (1, 2, 3).
-    """
-    P = np.asarray(pca_res["loadings"])
-
-    if wavelengths is None:
-        x = np.arange(P.shape[0])
-        x_title = "Band index"
-    else:
-        x = np.asarray(wavelengths)
-        x_title = "Wavelength (nm)"
-
-    fig = go.Figure()
-
-    for comp in components:
-        idx = comp - 1
-
-        fig.add_trace(
-            go.Scatter(
-                x=x,
-                y=P[:, idx],
-                mode="lines+markers",
-                name=f"PC{comp}",
-                hovertemplate=(
-                    f"{x_title}: %{{x}}<br>"
-                    f"loading PC{comp}: %{{y:.5f}}"
-                    "<extra></extra>"
-                ),
-            )
-        )
-
-    fig.update_layout(
-        title=title,
-        xaxis_title=x_title,
-        yaxis_title="Loading",
-        width=900,
-        height=500,
+    T = _pca_scores_from_args(scores, pca_res)
+    P = _pca_loadings_from_args(loadings, pca_res)
+    if len(dims) != 2:
+        raise ValueError("Biplot is implemented only in 2D.")
+    fig = plot_scores(
+        T,
+        dims=dims, 
+        labels=labels, 
+        color_values=color_values, 
+        color_by=color_by, 
+        object_ids=object_ids, 
+        source_images=source_images, 
+        title=title or f"Biplot: C{dims[0]} vs C{dims[1]}", 
+        show=False, 
+        **metadata
     )
-
-    fig.show()
-
-
-def plot_pca_biplot_2d(
-    pca_res,
-    labels=None,
-    object_ids=None,
-    wavelengths=None,
-    pcx=1,
-    pcy=2,
-    n_loadings=10,
-    loading_scale=1.0,
-    title=None,
-):
-    """
-    Simplified PCA biplot:
-    - scores as points
-    - strongest loading vectors as arrows
-    """
-    T = np.asarray(pca_res["scores"])
-    P = np.asarray(pca_res["loadings"])
-
-    ix = pcx - 1
-    iy = pcy - 1
-
-    if title is None:
-        title = f"PCA biplot: PC{pcx} vs PC{pcy}"
-
-    fig = go.Figure()
-
-    if labels is None:
-        labels = np.array(["all"] * T.shape[0])
-    else:
-        labels = np.asarray(labels)
-
-    if object_ids is None:
-        object_ids = np.array([""] * T.shape[0])
-    else:
-        object_ids = np.asarray(object_ids).astype(str)
-
-    for cls in np.unique(labels):
-        mask = labels == cls
-        fig.add_trace(
-            go.Scatter(
-                x=T[mask, ix],
-                y=T[mask, iy],
-                mode="markers",
-                name=str(cls),
-                customdata=object_ids[mask],
-                marker=dict(size=8, opacity=0.75),
-                hovertemplate=(
-                    f"PC{pcx}: %{{x:.4f}}<br>"
-                    f"PC{pcy}: %{{y:.4f}}<br>"
-                    "object: %{customdata}"
-                    "<extra></extra>"
-                ),
-            )
-        )
-
-    loading_strength = np.sqrt(P[:, ix] ** 2 + P[:, iy] ** 2)
-    top_idx = np.argsort(loading_strength)[-n_loadings:]
-
-    score_range = max(
-        np.nanmax(np.abs(T[:, ix])),
-        np.nanmax(np.abs(T[:, iy])),
-    )
-
+    ix, iy = dims[0] - 1, dims[1] - 1
+    strength = np.sqrt(P[:, ix] ** 2 + P[:, iy] ** 2)
+    top_idx = np.argsort(strength)[-n_loadings:]
+    score_range = max(np.nanmax(np.abs(T[:, ix])), np.nanmax(np.abs(T[:, iy])))
     for j in top_idx:
         x_end = P[j, ix] * score_range * loading_scale
         y_end = P[j, iy] * score_range * loading_scale
-
-        if wavelengths is None:
-            label = f"band {j}"
-        else:
-            label = f"{wavelengths[j]:.1f} nm"
-
-        fig.add_annotation(
-            x=x_end,
-            y=y_end,
-            ax=0,
-            ay=0,
-            xref="x",
-            yref="y",
-            axref="x",
-            ayref="y",
-            showarrow=True,
-            arrowhead=3,
-            arrowsize=1,
-            arrowwidth=1,
-            text=label,
-        )
-
-    fig.update_layout(
-        title=title,
-        xaxis_title=f"PC{pcx}",
-        yaxis_title=f"PC{pcy}",
-        width=850,
-        height=700,
-    )
-
-    fig.show()
+        label = f"band {j}" if wavelengths is None else f"{np.asarray(wavelengths)[j]:.1f} nm"
+        fig.add_annotation(x=x_end, y=y_end, ax=0, ay=0, xref="x", yref="y", axref="x", ayref="y", showarrow=True, arrowhead=3, text=label)
+    return _show_or_return(fig, show)
 
 
-def plot_pca_hotelling_t2(
-    pca_res,
-    object_ids=None,
-    labels=None,
-    source_images=None,
-    n_components=None,
-    title="PCA Hotelling T²",
-):
-    """
-    Plot Hotelling T² for each observation.
-    """
-    t2 = hotelling_t2(pca_res, n_components=n_components)
+# -----------------------------------------------------------------------------
+# Diagnostic / metric functions
+# -----------------------------------------------------------------------------
 
-    n = len(t2)
+# Generic version of plot_pca_hotelling_t2, plot_pca_q_residuals, plot_simca_rule_statistic
+def plot_metric_by_index(values, labels=None, title="Metric by observation", y_title="Metric", hline=None, object_ids=None, source_images=None, width=900, height=500, show=True, **metadata):
+    values = np.asarray(values, dtype=float)
+    n = len(values)
+    labels = _as_array(labels, n, "all").astype(str)
+    meta = dict(object_id=object_ids, source_image=source_images)
+    meta.update(metadata)
+    custom, hover_meta = _customdata(n, **meta)
     x = np.arange(n)
-
-    if object_ids is None:
-        object_ids = np.array([str(i) for i in x])
-    if labels is None:
-        labels = np.array([""] * n)
-    if source_images is None:
-        source_images = np.array([""] * n)
-
-    customdata = np.stack(
-        [
-            np.asarray(object_ids).astype(str),
-            np.asarray(labels).astype(str),
-            np.asarray(source_images).astype(str),
-        ],
-        axis=1,
-    )
-
     fig = go.Figure()
-
-    fig.add_trace(
-        go.Scatter(
-            x=x,
-            y=t2,
-            mode="markers",
-            customdata=customdata,
-            marker=dict(size=8),
-            hovertemplate=(
-                "index: %{x}<br>"
-                "T²: %{y:.4f}<br>"
-                "object: %{customdata[0]}<br>"
-                "label: %{customdata[1]}<br>"
-                "source: %{customdata[2]}"
-                "<extra></extra>"
-            ),
-        )
-    )
-
-    fig.update_layout(
-        title=title,
-        xaxis_title="Observation index",
-        yaxis_title="Hotelling T²",
-        width=900,
-        height=500,
-    )
-
-    fig.show()
+    for lab in np.unique(labels):
+        mask = labels == lab
+        fig.add_trace(go.Scatter(x=x[mask], y=values[mask], mode="markers", name=str(lab), customdata=custom[mask], marker=dict(size=8, opacity=0.8), hovertemplate="index: %{x}<br>value: %{y:.4f}<br>" + hover_meta + "<extra></extra>"))
+    if hline is not None:
+        fig.add_hline(y=hline, line_dash="dash")
+    fig.update_layout(title=title, xaxis_title="Observation index", yaxis_title=y_title, width=width, height=height)
+    return _show_or_return(fig, show)
 
 
-def plot_pca_q_residuals(
-    X_centered,
-    pca_res,
-    object_ids=None,
+# Generic version of plot_pca_q_vs_t2, plot_simca_distance_plot
+# Add option for log ?
+def plot_xy_diagnostic(
+    x,
+    y,
     labels=None,
-    source_images=None,
-    n_components=None,
-    title="PCA Q residuals",
-):
-    """
-    Plot Q residuals for each observation.
-    """
-    Q, _ = q_residuals(
-        X_centered,
-        pca_res,
-        n_components=n_components,
-    )
-
-    n = len(Q)
-    x = np.arange(n)
-
-    if object_ids is None:
-        object_ids = np.array([str(i) for i in x])
-    if labels is None:
-        labels = np.array([""] * n)
-    if source_images is None:
-        source_images = np.array([""] * n)
-
-    customdata = np.stack(
-        [
-            np.asarray(object_ids).astype(str),
-            np.asarray(labels).astype(str),
-            np.asarray(source_images).astype(str),
-        ],
-        axis=1,
-    )
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Scatter(
-            x=x,
-            y=Q,
-            mode="markers",
-            customdata=customdata,
-            marker=dict(size=8),
-            hovertemplate=(
-                "index: %{x}<br>"
-                "Q: %{y:.4f}<br>"
-                "object: %{customdata[0]}<br>"
-                "label: %{customdata[1]}<br>"
-                "source: %{customdata[2]}"
-                "<extra></extra>"
-            ),
-        )
-    )
-
-    fig.update_layout(
-        title=title,
-        xaxis_title="Observation index",
-        yaxis_title="Q residual",
-        width=900,
-        height=500,
-    )
-
-    fig.show()
-
-
-def plot_pca_q_vs_t2(
-    X_centered,
-    pca_res,
-    object_ids=None,
-    labels=None,
-    source_images=None,
-    n_components=None,
-    title="PCA diagnostic plot: Q residuals vs Hotelling T²",
-):
-    """
-    Plot Q residuals against Hotelling T².
-    Useful for detecting outliers.
-    """
-    Q, _ = q_residuals(
-        X_centered,
-        pca_res,
-        n_components=n_components,
-    )
-
-    T2 = hotelling_t2(
-        pca_res,
-        n_components=n_components,
-    )
-
-    n = len(Q)
-
-    if object_ids is None:
-        object_ids = np.array([str(i) for i in range(n)])
-    if labels is None:
-        labels = np.array(["all"] * n)
-    if source_images is None:
-        source_images = np.array([""] * n)
-
-    labels = np.asarray(labels)
-    customdata = np.stack(
-        [
-            np.asarray(object_ids).astype(str),
-            np.asarray(labels).astype(str),
-            np.asarray(source_images).astype(str),
-        ],
-        axis=1,
-    )
-
-    fig = go.Figure()
-
-    for cls in np.unique(labels):
-        mask = labels == cls
-
-        fig.add_trace(
-            go.Scatter(
-                x=T2[mask],
-                y=Q[mask],
-                mode="markers",
-                name=str(cls),
-                customdata=customdata[mask],
-                marker=dict(size=9, opacity=0.8),
-                hovertemplate=(
-                    "T²: %{x:.4f}<br>"
-                    "Q: %{y:.4f}<br>"
-                    "object: %{customdata[0]}<br>"
-                    "label: %{customdata[1]}<br>"
-                    "source: %{customdata[2]}"
-                    "<extra></extra>"
-                ),
-            )
-        )
-
-    fig.update_layout(
-        title=title,
-        xaxis_title="Hotelling T²",
-        yaxis_title="Q residual",
-        width=800,
-        height=650,
-    )
-
-    fig.show()
-
-
-
-# SIMCA PLOTTING FUNCTIONS
-
-def plot_simca_distance_plot(
-    simca_results,
-    class_name,
-    labels=None,
+    title: str = "Diagnostic plot",
+    x_title: str = "x",
+    y_title: str = "y",
+    vline: float | None = None,
+    hline: float | None = None,
+    line_traces: Sequence[go.Scatter] | None = None,
     object_ids=None,
     source_images=None,
-    normalized=True,
-    title=None,
-    width=850,
-    height=650,
+    width: int = 850,
+    height: int = 650,
+    show: bool = True,
+    **metadata,
 ):
-    """
-    Plot SIMCA H/Q distance plot for one target class.
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    n = len(x)
+    labels = _as_array(labels, n, "all").astype(str)
+    meta = dict(object_id=object_ids, source_image=source_images)
+    meta.update(metadata)
+    custom, hover_meta = _customdata(n, **meta)
+    fig = go.Figure()
+    for lab in np.unique(labels):
+        mask = labels == lab
+        fig.add_trace(go.Scatter(x=x[mask], y=y[mask], mode="markers", name=str(lab), customdata=custom[mask], marker=dict(size=9, opacity=0.8), hovertemplate=f"{x_title}: %{{x:.4f}}<br>{y_title}: %{{y:.4f}}<br>" + hover_meta + "<extra></extra>"))
+    if line_traces:
+        for tr in line_traces:
+            fig.add_trace(tr)
+    if vline is not None:
+        fig.add_vline(x=vline, line_dash="dash")
+    if hline is not None:
+        fig.add_hline(y=hline, line_dash="dash")
+    fig.update_layout(title=title, xaxis_title=x_title, yaxis_title=y_title, width=width, height=height)
+    return _show_or_return(fig, show)
 
-    If normalized=True:
-        x = H / H_limit
-        y = Q / Q_limit
 
-    For Simple SIMCA, accepted objects are in the lower-left square:
-        H/H_limit < 1 and Q/Q_limit < 1.
-    """
+# Wrappers
+def plot_pca_metric_t2(pca_res, labels=None, object_ids=None, source_images=None, n_components=None, title="Hotelling T²", show=True):
+    return plot_metric_by_index(hotelling_t2(pca_res, n_components), labels=labels, object_ids=object_ids, source_images=source_images, title=title, y_title="Hotelling T²", show=show)
+
+def plot_pca_metric_q(X_centered, pca_res, labels=None, object_ids=None, source_images=None, n_components=None, title="Q residuals", show=True):
+    Q, _ = q_residuals(X_centered, pca_res, n_components)
+    return plot_metric_by_index(Q, labels=labels, object_ids=object_ids, source_images=source_images, title=title, y_title="Q residual", show=show)
+
+def plot_pca_diagnostic(X_centered, pca_res, labels=None, object_ids=None, source_images=None, n_components=None, title="PCA diagnostic: Q residuals vs Hotelling T²", show=True):
+    Q, _ = q_residuals(X_centered, pca_res, n_components)
+    T2 = hotelling_t2(pca_res, n_components)
+    return plot_xy_diagnostic(T2, Q, labels=labels, object_ids=object_ids, source_images=source_images, title=title, x_title="Hotelling T²", y_title="Q residual", show=show)
+
+
+# -----------------------------------------------------------------------------
+# Generic bars, counts and line summaries
+# -----------------------------------------------------------------------------
+
+# New Generic function
+def plot_bar_values(
+    x,
+    y,
+    title: str = "Bar plot",
+    x_title: str = "x",
+    y_title: str = "y",
+    width: int = 1000,
+    height: int = 500,
+    show: bool = True,
+):
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=x, y=y, hovertemplate="%{x}<br>%{y}<extra></extra>"))
+    fig.update_layout(title=title, xaxis_title=x_title, yaxis_title=y_title, width=width, height=height)
+    return _show_or_return(fig, show)
+
+
+# New Generic function
+def plot_counts_by_group(
+    df: pd.DataFrame,
+    group_col: str,
+    category_col: str,
+    title: str = "Counts",
+    width: int = 850,
+    height: int = 500,
+    show: bool = True,
+):
+    counts = df.groupby([group_col, category_col]).size().reset_index(name="count")
+    fig = go.Figure()
+    for group in counts[group_col].unique():
+        sub = counts[counts[group_col] == group]
+        fig.add_trace(go.Bar(x=sub[category_col], y=sub["count"], name=str(group), hovertemplate=f"{group_col}: %{{fullData.name}}<br>{category_col}: %{{x}}<br>count: %{{y}}<extra></extra>"))
+    fig.update_layout(title=title, xaxis_title=category_col, yaxis_title="Count", barmode="group", width=width, height=height)
+    return _show_or_return(fig, show)
+
+
+# New Generic function
+def plot_lines_from_dataframe(
+    df: pd.DataFrame,
+    x_col: str,
+    y_cols: Sequence[str],
+    names: Sequence[str] | None = None,
+    title: str = "Metrics",
+    x_title: str | None = None,
+    y_title: str = "Value",
+    hlines: Sequence[tuple[float, str, str]] | None = None,
+    percent_y: bool = False,
+    width: int = 900,
+    height: int = 550,
+    show: bool = True,
+):
+    fig = go.Figure()
+    if names is None:
+        names = y_cols
+    for col, name in zip(y_cols, names):
+        if col in df.columns:
+            fig.add_trace(go.Scatter(x=df[x_col], y=df[col], mode="markers+lines", name=name))
+    if hlines:
+        for y, dash, text in hlines:
+            fig.add_hline(y=y, line_dash=dash, annotation_text=text, annotation_position="top left")
+    fig.update_layout(title=title, xaxis_title=x_title or x_col, yaxis_title=y_title, width=width, height=height)
+    if percent_y:
+        fig.update_yaxes(tickformat=".0%")
+    return _show_or_return(fig, show)
+
+
+# -----------------------------------------------------------------------------
+# SIMCA specific helpers built on generic plots
+# -----------------------------------------------------------------------------
+
+def plot_object_decision_map(
+    image_db,
+    object_db,
+    results_df: pd.DataFrame,
+    image_id: str,
+    decision_col: str = "simca_case",
+    object_id_col: str = "object_id",
+    source_col: str = "source_image",
+    decision_to_code: Mapping[str, int] | None = None,
+    code_to_name: Mapping[int, str] | None = None,
+    title: str | None = None,
+    width: int = 850,
+    height: int = 750,
+    show: bool = True,
+):
+    img = image_db[image_id]
+    labels_img = img["labels"]
+    if decision_to_code is None:
+        decision_to_code = {"unknown": 1, "almond_only": 2, "peanut_only": 3, "ambiguous": 4}
+    if code_to_name is None:
+        code_to_name = {0: "background", 1: "unknown", 2: "almond_only", 3: "peanut_only", 4: "ambiguous"}
+
+    decision_map = np.zeros_like(labels_img, dtype=float)
+    sub = results_df[results_df[source_col] == image_id]
+    for _, row in sub.iterrows():
+        obj_id = row[object_id_col]
+        if obj_id not in object_db:
+            continue
+        label_id = object_db[obj_id]["label_id"]
+        decision_map[labels_img == label_id] = decision_to_code.get(row[decision_col], 1)
+
+    tickvals = sorted([c for c in code_to_name if c != 0])
+    colorbar = dict(title="decision", tickvals=tickvals, ticktext=[code_to_name[c] for c in tickvals], x=1.12)
+    colorscale = [[0.00, "lightgray"], [0.25, "royalblue"], [0.50, "crimson"], [0.75, "orange"], [1.00, "purple"]]
+    return plot_image_overlay(
+        img["image_ref"], decision_map, title=title or f"Object decisions — {image_id}",
+        background_title="image_ref", overlay_title="decision", overlay_colorscale=colorscale,
+        overlay_colorbar=colorbar, alpha=0.55, width=width, height=height, show=show,
+    )
+
+
+def plot_distribution_with_curve(values, curve_x=None, curve_y=None, nbins=30, title="Distribution", x_title="Value", curve_name="theoretical", width=850, height=500, show=True):
+    fig = go.Figure()
+    fig.add_trace(go.Histogram(x=np.asarray(values), histnorm="probability density", nbinsx=nbins, name="empirical", opacity=0.65))
+    if curve_x is not None and curve_y is not None:
+        fig.add_trace(go.Scatter(x=curve_x, y=curve_y, mode="lines", name=curve_name))
+    fig.update_layout(title=title, xaxis_title=x_title, yaxis_title="Density", width=width, height=height)
+    return _show_or_return(fig, show)
+
+# Wrappers
+def plot_decision_counts(results_df, true_label_col="true_label", decision_col="simca_case", title="SIMCA prediction counts", show=True):
+    return plot_counts_by_group(results_df, group_col=true_label_col, category_col=decision_col, title=title, show=show)
+
+
+def plot_simca_distance(simca_results, class_name, labels=None, object_ids=None, source_images=None, normalized=True, title=None, width=850, height=650, show=True):
     res = simca_results[class_name]
-
     if normalized:
         x = np.asarray(res["H_norm_limit"])
         y = np.asarray(res["Q_norm_limit"])
-        x_title = "H / H_limit"
-        y_title = "Q / Q_limit"
-        vline = 1.0
-        hline = 1.0
+        x_title, y_title = "H / H_limit", "Q / Q_limit"
+        vline, hline = 1.0, 1.0
     else:
         x = np.asarray(res["H"])
         y = np.asarray(res["Q"])
-        x_title = "H"
-        y_title = "Q"
-        vline = res["H_limit"]
-        hline = res["Q_limit"]
-
-    n = len(x)
-
-    if labels is None:
-        labels = np.array(["all"] * n)
-    else:
-        labels = np.asarray(labels)
-
-    if object_ids is None:
-        object_ids = np.array([""] * n)
-    else:
-        object_ids = np.asarray(object_ids)
-
-    if source_images is None:
-        source_images = np.array([""] * n)
-    else:
-        source_images = np.asarray(source_images)
-
-    accepted = np.asarray(res["accepted"]).astype(str)
-
-    customdata = np.stack(
-        [
-            object_ids.astype(str),
-            labels.astype(str),
-            source_images.astype(str),
-            accepted,
-            np.asarray(res["rule_statistic"]).astype(str),
-        ],
-        axis=1,
+        x_title, y_title = "H", "Q"
+        vline, hline = res["H_limit"], res["Q_limit"]
+    accepted = np.asarray(res.get("accepted", [""] * len(x))).astype(str)
+    rule_stat = np.asarray(res.get("rule_statistic", [""] * len(x))).astype(str)
+    return plot_xy_diagnostic(
+        x, y, labels=labels, object_ids=object_ids, source_images=source_images,
+        accepted=accepted, rule_statistic=rule_stat,
+        title=title or f"SIMCA distance — class={class_name}", x_title=x_title, y_title=y_title,
+        vline=vline, hline=hline, width=width, height=height, show=show,
     )
 
-    fig = go.Figure()
 
-    for lab in np.unique(labels):
-        mask = labels == lab
-
-        fig.add_trace(
-            go.Scatter(
-                x=x[mask],
-                y=y[mask],
-                mode="markers",
-                name=str(lab),
-                customdata=customdata[mask],
-                marker=dict(size=9, opacity=0.8),
-                hovertemplate=(
-                    f"{x_title}: %{{x:.4f}}<br>"
-                    f"{y_title}: %{{y:.4f}}<br>"
-                    "object: %{customdata[0]}<br>"
-                    "true label: %{customdata[1]}<br>"
-                    "source: %{customdata[2]}<br>"
-                    "accepted: %{customdata[3]}<br>"
-                    "rule statistic: %{customdata[4]}"
-                    "<extra></extra>"
-                ),
-            )
-        )
-
-    fig.add_vline(x=vline, line_dash="dash")
-    fig.add_hline(y=hline, line_dash="dash")
-
-    if title is None:
-        title = f"SIMCA distance plot — target class: {class_name}"
-
-    fig.update_layout(
-        title=title,
-        xaxis_title=x_title,
-        yaxis_title=y_title,
-        width=width,
-        height=height,
-    )
-
-    fig.show()
-
-
-def plot_simca_prediction_counts(
-    results_df,
-    true_label_col="true_label",
-    decision_col="simca_case",
-    title="SIMCA prediction counts",
-    width=850,
-    height=500,
-):
-    """
-    Barplot of SIMCA decision cases by true label.
-
-    Expected decision cases:
-    - almond_only
-    - peanut_only
-    - ambiguous
-    - unknown
-    """
-    import pandas as pd
-
-    counts = (
-        results_df
-        .groupby([true_label_col, decision_col])
-        .size()
-        .reset_index(name="count")
-    )
-
-    fig = go.Figure()
-
-    for label in counts[true_label_col].unique():
-        sub = counts[counts[true_label_col] == label]
-
-        fig.add_trace(
-            go.Bar(
-                x=sub[decision_col],
-                y=sub["count"],
-                name=str(label),
-                hovertemplate=(
-                    "true label: %{fullData.name}<br>"
-                    "decision: %{x}<br>"
-                    "count: %{y}"
-                    "<extra></extra>"
-                ),
-            )
-        )
-
-    fig.update_layout(
-        title=title,
-        xaxis_title="SIMCA decision",
-        yaxis_title="Count",
-        barmode="group",
-        width=width,
-        height=height,
-    )
-
-    fig.show()
-
-
-def plot_simca_rule_statistic(
-    simca_results,
-    class_name,
-    labels=None,
-    object_ids=None,
-    source_images=None,
-    title=None,
-    width=900,
-    height=500,
-):
-    """
-    Plot the rule statistic for one target class.
-
-    For:
-    - AltSIMCA: statistic = H/Hlim + Q/Qlim
-    - CombinedIndex: statistic = C
-    - DataDriven: statistic = D
-    """
+def plot_simca_rule_metric(simca_results, class_name, labels=None, object_ids=None, source_images=None, title=None, show=True):
     res = simca_results[class_name]
-
-    stat = np.asarray(res["rule_statistic"])
-    limit = res["rule_limit"]
-
-    n = len(stat)
-    x = np.arange(n)
-
-    if labels is None:
-        labels = np.array(["all"] * n)
-    else:
-        labels = np.asarray(labels)
-
-    if object_ids is None:
-        object_ids = np.array([""] * n)
-    else:
-        object_ids = np.asarray(object_ids)
-
-    if source_images is None:
-        source_images = np.array([""] * n)
-    else:
-        source_images = np.asarray(source_images)
-
-    accepted = np.asarray(res["accepted"]).astype(str)
-
-    customdata = np.stack(
-        [
-            object_ids.astype(str),
-            labels.astype(str),
-            source_images.astype(str),
-            accepted,
-        ],
-        axis=1,
+    return plot_metric_by_index(
+        res["rule_statistic"], labels=labels, object_ids=object_ids, source_images=source_images,
+        hline=res.get("rule_limit"), title=title or f"SIMCA rule statistic — class={class_name}", y_title="Rule statistic", show=show,
     )
 
-    fig = go.Figure()
-
-    for lab in np.unique(labels):
-        mask = labels == lab
-
-        fig.add_trace(
-            go.Scatter(
-                x=x[mask],
-                y=stat[mask],
-                mode="markers",
-                name=str(lab),
-                customdata=customdata[mask],
-                marker=dict(size=8, opacity=0.8),
-                hovertemplate=(
-                    "index: %{x}<br>"
-                    "statistic: %{y:.4f}<br>"
-                    "object: %{customdata[0]}<br>"
-                    "true label: %{customdata[1]}<br>"
-                    "source: %{customdata[2]}<br>"
-                    "accepted: %{customdata[3]}"
-                    "<extra></extra>"
-                ),
-            )
-        )
-
-    fig.add_hline(y=limit, line_dash="dash")
-
-    if title is None:
-        title = (
-            f"SIMCA rule statistic — class={class_name} — "
-            f"rule={res['rule_name']}"
-        )
-
-    fig.update_layout(
-        title=title,
-        xaxis_title="Observation index",
-        yaxis_title="Rule statistic",
-        width=width,
-        height=height,
-    )
-
-    fig.show()
-
-
-def plot_simca_object_map(
-    image_db,
-    object_db,
-    results_df,
-    image_id,
-    decision_col="simca_case",
-    object_id_col="object_id",
-    title=None,
-    width=850,
-    height=750,
-):
-    """
-    Overlay object-level SIMCA decisions on the image labels.
-
-    This function colors each object label according to its SIMCA decision.
-
-    decision_col values expected:
-    - almond_only
-    - peanut_only
-    - ambiguous
-    - unknown
-    """
-    img = image_db[image_id]
-    labels_img = img["labels"]
-
-    decision_to_code = {
-        "unknown": 1,
-        "almond_only": 2,
-        "peanut_only": 3,
-        "ambiguous": 4,
-    }
-
-    code_to_name = {
-        0: "background",
-        1: "unknown",
-        2: "almond_only",
-        3: "peanut_only",
-        4: "ambiguous",
-    }
-
-    decision_map = np.zeros_like(labels_img, dtype=float)
-
-    sub = results_df[results_df["source_image"] == image_id]
-
-    for _, row in sub.iterrows():
-        obj_id = row[object_id_col]
-        decision = row[decision_col]
-
-        if obj_id not in object_db:
-            continue
-
-        label_id = object_db[obj_id]["label_id"]
-        code = decision_to_code.get(decision, 1)
-
-        decision_map[labels_img == label_id] = code
-
-    decision_map_masked = decision_map.astype(float)
-    decision_map_masked[decision_map_masked == 0] = np.nan
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Heatmap(
-            z=img["image_ref"],
-            colorscale="Gray",
-            showscale=True,
-            colorbar=dict(title="image_ref"),
-            hovertemplate="row: %{y}<br>col: %{x}<br>value: %{z}<extra></extra>",
-        )
-    )
-
-    fig.add_trace(
-        go.Heatmap(
-            z=decision_map_masked,
-            colorscale=[
-                [0.00, "lightgray"],
-                [0.25, "royalblue"],
-                [0.50, "crimson"],
-                [0.75, "orange"],
-                [1.00, "purple"],
-            ],
-            opacity=0.55,
-            showscale=True,
-            colorbar=dict(
-                title="decision",
-                tickvals=[1, 2, 3, 4],
-                ticktext=[
-                    code_to_name[1],
-                    code_to_name[2],
-                    code_to_name[3],
-                    code_to_name[4],
-                ],
-                x=1.12,
-            ),
-            hovertemplate="row: %{y}<br>col: %{x}<br>decision code: %{z}<extra></extra>",
-        )
-    )
-
-    if title is None:
-        title = f"SIMCA object decisions — {image_id}"
-
-    fig.update_layout(
-        title=title,
-        width=width,
-        height=height,
-        xaxis_title="column",
-        yaxis_title="row",
-        yaxis=dict(autorange="reversed", scaleanchor="x"),
-    )
-
-    fig.show()
-
-
-
-
-
-def plot_simca_distance_log_plot(
-    simca_model,
-    simca_results,
-    class_name,
-    labels=None,
-    object_ids=None,
-    source_images=None,
-    title=None,
-    width=850,
-    height=650,
-):
-    """
-    SIMCA distance-distance plot in the paper style:
-
-        x = ln(1 + H/H0)
-        y = ln(1 + Q/Q0)
-
-    This corresponds to the style used in Fig. 8 of the SIMCA paper.
-
-    Parameters
-    ----------
-    simca_model : SIMCAClassifier
-        Fitted SIMCA classifier.
-    simca_results : dict
-        Output of simca.predict(...)[2].
-    class_name : str
-        Target class model to visualize, e.g. "peanut" or "almond".
-    """
-    model = simca_model.models_[class_name]
-    res = simca_results[class_name]
-
-    H = np.asarray(res["H"], dtype=float)
-    Q = np.asarray(res["Q"], dtype=float)
-
-    x = np.log1p(H / model.H0_)
-    y = np.log1p(Q / model.Q0_)
-
-    n = len(H)
-
-    if labels is None:
-        labels = np.array(["all"] * n)
-    else:
-        labels = np.asarray(labels)
-
-    if object_ids is None:
-        object_ids = np.array([""] * n)
-    else:
-        object_ids = np.asarray(object_ids)
-
-    if source_images is None:
-        source_images = np.array([""] * n)
-    else:
-        source_images = np.asarray(source_images)
-
-    accepted = np.asarray(res["accepted"]).astype(str)
-
-    customdata = np.stack(
-        [
-            object_ids.astype(str),
-            labels.astype(str),
-            source_images.astype(str),
-            accepted,
-            H.astype(str),
-            Q.astype(str),
-        ],
-        axis=1,
-    )
-
-    fig = go.Figure()
-
-    for lab in np.unique(labels):
-        mask = labels == lab
-
-        fig.add_trace(
-            go.Scatter(
-                x=x[mask],
-                y=y[mask],
-                mode="markers",
-                name=str(lab),
-                customdata=customdata[mask],
-                marker=dict(size=9, opacity=0.80),
-                hovertemplate=(
-                    "ln(1+H/H0): %{x:.4f}<br>"
-                    "ln(1+Q/Q0): %{y:.4f}<br>"
-                    "object: %{customdata[0]}<br>"
-                    "true label: %{customdata[1]}<br>"
-                    "source: %{customdata[2]}<br>"
-                    "accepted: %{customdata[3]}<br>"
-                    "H: %{customdata[4]}<br>"
-                    "Q: %{customdata[5]}"
-                    "<extra></extra>"
-                ),
-            )
-        )
-
-    # Add decision boundary if possible
-    rule_name = res["rule_name"]
-    rule_limit = res["rule_limit"]
-
-    h_rel_grid = np.linspace(0, max(3, np.nanmax(H / model.H0_) * 1.05), 400)
-
-    if rule_name == "data_driven":
-        # D = NH * H/H0 + NQ * Q/Q0 < limit
-        q_rel_boundary = (rule_limit - model.NH_ * h_rel_grid) / model.NQ_
-        mask = q_rel_boundary >= 0
-
-        fig.add_trace(
-            go.Scatter(
-                x=np.log1p(h_rel_grid[mask]),
-                y=np.log1p(q_rel_boundary[mask]),
-                mode="lines",
-                name="decision boundary",
-                line=dict(dash="dash"),
-            )
-        )
-
-    elif rule_name in ["alternative", "combined_index"]:
-        # H/Hlim + Q/Qlim < limit
-        H_lim = res["H_limit"]
-        Q_lim = res["Q_limit"]
-
-        H_grid = h_rel_grid * model.H0_
-        q_boundary = Q_lim * (rule_limit - H_grid / H_lim)
-        q_rel_boundary = q_boundary / model.Q0_
-
-        mask = q_rel_boundary >= 0
-
-        fig.add_trace(
-            go.Scatter(
-                x=np.log1p(h_rel_grid[mask]),
-                y=np.log1p(q_rel_boundary[mask]),
-                mode="lines",
-                name="decision boundary",
-                line=dict(dash="dash"),
-            )
-        )
-
-    elif rule_name == "simple":
-        # Simple SIMCA has a rectangular boundary
-        H_lim = res["H_limit"]
-        Q_lim = res["Q_limit"]
-
-        fig.add_vline(
-            x=np.log1p(H_lim / model.H0_),
-            line_dash="dash",
-        )
-        fig.add_hline(
-            y=np.log1p(Q_lim / model.Q0_),
-            line_dash="dash",
-        )
-
-    if title is None:
-        title = (
-            f"SIMCA log distance plot — class={class_name} — "
-            f"rule={rule_name}"
-        )
-
-    fig.update_layout(
-        title=title,
-        xaxis_title="ln(1 + H/H0)",
-        yaxis_title="ln(1 + Q/Q0)",
-        width=width,
-        height=height,
-    )
-
-    fig.show()
-
-
-def plot_simca_distance_distribution_fit(
-    simca_model,
-    class_name,
-    distance="H",
-    nbins=30,
-    title=None,
-    width=850,
-    height=500,
-):
-    """
-    Histogram of H/H0 or Q/Q0 with scaled chi-square density.
-
-    This corresponds to the spirit of Fig. 2 in the SIMCA paper.
-
-    If:
-        N * H/H0 ~ chi2(N)
-    then the density of R = H/H0 is:
-        f_R(r) = N * chi2.pdf(N*r, N)
-    """
-    model = simca_model.models_[class_name]
-
-    if distance.upper() == "H":
-        values = model.H_train_ / model.H0_
-        N = model.NH_
-        x_title = "H / H0"
-        dist_name = "score distance"
-    elif distance.upper() == "Q":
-        values = model.Q_train_ / model.Q0_
-        N = model.NQ_
-        x_title = "Q / Q0"
-        dist_name = "orthogonal distance"
-    else:
-        raise ValueError("distance must be 'H' or 'Q'.")
-
-    values = np.asarray(values, dtype=float)
-
-    x_grid = np.linspace(0, max(values.max() * 1.15, 0.1), 500)
-    pdf_grid = N * chi2.pdf(N * x_grid, N)
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Histogram(
-            x=values,
-            histnorm="probability density",
-            nbinsx=nbins,
-            name="empirical",
-            opacity=0.65,
-        )
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            x=x_grid,
-            y=pdf_grid,
-            mode="lines",
-            name=f"scaled chi-square, DoF={N:.2f}",
-        )
-    )
-
-    if title is None:
-        title = f"{dist_name} distribution fit — class={class_name}"
-
-    fig.update_layout(
-        title=title,
-        xaxis_title=x_title,
-        yaxis_title="Density",
-        width=width,
-        height=height,
-    )
-
-    fig.show()
-
-
-def plot_simca_sensitivity_by_rule(
-    simca_summary_df,
-    sensitivity_col="peanut_sensitivity",
-    expected=0.95,
-    tolerance=0.02,
-    title=None,
-    width=850,
-    height=500,
-):
-    """
-    Plot sensitivity by SIMCA rule.
-
-    Similar in spirit to Fig. 3B in the SIMCA paper.
-    """
-    df = simca_summary_df.copy()
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Scatter(
-            x=df["rule"],
-            y=df[sensitivity_col],
-            mode="markers+text",
-            text=[f"{100*v:.1f}%" for v in df[sensitivity_col]],
-            textposition="top center",
-            marker=dict(size=12),
-            name=sensitivity_col,
-        )
-    )
-
-    fig.add_hline(
-        y=expected,
-        line_dash="solid",
-        annotation_text=f"expected = {100*expected:.1f}%",
-        annotation_position="top left",
-    )
-
-    fig.add_hline(
-        y=expected - tolerance,
-        line_dash="dash",
-        annotation_text=f"-{100*tolerance:.1f}%",
-        annotation_position="bottom left",
-    )
-
-    fig.add_hline(
-        y=expected + tolerance,
-        line_dash="dash",
-        annotation_text=f"+{100*tolerance:.1f}%",
-        annotation_position="top left",
-    )
-
-    if title is None:
-        title = f"Sensitivity by SIMCA rule — {sensitivity_col}"
-
-    fig.update_layout(
-        title=title,
-        xaxis_title="SIMCA rule",
-        yaxis_title="Sensitivity",
-        yaxis_tickformat=".0%",
-        width=width,
-        height=height,
-    )
-
-    fig.show()
-
-
-def plot_simca_extreme_plot(
-    model,
-    X_target,
-    rule_name="data_driven",
-    alphas=None,
-    title=None,
-    width=700,
-    height=650,
-):
-    """
-    Extreme plot: observed extremes vs expected extremes.
-
-    This corresponds to Fig. 4 in the SIMCA paper.
-
-    Parameters
-    ----------
-    model : SIMCAClassModel
-        Fitted target class model, e.g. simca.models_["peanut"].
-    X_target : ndarray, shape (N, B)
-        Target-class samples to evaluate.
-        For training extreme plot, use training target samples.
-        For projection/test extreme plot, use projected target samples.
-    rule_name : str
-        "simple", "alternative", "combined_index", or "data_driven".
-    alphas : array-like
-        Significance values to scan.
-    """
-    if alphas is None:
-        alphas = np.linspace(0.005, 0.25, 60)
-
-    X_target = np.asarray(X_target, dtype=float)
-    H, Q, _, _ = model.compute_distances(X_target)
-
-    n = len(H)
-
-    expected = []
-    observed = []
-
-    for alpha in alphas:
-        accepted, _, _ = _simca_accept_for_rule_alpha(
-            H=H,
-            Q=Q,
-            model=model,
-            rule_name=rule_name,
-            alpha=alpha,
-        )
-
-        n_exp = alpha * n
-        n_obs = np.sum(~accepted)
-
-        expected.append(n_exp)
-        observed.append(n_obs)
-
-    expected = np.asarray(expected)
-    observed = np.asarray(observed)
-
-    # Tolerance corridor as in the paper:
-    # n ± 2 sqrt(n(1-n/I)), with n=Iexp
-    lower = expected - 2.0 * np.sqrt(expected * (1.0 - expected / n))
-    upper = expected + 2.0 * np.sqrt(expected * (1.0 - expected / n))
-    lower = np.maximum(lower, 0)
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Scatter(
-            x=np.concatenate([expected, expected[::-1]]),
-            y=np.concatenate([upper, lower[::-1]]),
-            fill="toself",
-            mode="lines",
-            name="95% tolerance corridor",
-            line=dict(width=0),
-            opacity=0.25,
-        )
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            x=expected,
-            y=expected,
-            mode="lines",
-            name="ideal diagonal",
-            line=dict(dash="dash"),
-        )
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            x=expected,
-            y=observed,
-            mode="markers+lines",
-            name=f"{rule_name}",
-            marker=dict(size=7),
-        )
-    )
-
-    if title is None:
-        title = f"Extreme plot — class={model.class_name} — rule={rule_name}"
-
-    fig.update_layout(
-        title=title,
-        xaxis_title="Expected extremes",
-        yaxis_title="Observed extremes",
-        width=width,
-        height=height,
-    )
-
-    fig.show()
-
-
-def plot_simca_complexity_metrics(
-    complexity_df,
-    target_class="peanut",
-    title=None,
-    width=900,
-    height=550,
-):
-    """
-    Plot SIMCA performance metrics versus number of PCs.
-
-    Similar in spirit to Fig. 7 in the SIMCA paper.
-
-    Expected columns:
-    - A
-    - peanut_sensitivity
-    - peanut_specificity_vs_almond
-    - almond_sensitivity
-    - almond_specificity_vs_peanut
-    - ambiguous_rate
-    - unknown_rate
-    """
-    df = complexity_df.copy()
-
-    fig = go.Figure()
-
-    if target_class == "peanut":
-        sns_col = "peanut_sensitivity"
-        spc_col = "peanut_specificity_vs_almond"
-    elif target_class == "almond":
-        sns_col = "almond_sensitivity"
-        spc_col = "almond_specificity_vs_peanut"
-    else:
-        raise ValueError("target_class must be 'peanut' or 'almond'.")
-
-    curves = [
-        (sns_col, "Sensitivity"),
-        (spc_col, "Specificity"),
-        ("ambiguous_rate", "Ambiguous rate"),
-        ("unknown_rate", "Unknown rate"),
-    ]
-
-    for col, name in curves:
-        if col in df.columns:
-            fig.add_trace(
-                go.Scatter(
-                    x=df["A"],
-                    y=df[col],
-                    mode="markers+lines",
-                    name=name,
-                )
-            )
-
-    fig.add_hline(
-        y=0.95,
-        line_dash="dash",
-        annotation_text="expected 95%",
-        annotation_position="top left",
-    )
-
-    if title is None:
-        title = f"SIMCA complexity plot — target={target_class}"
-
-    fig.update_layout(
-        title=title,
-        xaxis_title="Number of PCs A",
-        yaxis_title="Metric",
-        yaxis_tickformat=".0%",
-        width=width,
-        height=height,
-    )
-
-    fig.show()
