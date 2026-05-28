@@ -45,13 +45,20 @@ def pca_from_cov(X, n_components=None):
     P = eigvecs[:, :n_components]
     # Scores
     T = X @ P
+    # eigenvalues such that lambda_a = sum_i t_ia^2
+    eigvals_scores = np.sum((X @ eigvecs)**2, axis=0)  #formula from paper, check if /(N-1) needed
     # Explained variance
-    explained_variance = eigvals / np.sum(eigvals)
+    total = np.sum(eigvals)
+    if total <= 0:
+        explained_variance = np.zeros_like(eigvals)
+    else:
+        explained_variance = eigvals / total
     cumulative = np.cumsum(explained_variance)
     return {
         "covariance": S,
         "eigenvalues": eigvals,
         "eigenvectors": eigvecs,
+        "eigenvalues_score": eigvals_scores,
         "loadings": P,
         "scores": T,
         "explained_variance_ratio": explained_variance,

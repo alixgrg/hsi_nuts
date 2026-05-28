@@ -3,6 +3,7 @@ import numpy as np
 from plotly.subplots import make_subplots
 
 from src.stats import mean_spectrum, hotelling_t2, q_residuals
+from src.simca import simca_limits_from_alpha
 
 # RAW DATA PLOTTING FUNCTIONS
 def plot_bands_slider(cube, title="Image hyperspectrale"):
@@ -1341,6 +1342,882 @@ def plot_pca_q_vs_t2(
         yaxis_title="Q residual",
         width=800,
         height=650,
+    )
+
+    fig.show()
+
+
+
+# SIMCA PLOTTING FUNCTIONS
+
+def plot_simca_distance_plot(
+    simca_results,
+    class_name,
+    labels=None,
+    object_ids=None,
+    source_images=None,
+    normalized=True,
+    title=None,
+    width=850,
+    height=650,
+):
+    """
+    Plot SIMCA H/Q distance plot for one target class.
+
+    If normalized=True:
+        x = H / H_limit
+        y = Q / Q_limit
+
+    For Simple SIMCA, accepted objects are in the lower-left square:
+        H/H_limit < 1 and Q/Q_limit < 1.
+    """
+    res = simca_results[class_name]
+
+    if normalized:
+        x = np.asarray(res["H_norm_limit"])
+        y = np.asarray(res["Q_norm_limit"])
+        x_title = "H / H_limit"
+        y_title = "Q / Q_limit"
+        vline = 1.0
+        hline = 1.0
+    else:
+        x = np.asarray(res["H"])
+        y = np.asarray(res["Q"])
+        x_title = "H"
+        y_title = "Q"
+        vline = res["H_limit"]
+        hline = res["Q_limit"]
+
+    n = len(x)
+
+    if labels is None:
+        labels = np.array(["all"] * n)
+    else:
+        labels = np.asarray(labels)
+
+    if object_ids is None:
+        object_ids = np.array([""] * n)
+    else:
+        object_ids = np.asarray(object_ids)
+
+    if source_images is None:
+        source_images = np.array([""] * n)
+    else:
+        source_images = np.asarray(source_images)
+
+    accepted = np.asarray(res["accepted"]).astype(str)
+
+    customdata = np.stack(
+        [
+            object_ids.astype(str),
+            labels.astype(str),
+            source_images.astype(str),
+            accepted,
+            np.asarray(res["rule_statistic"]).astype(str),
+        ],
+        axis=1,
+    )
+
+    fig = go.Figure()
+
+    for lab in np.unique(labels):
+        mask = labels == lab
+
+        fig.add_trace(
+            go.Scatter(
+                x=x[mask],
+                y=y[mask],
+                mode="markers",
+                name=str(lab),
+                customdata=customdata[mask],
+                marker=dict(size=9, opacity=0.8),
+                hovertemplate=(
+                    f"{x_title}: %{{x:.4f}}<br>"
+                    f"{y_title}: %{{y:.4f}}<br>"
+                    "object: %{customdata[0]}<br>"
+                    "true label: %{customdata[1]}<br>"
+                    "source: %{customdata[2]}<br>"
+                    "accepted: %{customdata[3]}<br>"
+                    "rule statistic: %{customdata[4]}"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    fig.add_vline(x=vline, line_dash="dash")
+    fig.add_hline(y=hline, line_dash="dash")
+
+    if title is None:
+        title = f"SIMCA distance plot — target class: {class_name}"
+
+    fig.update_layout(
+        title=title,
+        xaxis_title=x_title,
+        yaxis_title=y_title,
+        width=width,
+        height=height,
+    )
+
+    fig.show()
+
+
+def plot_simca_prediction_counts(
+    results_df,
+    true_label_col="true_label",
+    decision_col="simca_case",
+    title="SIMCA prediction counts",
+    width=850,
+    height=500,
+):
+    """
+    Barplot of SIMCA decision cases by true label.
+
+    Expected decision cases:
+    - almond_only
+    - peanut_only
+    - ambiguous
+    - unknown
+    """
+    import pandas as pd
+
+    counts = (
+        results_df
+        .groupby([true_label_col, decision_col])
+        .size()
+        .reset_index(name="count")
+    )
+
+    fig = go.Figure()
+
+    for label in counts[true_label_col].unique():
+        sub = counts[counts[true_label_col] == label]
+
+        fig.add_trace(
+            go.Bar(
+                x=sub[decision_col],
+                y=sub["count"],
+                name=str(label),
+                hovertemplate=(
+                    "true label: %{fullData.name}<br>"
+                    "decision: %{x}<br>"
+                    "count: %{y}"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="SIMCA decision",
+        yaxis_title="Count",
+        barmode="group",
+        width=width,
+        height=height,
+    )
+
+    fig.show()
+
+
+def plot_simca_rule_statistic(
+    simca_results,
+    class_name,
+    labels=None,
+    object_ids=None,
+    source_images=None,
+    title=None,
+    width=900,
+    height=500,
+):
+    """
+    Plot the rule statistic for one target class.
+
+    For:
+    - AltSIMCA: statistic = H/Hlim + Q/Qlim
+    - CombinedIndex: statistic = C
+    - DataDriven: statistic = D
+    """
+    res = simca_results[class_name]
+
+    stat = np.asarray(res["rule_statistic"])
+    limit = res["rule_limit"]
+
+    n = len(stat)
+    x = np.arange(n)
+
+    if labels is None:
+        labels = np.array(["all"] * n)
+    else:
+        labels = np.asarray(labels)
+
+    if object_ids is None:
+        object_ids = np.array([""] * n)
+    else:
+        object_ids = np.asarray(object_ids)
+
+    if source_images is None:
+        source_images = np.array([""] * n)
+    else:
+        source_images = np.asarray(source_images)
+
+    accepted = np.asarray(res["accepted"]).astype(str)
+
+    customdata = np.stack(
+        [
+            object_ids.astype(str),
+            labels.astype(str),
+            source_images.astype(str),
+            accepted,
+        ],
+        axis=1,
+    )
+
+    fig = go.Figure()
+
+    for lab in np.unique(labels):
+        mask = labels == lab
+
+        fig.add_trace(
+            go.Scatter(
+                x=x[mask],
+                y=stat[mask],
+                mode="markers",
+                name=str(lab),
+                customdata=customdata[mask],
+                marker=dict(size=8, opacity=0.8),
+                hovertemplate=(
+                    "index: %{x}<br>"
+                    "statistic: %{y:.4f}<br>"
+                    "object: %{customdata[0]}<br>"
+                    "true label: %{customdata[1]}<br>"
+                    "source: %{customdata[2]}<br>"
+                    "accepted: %{customdata[3]}"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    fig.add_hline(y=limit, line_dash="dash")
+
+    if title is None:
+        title = (
+            f"SIMCA rule statistic — class={class_name} — "
+            f"rule={res['rule_name']}"
+        )
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="Observation index",
+        yaxis_title="Rule statistic",
+        width=width,
+        height=height,
+    )
+
+    fig.show()
+
+
+def plot_simca_object_map(
+    image_db,
+    object_db,
+    results_df,
+    image_id,
+    decision_col="simca_case",
+    object_id_col="object_id",
+    title=None,
+    width=850,
+    height=750,
+):
+    """
+    Overlay object-level SIMCA decisions on the image labels.
+
+    This function colors each object label according to its SIMCA decision.
+
+    decision_col values expected:
+    - almond_only
+    - peanut_only
+    - ambiguous
+    - unknown
+    """
+    img = image_db[image_id]
+    labels_img = img["labels"]
+
+    decision_to_code = {
+        "unknown": 1,
+        "almond_only": 2,
+        "peanut_only": 3,
+        "ambiguous": 4,
+    }
+
+    code_to_name = {
+        0: "background",
+        1: "unknown",
+        2: "almond_only",
+        3: "peanut_only",
+        4: "ambiguous",
+    }
+
+    decision_map = np.zeros_like(labels_img, dtype=float)
+
+    sub = results_df[results_df["source_image"] == image_id]
+
+    for _, row in sub.iterrows():
+        obj_id = row[object_id_col]
+        decision = row[decision_col]
+
+        if obj_id not in object_db:
+            continue
+
+        label_id = object_db[obj_id]["label_id"]
+        code = decision_to_code.get(decision, 1)
+
+        decision_map[labels_img == label_id] = code
+
+    decision_map_masked = decision_map.astype(float)
+    decision_map_masked[decision_map_masked == 0] = np.nan
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Heatmap(
+            z=img["image_ref"],
+            colorscale="Gray",
+            showscale=True,
+            colorbar=dict(title="image_ref"),
+            hovertemplate="row: %{y}<br>col: %{x}<br>value: %{z}<extra></extra>",
+        )
+    )
+
+    fig.add_trace(
+        go.Heatmap(
+            z=decision_map_masked,
+            colorscale=[
+                [0.00, "lightgray"],
+                [0.25, "royalblue"],
+                [0.50, "crimson"],
+                [0.75, "orange"],
+                [1.00, "purple"],
+            ],
+            opacity=0.55,
+            showscale=True,
+            colorbar=dict(
+                title="decision",
+                tickvals=[1, 2, 3, 4],
+                ticktext=[
+                    code_to_name[1],
+                    code_to_name[2],
+                    code_to_name[3],
+                    code_to_name[4],
+                ],
+                x=1.12,
+            ),
+            hovertemplate="row: %{y}<br>col: %{x}<br>decision code: %{z}<extra></extra>",
+        )
+    )
+
+    if title is None:
+        title = f"SIMCA object decisions — {image_id}"
+
+    fig.update_layout(
+        title=title,
+        width=width,
+        height=height,
+        xaxis_title="column",
+        yaxis_title="row",
+        yaxis=dict(autorange="reversed", scaleanchor="x"),
+    )
+
+    fig.show()
+
+
+
+
+
+def plot_simca_distance_log_plot(
+    simca_model,
+    simca_results,
+    class_name,
+    labels=None,
+    object_ids=None,
+    source_images=None,
+    title=None,
+    width=850,
+    height=650,
+):
+    """
+    SIMCA distance-distance plot in the paper style:
+
+        x = ln(1 + H/H0)
+        y = ln(1 + Q/Q0)
+
+    This corresponds to the style used in Fig. 8 of the SIMCA paper.
+
+    Parameters
+    ----------
+    simca_model : SIMCAClassifier
+        Fitted SIMCA classifier.
+    simca_results : dict
+        Output of simca.predict(...)[2].
+    class_name : str
+        Target class model to visualize, e.g. "peanut" or "almond".
+    """
+    model = simca_model.models_[class_name]
+    res = simca_results[class_name]
+
+    H = np.asarray(res["H"], dtype=float)
+    Q = np.asarray(res["Q"], dtype=float)
+
+    x = np.log1p(H / model.H0_)
+    y = np.log1p(Q / model.Q0_)
+
+    n = len(H)
+
+    if labels is None:
+        labels = np.array(["all"] * n)
+    else:
+        labels = np.asarray(labels)
+
+    if object_ids is None:
+        object_ids = np.array([""] * n)
+    else:
+        object_ids = np.asarray(object_ids)
+
+    if source_images is None:
+        source_images = np.array([""] * n)
+    else:
+        source_images = np.asarray(source_images)
+
+    accepted = np.asarray(res["accepted"]).astype(str)
+
+    customdata = np.stack(
+        [
+            object_ids.astype(str),
+            labels.astype(str),
+            source_images.astype(str),
+            accepted,
+            H.astype(str),
+            Q.astype(str),
+        ],
+        axis=1,
+    )
+
+    fig = go.Figure()
+
+    for lab in np.unique(labels):
+        mask = labels == lab
+
+        fig.add_trace(
+            go.Scatter(
+                x=x[mask],
+                y=y[mask],
+                mode="markers",
+                name=str(lab),
+                customdata=customdata[mask],
+                marker=dict(size=9, opacity=0.80),
+                hovertemplate=(
+                    "ln(1+H/H0): %{x:.4f}<br>"
+                    "ln(1+Q/Q0): %{y:.4f}<br>"
+                    "object: %{customdata[0]}<br>"
+                    "true label: %{customdata[1]}<br>"
+                    "source: %{customdata[2]}<br>"
+                    "accepted: %{customdata[3]}<br>"
+                    "H: %{customdata[4]}<br>"
+                    "Q: %{customdata[5]}"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    # Add decision boundary if possible
+    rule_name = res["rule_name"]
+    rule_limit = res["rule_limit"]
+
+    h_rel_grid = np.linspace(0, max(3, np.nanmax(H / model.H0_) * 1.05), 400)
+
+    if rule_name == "data_driven":
+        # D = NH * H/H0 + NQ * Q/Q0 < limit
+        q_rel_boundary = (rule_limit - model.NH_ * h_rel_grid) / model.NQ_
+        mask = q_rel_boundary >= 0
+
+        fig.add_trace(
+            go.Scatter(
+                x=np.log1p(h_rel_grid[mask]),
+                y=np.log1p(q_rel_boundary[mask]),
+                mode="lines",
+                name="decision boundary",
+                line=dict(dash="dash"),
+            )
+        )
+
+    elif rule_name in ["alternative", "combined_index"]:
+        # H/Hlim + Q/Qlim < limit
+        H_lim = res["H_limit"]
+        Q_lim = res["Q_limit"]
+
+        H_grid = h_rel_grid * model.H0_
+        q_boundary = Q_lim * (rule_limit - H_grid / H_lim)
+        q_rel_boundary = q_boundary / model.Q0_
+
+        mask = q_rel_boundary >= 0
+
+        fig.add_trace(
+            go.Scatter(
+                x=np.log1p(h_rel_grid[mask]),
+                y=np.log1p(q_rel_boundary[mask]),
+                mode="lines",
+                name="decision boundary",
+                line=dict(dash="dash"),
+            )
+        )
+
+    elif rule_name == "simple":
+        # Simple SIMCA has a rectangular boundary
+        H_lim = res["H_limit"]
+        Q_lim = res["Q_limit"]
+
+        fig.add_vline(
+            x=np.log1p(H_lim / model.H0_),
+            line_dash="dash",
+        )
+        fig.add_hline(
+            y=np.log1p(Q_lim / model.Q0_),
+            line_dash="dash",
+        )
+
+    if title is None:
+        title = (
+            f"SIMCA log distance plot — class={class_name} — "
+            f"rule={rule_name}"
+        )
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="ln(1 + H/H0)",
+        yaxis_title="ln(1 + Q/Q0)",
+        width=width,
+        height=height,
+    )
+
+    fig.show()
+
+
+def plot_simca_distance_distribution_fit(
+    simca_model,
+    class_name,
+    distance="H",
+    nbins=30,
+    title=None,
+    width=850,
+    height=500,
+):
+    """
+    Histogram of H/H0 or Q/Q0 with scaled chi-square density.
+
+    This corresponds to the spirit of Fig. 2 in the SIMCA paper.
+
+    If:
+        N * H/H0 ~ chi2(N)
+    then the density of R = H/H0 is:
+        f_R(r) = N * chi2.pdf(N*r, N)
+    """
+    model = simca_model.models_[class_name]
+
+    if distance.upper() == "H":
+        values = model.H_train_ / model.H0_
+        N = model.NH_
+        x_title = "H / H0"
+        dist_name = "score distance"
+    elif distance.upper() == "Q":
+        values = model.Q_train_ / model.Q0_
+        N = model.NQ_
+        x_title = "Q / Q0"
+        dist_name = "orthogonal distance"
+    else:
+        raise ValueError("distance must be 'H' or 'Q'.")
+
+    values = np.asarray(values, dtype=float)
+
+    x_grid = np.linspace(0, max(values.max() * 1.15, 0.1), 500)
+    pdf_grid = N * chi2.pdf(N * x_grid, N)
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Histogram(
+            x=values,
+            histnorm="probability density",
+            nbinsx=nbins,
+            name="empirical",
+            opacity=0.65,
+        )
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=x_grid,
+            y=pdf_grid,
+            mode="lines",
+            name=f"scaled chi-square, DoF={N:.2f}",
+        )
+    )
+
+    if title is None:
+        title = f"{dist_name} distribution fit — class={class_name}"
+
+    fig.update_layout(
+        title=title,
+        xaxis_title=x_title,
+        yaxis_title="Density",
+        width=width,
+        height=height,
+    )
+
+    fig.show()
+
+
+def plot_simca_sensitivity_by_rule(
+    simca_summary_df,
+    sensitivity_col="peanut_sensitivity",
+    expected=0.95,
+    tolerance=0.02,
+    title=None,
+    width=850,
+    height=500,
+):
+    """
+    Plot sensitivity by SIMCA rule.
+
+    Similar in spirit to Fig. 3B in the SIMCA paper.
+    """
+    df = simca_summary_df.copy()
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=df["rule"],
+            y=df[sensitivity_col],
+            mode="markers+text",
+            text=[f"{100*v:.1f}%" for v in df[sensitivity_col]],
+            textposition="top center",
+            marker=dict(size=12),
+            name=sensitivity_col,
+        )
+    )
+
+    fig.add_hline(
+        y=expected,
+        line_dash="solid",
+        annotation_text=f"expected = {100*expected:.1f}%",
+        annotation_position="top left",
+    )
+
+    fig.add_hline(
+        y=expected - tolerance,
+        line_dash="dash",
+        annotation_text=f"-{100*tolerance:.1f}%",
+        annotation_position="bottom left",
+    )
+
+    fig.add_hline(
+        y=expected + tolerance,
+        line_dash="dash",
+        annotation_text=f"+{100*tolerance:.1f}%",
+        annotation_position="top left",
+    )
+
+    if title is None:
+        title = f"Sensitivity by SIMCA rule — {sensitivity_col}"
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="SIMCA rule",
+        yaxis_title="Sensitivity",
+        yaxis_tickformat=".0%",
+        width=width,
+        height=height,
+    )
+
+    fig.show()
+
+
+def plot_simca_extreme_plot(
+    model,
+    X_target,
+    rule_name="data_driven",
+    alphas=None,
+    title=None,
+    width=700,
+    height=650,
+):
+    """
+    Extreme plot: observed extremes vs expected extremes.
+
+    This corresponds to Fig. 4 in the SIMCA paper.
+
+    Parameters
+    ----------
+    model : SIMCAClassModel
+        Fitted target class model, e.g. simca.models_["peanut"].
+    X_target : ndarray, shape (N, B)
+        Target-class samples to evaluate.
+        For training extreme plot, use training target samples.
+        For projection/test extreme plot, use projected target samples.
+    rule_name : str
+        "simple", "alternative", "combined_index", or "data_driven".
+    alphas : array-like
+        Significance values to scan.
+    """
+    if alphas is None:
+        alphas = np.linspace(0.005, 0.25, 60)
+
+    X_target = np.asarray(X_target, dtype=float)
+    H, Q, _, _ = model.compute_distances(X_target)
+
+    n = len(H)
+
+    expected = []
+    observed = []
+
+    for alpha in alphas:
+        accepted, _, _ = _simca_accept_for_rule_alpha(
+            H=H,
+            Q=Q,
+            model=model,
+            rule_name=rule_name,
+            alpha=alpha,
+        )
+
+        n_exp = alpha * n
+        n_obs = np.sum(~accepted)
+
+        expected.append(n_exp)
+        observed.append(n_obs)
+
+    expected = np.asarray(expected)
+    observed = np.asarray(observed)
+
+    # Tolerance corridor as in the paper:
+    # n ± 2 sqrt(n(1-n/I)), with n=Iexp
+    lower = expected - 2.0 * np.sqrt(expected * (1.0 - expected / n))
+    upper = expected + 2.0 * np.sqrt(expected * (1.0 - expected / n))
+    lower = np.maximum(lower, 0)
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=np.concatenate([expected, expected[::-1]]),
+            y=np.concatenate([upper, lower[::-1]]),
+            fill="toself",
+            mode="lines",
+            name="95% tolerance corridor",
+            line=dict(width=0),
+            opacity=0.25,
+        )
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=expected,
+            y=expected,
+            mode="lines",
+            name="ideal diagonal",
+            line=dict(dash="dash"),
+        )
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=expected,
+            y=observed,
+            mode="markers+lines",
+            name=f"{rule_name}",
+            marker=dict(size=7),
+        )
+    )
+
+    if title is None:
+        title = f"Extreme plot — class={model.class_name} — rule={rule_name}"
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="Expected extremes",
+        yaxis_title="Observed extremes",
+        width=width,
+        height=height,
+    )
+
+    fig.show()
+
+
+def plot_simca_complexity_metrics(
+    complexity_df,
+    target_class="peanut",
+    title=None,
+    width=900,
+    height=550,
+):
+    """
+    Plot SIMCA performance metrics versus number of PCs.
+
+    Similar in spirit to Fig. 7 in the SIMCA paper.
+
+    Expected columns:
+    - A
+    - peanut_sensitivity
+    - peanut_specificity_vs_almond
+    - almond_sensitivity
+    - almond_specificity_vs_peanut
+    - ambiguous_rate
+    - unknown_rate
+    """
+    df = complexity_df.copy()
+
+    fig = go.Figure()
+
+    if target_class == "peanut":
+        sns_col = "peanut_sensitivity"
+        spc_col = "peanut_specificity_vs_almond"
+    elif target_class == "almond":
+        sns_col = "almond_sensitivity"
+        spc_col = "almond_specificity_vs_peanut"
+    else:
+        raise ValueError("target_class must be 'peanut' or 'almond'.")
+
+    curves = [
+        (sns_col, "Sensitivity"),
+        (spc_col, "Specificity"),
+        ("ambiguous_rate", "Ambiguous rate"),
+        ("unknown_rate", "Unknown rate"),
+    ]
+
+    for col, name in curves:
+        if col in df.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=df["A"],
+                    y=df[col],
+                    mode="markers+lines",
+                    name=name,
+                )
+            )
+
+    fig.add_hline(
+        y=0.95,
+        line_dash="dash",
+        annotation_text="expected 95%",
+        annotation_position="top left",
+    )
+
+    if title is None:
+        title = f"SIMCA complexity plot — target={target_class}"
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="Number of PCs A",
+        yaxis_title="Metric",
+        yaxis_tickformat=".0%",
+        width=width,
+        height=height,
     )
 
     fig.show()

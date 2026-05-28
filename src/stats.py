@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.stats import chi2
 
 def mean_spectrum(cube):
     pixels = cube.reshape(-1, cube.shape[2])
@@ -29,6 +30,7 @@ def hotelling_t2(pca_res, n_components=None):
     lambdas = eigvals[:n_components]
     
     # Avoid division by zero in case of zero variance
+    lambdas = eigvals[:n_components].copy()
     lambdas[lambdas == 0] = 1e-10
     
     T2 = np.sum((scores ** 2) / lambdas, axis=1)
@@ -72,3 +74,5 @@ def q_residuals(X_c, pca_res, n_components=None):
     Q = np.sum(E ** 2, axis=1)
     
     return Q, E
+
+

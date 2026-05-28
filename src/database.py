@@ -397,6 +397,7 @@ def build_minimal_nir_uco_object_database(
     wavelengths=None,
     data_mode="reflectance",
     min_area=100,
+    split=None,
     skip_unknown=True,
     segmentation_kwargs=None,
 ):
@@ -422,6 +423,8 @@ def build_minimal_nir_uco_object_database(
         "reflectance" or "absorbance".
     min_area : int
         Minimum area for extracted objects.
+    split : str or None
+        Optional split label for all objects. If None, inferred from image metadata.
     skip_unknown : bool
         If True, skip image names not recognized by parse_image_key.
     segmentation_kwargs : dict or None
@@ -476,7 +479,7 @@ def build_minimal_nir_uco_object_database(
             wavelengths=wavelengths,
             data_mode=data_mode,
             min_area=min_area,
-            split=None,
+            split=split,
         )
         object_database.update(objects)
         image_database[image_meta["clean_key"]] = {

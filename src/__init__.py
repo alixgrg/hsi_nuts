@@ -6,7 +6,7 @@ This file allows imports such as:
     from src import load_mat_file
     from src import parse_image_key
     from src import build_minimal_nir_uco_object_database
-    from src import segment_objects
+    from src import SIMCAClassifier
 """
 
 # Data loading
@@ -29,6 +29,59 @@ from .database import (
     build_minimal_nir_uco_object_database,
 )
 
+# Matrix construction
+from .redim_matrix import (
+    object_db_to_object_matrix,
+    object_db_to_object_matrix_by_sources,
+    object_db_to_pixel_matrix,
+    object_db_to_balanced_px_matrix,
+)
+
+# Preprocessing
+from .preprocessing import (
+    center_X,
+    snv,
+    vector_normalize,
+    msc_fit,
+    msc_transform,
+    savgol_derivative,
+    reflectance_to_absorbance,
+)
+
+# PCA
+from .pca import (
+    pca_from_cov,
+    pca_sklearn,
+)
+
+# PCA comparison
+from .pca_comparison import (
+    apply_preprocessing_for_pca,
+    class_separation_scores,
+    mahalanobis_centroid_distance,
+    build_matrix_for_pca_method,
+    compare_pca_representations,
+)
+
+# Stats
+from .stats import (
+    mean_spectrum,
+    hotelling_t2,
+    q_residuals,
+)
+
+# SIMCA
+from .simca import (
+    SIMCAClassModel,
+    BaseSIMCARule,
+    SimpleSIMCARule,
+    AltSIMCARule,
+    CombinedIndexSIMCARule,
+    DataDrivenSIMCARule,
+    SIMCAClassifier,
+    simca_accept_for_rule_alpha,
+)
+
 # Plotting
 from .plotting import (
     # Raw data visualization
@@ -39,6 +92,7 @@ from .plotting import (
     plot_mean_spectra_from_excel,
     plot_two_classes,
     plot_loadings,
+
     # Object database visualization
     plot_db_image,
     plot_db_labels_overlay,
@@ -46,6 +100,7 @@ from .plotting import (
     plot_db_object_grid,
     plot_db_object_spectra,
     plot_db_object_areas,
+
     # PCA visualization
     plot_pca_explained_variance,
     plot_pca_scores_2d,
@@ -55,32 +110,12 @@ from .plotting import (
     plot_pca_hotelling_t2,
     plot_pca_q_residuals,
     plot_pca_q_vs_t2,
-)
 
-from .redim_matrix import (
-    object_db_to_object_matrix, 
-    object_db_to_pixel_matrix, 
-    object_db_to_balanced_px_matrix
-)
-
-from .pca import (
-    pca_from_cov,
-    pca_sklearn,
-)
-
-from .stats import (
-    mean_spectrum,
-    hotelling_t2,
-    q_residuals,
-)
-
-from .preprocessing import (
-    center_X,
-    snv, 
-    vector_normalize,
-    msc_fit,
-    msc_transform,
-    savgol_derivative,
+    # SIMCA visualization
+    plot_simca_distance_plot,
+    plot_simca_prediction_counts,
+    plot_simca_rule_statistic,
+    plot_simca_object_map,
 )
 
 
@@ -101,22 +136,64 @@ __all__ = [
     "extract_objects_from_labeled_image",
     "build_minimal_nir_uco_object_database",
 
-    # plotting
-    #    Raw data 
+    # redim_matrix
+    "object_db_to_object_matrix",
+    "object_db_to_object_matrix_by_sources",
+    "object_db_to_pixel_matrix",
+    "object_db_to_balanced_px_matrix",
+
+    # preprocessing
+    "center_X",
+    "snv",
+    "vector_normalize",
+    "msc_fit",
+    "msc_transform",
+    "savgol_derivative",
+    "reflectance_to_absorbance",
+
+    # pca
+    "pca_from_cov",
+    "pca_sklearn",
+
+    # pca comparison
+    "apply_preprocessing_for_pca",
+    "class_separation_scores",
+    "mahalanobis_centroid_distance",
+    "build_matrix_for_pca_method",
+    "compare_pca_representations",
+
+    # stats
+    "mean_spectrum",
+    "hotelling_t2",
+    "q_residuals",
+
+    # simca
+    "SIMCAClassModel",
+    "BaseSIMCARule",
+    "SimpleSIMCARule",
+    "AltSIMCARule",
+    "CombinedIndexSIMCARule",
+    "DataDrivenSIMCARule",
+    "SIMCAClassifier",
+    "simca_accept_for_rule_alpha",
+
+    # plotting raw
     "plot_bands_slider",
     "plot_mean_spectra",
     "plot_spectral_distribution",
     "plot_mean_spectra_from_excel",
     "plot_two_classes",
     "plot_loadings",
-    #   Object database visualization
+
+    # plotting object db
     "plot_db_image",
     "plot_db_labels_overlay",
     "plot_db_object",
     "plot_db_object_grid",
     "plot_db_object_spectra",
     "plot_db_object_areas",
-    #   PCA
+
+    # plotting pca
     "plot_pca_explained_variance",
     "plot_pca_scores_2d",
     "plot_pca_scores_3d",
@@ -126,25 +203,9 @@ __all__ = [
     "plot_pca_q_residuals",
     "plot_pca_q_vs_t2",
 
-    # redim_matrix
-    "object_db_to_object_matrix",
-    "object_db_to_pixel_matrix",
-    "object_db_to_balanced_px_matrix",
-
-    # pca
-    "pca_from_cov",
-    "pca_sklearn",
-
-    # stats
-    "mean_spectrum",
-    "hotelling_t2",
-    "q_residuals",
-
-    # preprocessing
-    "center_X",
-    "snv",
-    "vector_normalize",
-    "msc_fit",
-    "msc_transform",
-    "savgol_derivative",
+    # plotting simca
+    "plot_simca_distance_plot",
+    "plot_simca_prediction_counts",
+    "plot_simca_rule_statistic",
+    "plot_simca_object_map",
 ]

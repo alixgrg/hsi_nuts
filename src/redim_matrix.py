@@ -164,6 +164,58 @@ def object_db_to_object_matrix(
     return X, y, object_ids, source_images, batches, areas
 
 
+def object_db_to_object_matrix_by_sources(
+    object_db,
+    source_keys,
+    spectrum_field="mean_spectrum",
+    allowed_labels=None,
+):
+    """
+    Build object-level matrix from selected source images.
+
+    Parameters
+    ----------
+    object_db : dict
+    source_keys : list[str]
+        Example: ["almond1", "almond2", "peanut1", "peanut2"]
+    spectrum_field : str
+        "mean_spectrum" or "median_spectrum"
+    allowed_labels : list[str] or None
+
+    Returns
+    -------
+    X, y, object_ids, source_images, batches, areas
+    """
+    source_keys = set(source_keys)
+    X_list = []
+    y_list = []
+    object_ids = []
+    source_images = []
+    batches = []
+    areas = []
+
+    for obj_id, obj in object_db.items():
+        source = obj["source_clean_key"]
+        if source not in source_keys:
+            continue
+        label = obj["object_nut_type"]
+        if allowed_labels is not None and label not in allowed_labels:
+            continue
+        X_list.append(obj[spectrum_field])
+        y_list.append(label)
+        object_ids.append(obj_id)
+        source_images.append(source)
+        batches.append(obj.get("batch", None))
+        areas.append(obj.get("area_pixels", obj.get("n_pixels", None)))
+
+    X = np.vstack(X_list)
+    y = np.array(y_list)
+    object_ids = np.array(object_ids)
+    source_images = np.array(source_images)
+    batches = np.array(batches)
+    areas = np.array(areas)
+    return X, y, object_ids, source_images, batches, areas
+
 
 def object_db_to_pixel_matrix(
     object_db,

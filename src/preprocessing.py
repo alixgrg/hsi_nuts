@@ -116,3 +116,11 @@ def savgol_derivative(
     )
 
 
+def reflectance_to_absorbance(X, eps=1e-8):
+    """
+    Convert reflectance to absorbance:
+        A = log10(1 / R) = -log10(R)
+    """
+    X = np.asarray(X, dtype=float)
+    X_safe = np.clip(X, eps, None)
+    return np.log10(1.0 / X_safe)

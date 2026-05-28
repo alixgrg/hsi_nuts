@@ -18,10 +18,10 @@ N_REMOVE = 6
 RAW_DATA_PATH = PROJECT_ROOT / "HSI Data" / "NIR camera UCO (889-1702 nm)" / "NIR_uco_sb.mat"
 PROCESSED_DATA_DIR = PROJECT_ROOT / "HSI Data" / "processed"
 SELECTED_KEYS = [
-    "almond1_sb",
-    "almond2_sb",
-    "peanut1_sb",
-    "peanut2_sb",
+    "almond3_sb",
+    "almond4_sb",
+    "peanut3_sb",
+    "peanut4_sb",
 ]
 DATA_MODE = "reflectance"
 
@@ -97,6 +97,12 @@ def main():
         default=10,
         help="Minimum object area in pixels",
     )
+    parser.add_argument(
+        "--split",
+        type=str,
+        default="projection",
+        help="Split label for all objects",
+    )
     args = parser.parse_args()
     input_path = Path(args.input)
     output_dir = Path(args.output_dir)
@@ -131,6 +137,7 @@ def main():
         wavelengths=wavelengths,
         data_mode=DATA_MODE,
         min_area=args.min_area,
+        split=args.split,
         skip_unknown=True,
         segmentation_kwargs={
             "reference_method": "max",
@@ -144,9 +151,9 @@ def main():
             "min_distance": 10,
         },
     )
-    object_db_path = output_dir / f"nir_uco_minimal_object_db_{DATA_MODE}.pkl"
-    image_db_path = output_dir / f"nir_uco_minimal_image_db_{DATA_MODE}.pkl"
-    wavelengths_path = output_dir / f"nir_uco_wavelengths_{DATA_MODE}.npy"
+    object_db_path = output_dir / f"nir_uco_projection_object_db_{DATA_MODE}.pkl"
+    image_db_path = output_dir / f"nir_uco_projection_image_db_{DATA_MODE}.pkl"
+    wavelengths_path = output_dir / f"nir_uco_projection_wavelengths_{DATA_MODE}.npy"
     save_pickle(object_db, object_db_path)
     save_pickle(image_db, image_db_path)
     np.save(wavelengths_path, wavelengths)
