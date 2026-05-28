@@ -5,38 +5,18 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from src.stats import hotelling_t2, q_residuals
+from src.utils import (
+    mask_value_to_nan, 
+    as_1d_array, 
+    wavelength_axis, 
+    is_float_like,
+    filter_records,
+)
 
 # -----------------------------------------------------------------------------
 # Utils
 # -----------------------------------------------------------------------------
 
-def _as_array(values, n: int, default: Any = "") -> np.ndarray:
-    if values is None:
-        return np.asarray([default] * n)
-    arr = np.asarray(values)
-    if arr.shape[0] != n:
-        raise ValueError(f"Expected {n} values, got {arr.shape[0]}.")
-    return arr
-
-
-def _is_float(x) -> bool:
-    try:
-        float(x)
-        return True
-    except Exception:
-        return False
-
-
-def _x_axis(n_features: int, wavelengths=None):
-    if wavelengths is None:
-        return np.arange(n_features), "Band index"
-    return np.asarray(wavelengths), "Wavelength (nm)"
-
-
-def _mask_value_to_nan(arr, mask_value=0):
-    out = np.asarray(arr, dtype=float).copy()
-    out[out == mask_value] = np.nan
-    return out
 
 
 def _show_or_return(fig: go.Figure, show: bool = True):
@@ -49,7 +29,7 @@ def _customdata(n: int, **metadata) -> tuple[np.ndarray, str]:
     names = [k for k, v in metadata.items() if v is not None]
     if not names:
         return np.empty((n, 0), dtype=str), ""
-    cols = [_as_array(metadata[k], n, "").astype(str) for k in names]
+    cols = [as_1d_array(metadata[k], n, "").astype(str) for k in names]
     data = np.stack(cols, axis=1)
     hover = "".join(f"{name}: %{{customdata[{i}]}}<br>" for i, name in enumerate(names))
     return data, hover
@@ -78,7 +58,7 @@ def _extract_spectral_matrix(
         X = df.loc[:, spectral_cols].to_numpy(dtype=float)
         labels = df[label_col].to_numpy() if label_col and label_col in df.columns else None
         names = df[name_col].to_numpy() if name_col and name_col in df.columns else None
-        wavelengths = np.asarray(spectral_cols, dtype=float) if all(_is_float(c) for c in spectral_cols) else None
+        wavelengths = np.asarray(spectral_cols, dtype=float) if all(is_float_like(c) for c in spectral_cols) else None
         return X, labels, names, wavelengths
 
     if isinstance(data, Mapping):
@@ -110,25 +90,6 @@ def _extract_spectral_matrix(
         X = X.reshape(1, -1)
     return X, None, None, None
 
-
-def select_objects(object_db: Mapping[str, Mapping[str, Any]], **filters):
-    """Return [(obj_id, obj), ...] matching object fields passed as keyword filters."""
-    selected = []
-    aliases = {"source_image": "source_clean_key", "nut_type": "object_nut_type"}
-    for obj_id, obj in object_db.items():
-        ok = True
-        for key, allowed in filters.items():
-            if allowed is None:
-                continue
-            field = aliases.get(key, key)
-            value = obj.get(field)
-            if isinstance(allowed, (list, tuple, set, np.ndarray)):
-                ok &= value in allowed
-            else:
-                ok &= value == allowed
-        if ok:
-            selected.append((obj_id, obj))
-    return selected
 
 
 # -----------------------------------------------------------------------------
@@ -239,7 +200,7 @@ def plot_image_overlay(
     show: bool = True,
 ):
     """Generic image + semi-transparent overlay."""
-    overlay_plot = _mask_value_to_nan(overlay, mask_value=overlay_mask_value)
+    overlay_plot = mask_value_to_nan(overlay, mask_value=overlay_mask_value)
 
     fig = go.Figure()
     fig.add_trace(
@@ -343,9 +304,9 @@ def plot_spectra(
             names = np.asarray(names)[:max_spectra]
 
     n, p = X.shape
-    x, x_title = _x_axis(p, wavelengths)
-    labels = _as_array(labels, n, "all").astype(str)
-    names = _as_array(names, n, "").astype(str)
+    x, x_title = wavelength_axis(p, wavelengths)
+    labels = as_1d_array(labels, n, "all").astype(str)
+    names = as_1d_array(names, n, "").astype(str)
 
     fig = go.Figure()
     if reducer == "none":
@@ -386,7 +347,7 @@ def plot_object_spectra(
     title: str | None = None,
     show: bool = True,
 ):
-    objects = select_objects(object_db, source_image=source_image, nut_type=nut_type)
+    objects = filter_records(object_db, source_clean_key=source_image, object_nut_type=nut_type)
     if not objects:
         raise ValueError("No object found with these filters.")
     X = np.vstack([obj[spectrum_field] for _, obj in objects])
@@ -422,12 +383,12 @@ def plot_object_view(
 
     fig = make_subplots(rows=1, cols=2 if show_spectrum else 1, subplot_titles=(f"{object_label} — crop", spectrum_field) if show_spectrum else (f"{object_label} — crop",))
     fig.add_trace(go.Heatmap(z=obj["image_ref_crop"], colorscale="Gray", showscale=True, colorbar=dict(title="Image ref")), row=1, col=1)
-    fig.add_trace(go.Heatmap(z=_mask_value_to_nan(obj["mask"], 0), colorscale="Reds", opacity=0.35, showscale=False), row=1, col=1)
+    fig.add_trace(go.Heatmap(z=mask_value_to_nan(obj["mask"], 0), colorscale="Reds", opacity=0.35, showscale=False), row=1, col=1)
     fig.update_yaxes(autorange="reversed", scaleanchor="x", row=1, col=1)
 
     if show_spectrum:
         spectrum = np.asarray(obj[spectrum_field])
-        x, x_title = _x_axis(spectrum.shape[0], obj.get("wavelengths"))
+        x, x_title = wavelength_axis(spectrum.shape[0], obj.get("wavelengths"))
         fig.add_trace(go.Scatter(x=x, y=spectrum, mode="lines", name=spectrum_field), row=1, col=2)
         if show_std and spectrum_field == "mean_spectrum" and "std_spectrum" in obj:
             std = np.asarray(obj["std_spectrum"])
@@ -455,7 +416,7 @@ def plot_object_grid(
     show: bool = True,
 ):
     if isinstance(objects_or_db, Mapping):
-        objects = select_objects(objects_or_db, source_image=source_image, nut_type=nut_type)
+        objects = filter_records(objects_or_db, source_clean_key=source_image, object_nut_type=nut_type)
     else:
         objects = list(objects_or_db)
     selected = objects[:max_objects]
@@ -468,14 +429,14 @@ def plot_object_grid(
         row = idx // n_cols + 1
         col = idx % n_cols + 1
         fig.add_trace(go.Heatmap(z=obj["image_ref_crop"], colorscale="Gray", showscale=False), row=row, col=col)
-        fig.add_trace(go.Heatmap(z=_mask_value_to_nan(obj["mask"], 0), colorscale="Reds", opacity=0.35, showscale=False), row=row, col=col)
+        fig.add_trace(go.Heatmap(z=mask_value_to_nan(obj["mask"], 0), colorscale="Reds", opacity=0.35, showscale=False), row=row, col=col)
         fig.update_yaxes(autorange="reversed", row=row, col=col)
     fig.update_layout(title=title, height=height_per_row * n_rows, width=width)
     return _show_or_return(fig, show)
 
 
 def plot_object_areas(object_db, source_image=None, nut_type=None, show=True):
-    objects = select_objects(object_db, source_image=source_image, nut_type=nut_type)
+    objects = filter_records(object_db, source_clean_key=source_image, object_nut_type=nut_type)
     if not objects:
         raise ValueError("No object found with these filters.")
     labels = [oid for oid, _ in objects]
@@ -568,7 +529,7 @@ def plot_scores(
             color_values = batches
         else:
             color_values = labels
-    groups = _as_array(color_values, n, "all").astype(str)
+    groups = as_1d_array(color_values, n, "all").astype(str)
     meta = dict(object_id=object_ids, label=labels, source_image=source_images, batch=batches, area=areas)
     meta.update(metadata)
     custom, hover_meta = _customdata(n, **meta)
@@ -620,7 +581,7 @@ def plot_loadings(
             pca_res = None
             components = tuple(range(1, len(component_names) + 1))
     P = _pca_loadings_from_args(loadings, pca_res)
-    x, x_title = _x_axis(P.shape[0], wavelengths)
+    x, x_title = wavelength_axis(P.shape[0], wavelengths)
     fig = go.Figure()
     for k, comp in enumerate(components):
         j = comp - 1
@@ -683,7 +644,7 @@ def plot_biplot(
 def plot_metric_by_index(values, labels=None, title="Metric by observation", y_title="Metric", hline=None, object_ids=None, source_images=None, width=900, height=500, show=True, **metadata):
     values = np.asarray(values, dtype=float)
     n = len(values)
-    labels = _as_array(labels, n, "all").astype(str)
+    labels = as_1d_array(labels, n, "all").astype(str)
     meta = dict(object_id=object_ids, source_image=source_images)
     meta.update(metadata)
     custom, hover_meta = _customdata(n, **meta)
@@ -720,7 +681,7 @@ def plot_xy_diagnostic(
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
     n = len(x)
-    labels = _as_array(labels, n, "all").astype(str)
+    labels = as_1d_array(labels, n, "all").astype(str)
     meta = dict(object_id=object_ids, source_image=source_images)
     meta.update(metadata)
     custom, hover_meta = _customdata(n, **meta)

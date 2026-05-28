@@ -31,12 +31,7 @@ from .database import (
 )
 
 # Redim Matrix
-from .redim_matrix import (
-    object_db_to_object_matrix,
-    object_db_to_object_matrix_by_sources,
-    object_db_to_pixel_matrix,
-    object_db_to_balanced_px_matrix,
-)
+from .redim_matrix import object_db_to_matrix
 
 # Preprocessing
 from .preprocessing import (
@@ -57,10 +52,8 @@ from .pca import (
 
 # Pca Comparison
 from .pca_comparison import (
-    apply_preprocessing_for_pca,
     class_separation_scores,
     mahalanobis_centroid_distance,
-    build_matrix_for_pca_method,
     compare_pca_representations,
 )
 
@@ -84,7 +77,6 @@ from .simca import (
 
 # Plotting
 from .plotting import (
-    select_objects,
     plot_hypercube_band_slider,
     plot_image2d,
     plot_image_overlay,
@@ -114,6 +106,17 @@ from .plotting import (
     plot_simca_rule_metric,
 )
 
+from utils import(
+    as_2d_array,
+    safe_positive,
+    mask_value_to_nan,
+    wavelength_axis,
+    as_1d_array,
+    wavelength_axis,
+    is_float_like,
+    filter_records,
+)
+
 __all__ = [
     "load_mat_file",
     "make_reference_image",
@@ -125,10 +128,7 @@ __all__ = [
     "parse_image_key",
     "extract_objects_from_labeled_image",
     "build_minimal_nir_uco_object_database",
-    "object_db_to_object_matrix",
-    "object_db_to_object_matrix_by_sources",
-    "object_db_to_pixel_matrix",
-    "object_db_to_balanced_px_matrix",
+    "object_db_to_matrix",
     "center_X",
     "snv",
     "vector_normalize",
@@ -138,10 +138,8 @@ __all__ = [
     "reflectance_to_absorbance",
     "pca_from_cov",
     "pca_sklearn",
-    "apply_preprocessing_for_pca",
     "class_separation_scores",
     "mahalanobis_centroid_distance",
-    "build_matrix_for_pca_method",
     "compare_pca_representations",
     "mean_spectrum",
     "hotelling_t2",
@@ -153,7 +151,6 @@ __all__ = [
     "CombinedIndexSIMCARule",
     "DataDrivenSIMCARule",
     "SIMCAClassifier",
-    "select_objects",
     "plot_hypercube_band_slider",
     "plot_image2d",
     "plot_image_overlay",
@@ -181,4 +178,12 @@ __all__ = [
     "plot_decision_counts",
     "plot_simca_distance",
     "plot_simca_rule_metric",
+    "as_2d_array",
+    "safe_positive",
+    "mask_value_to_nan",
+    "wavelength_axis",
+    "as_1d_array",
+    "wavelength_axis",
+    "is_float_like",
+    "filter_records",
 ]

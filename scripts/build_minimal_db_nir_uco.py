@@ -8,8 +8,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import numpy as np
 
-from src import load_mat_file
-from src import build_minimal_nir_uco_object_database
+from src.dataload import load_mat_file
+from src.database import build_minimal_nir_uco_object_database
+from src.utils import wavelength_axis
 
 START_NM = 889
 END_NM = 1702
@@ -38,34 +39,6 @@ def preprocess_nir_uco_cube(
     """
     cube = raw_cube[:, :, n_remove:]
     return cube
-
-def make_wavelength_axis(
-    start_nm=START_NM,
-    end_nm=END_NM,
-    original_bands=ORIGINAL_BANDS,
-    n_remove=N_REMOVE,
-):
-    """
-    Approximate wavelength axis after removing noisy bands.
-
-    The raw cube has 69 bands between 889 and 1702 nm.
-    The first 6 bands are removed.
-
-    Returns:
-        wavelengths ∈ R^{63}
-    """
-    wavelengths_full = np.linspace(start_nm, end_nm, original_bands)
-    return wavelengths_full[n_remove:]
-
-def save_pickle(obj, path):
-    """
-    Save Python object as pickle.
-    """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "wb") as f:
-        pickle.dump(obj, f)
-    print(f"[OK] Saved: {path}")
 
 
 
@@ -125,7 +98,7 @@ def main():
     print("=" * 80)
 
     data = load_mat_file(input_path)
-    wavelengths = make_wavelength_axis()
+    wavelengths = wavelength_axis()
 
     def preprocess_func(raw_cube):
         return preprocess_nir_uco_cube(raw_cube)

@@ -124,3 +124,89 @@ def reflectance_to_absorbance(X, eps=1e-8):
     X = np.asarray(X, dtype=float)
     X_safe = np.clip(X, eps, None)
     return np.log10(1.0 / X_safe)
+
+
+class SpectralPreprocessor:
+    def __init__(
+        self,
+        steps=("raw",),
+        sg_window_length=9,
+        sg_polyorder=2,
+        eps=1e-12,
+    ):
+        self.steps = [steps] if isinstance(steps, str) else list(steps)
+        self.sg_window_length = sg_window_length
+        self.sg_polyorder = sg_polyorder
+        self.eps = eps
+        self.fitted_params_ = {}
+        self.wavelengths_ = None
+        self.is_fitted_ = False
+
+    def fit(self, X, wavelengths=None):
+        X_work = np.asarray(X, dtype=float)
+        self.wavelengths_ = None if wavelengths is None else np.asarray(wavelengths)
+
+        for step in self.steps:
+            if step == "raw":
+                continue
+            if step == "msc":
+                ref = msc_fit(X_work)
+                self.fitted_params_["msc_reference"] = ref
+                X_work = msc_transform(X_work, ref, eps=self.eps)
+            elif step in {"sg_d1", "sg_d2"}:
+                deriv = 1 if step == "sg_d1" else 2
+                delta = 1.0 if self.wavelengths_ is None else float(np.mean(np.diff(self.wavelengths_)))
+                self.fitted_params_[step] = {
+                    "deriv": deriv,
+                    "delta": delta,
+                }
+                X_work = savgol_derivative(
+                    X_work,
+                    window_length=self.sg_window_length if deriv == 1 else max(self.sg_window_length, 11),
+                    polyorder=self.sg_polyorder if deriv == 1 else max(self.sg_polyorder, 3),
+                    deriv=deriv,
+                    delta=delta,
+                )
+            else:
+                X_work = self._apply_stateless_step(X_work, step)
+        self.is_fitted_ = True
+        return self
+
+    def transform(self, X):
+        if not self.is_fitted_:
+            raise RuntimeError("SpectralPreprocessor must be fitted before transform().")
+        X_work = np.asarray(X, dtype=float)
+        for step in self.steps:
+            if step == "raw":
+                continue
+            if step == "msc":
+                X_work = msc_transform(
+                    X_work,
+                    self.fitted_params_["msc_reference"],
+                    eps=self.eps,
+                )
+            elif step in {"sg_d1", "sg_d2"}:
+                params = self.fitted_params_[step]
+                deriv = params["deriv"]
+                X_work = savgol_derivative(
+                    X_work,
+                    window_length=self.sg_window_length if deriv == 1 else max(self.sg_window_length, 11),
+                    polyorder=self.sg_polyorder if deriv == 1 else max(self.sg_polyorder, 3),
+                    deriv=deriv,
+                    delta=params["delta"],
+                )
+            else:
+                X_work = self._apply_stateless_step(X_work, step)
+        return X_work
+
+    def fit_transform(self, X, wavelengths=None):
+        return self.fit(X, wavelengths=wavelengths).transform(X)
+
+    def _apply_stateless_step(self, X, step):
+        if step == "absorbance":
+            return reflectance_to_absorbance(X, eps=self.eps)
+        if step == "snv":
+            return snv(X, eps=self.eps)
+        if step == "vector_norm":
+            return vector_normalize(X, eps=self.eps)
+        raise ValueError(f"Unknown preprocessing step: {step}")

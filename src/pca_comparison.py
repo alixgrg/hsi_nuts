@@ -2,11 +2,10 @@ import numpy as np
 import pandas as pd
 
 from src.redim_matrix import (
-    object_db_to_object_matrix,
-    object_db_to_pixel_matrix,
-    object_db_to_balanced_px_matrix,
+    object_db_to_matrix,
 )
 from src.preprocessing import (
+    SpectralPreprocessor,
     center_X,
     snv,
     vector_normalize,
@@ -16,80 +15,6 @@ from src.preprocessing import (
     reflectance_to_absorbance,
 )
 from src.pca import pca_from_cov
-
-
-def apply_preprocessing_for_pca(
-    X,
-    method="raw",
-    wavelengths=None,
-    sg_window_length=9,
-    sg_polyorder=2,
-):
-    """
-    Apply one spectral preprocessing method before centering + PCA.
-
-    Returns
-    -------
-    X_pre : ndarray
-        Preprocessed matrix.
-    info : dict
-        Information needed to reuse the preprocessing later.
-    """
-    X = np.asarray(X, dtype=float)
-    info = {"method": method}
-
-    if method == "raw":
-        X_pre = X.copy()
-    elif method == "absorbance":
-        X_pre = reflectance_to_absorbance(X)
-    elif method == "snv":
-        X_pre = snv(X)
-    elif method == "absorbance_snv":
-        X_abs = reflectance_to_absorbance(X)
-        X_pre = snv(X_abs)
-    elif method == "vector_norm":
-        X_pre = vector_normalize(X)
-    elif method == "msc":
-        ref = msc_fit(X)
-        X_pre = msc_transform(X, ref)
-        info["msc_reference"] = ref
-
-    elif method == "sg_d1":
-        if wavelengths is None:
-            delta = 1.0
-        else:
-            delta = float(np.mean(np.diff(wavelengths)))
-        X_pre = savgol_derivative(
-            X,
-            window_length=sg_window_length,
-            polyorder=sg_polyorder,
-            deriv=1,
-            delta=delta,
-        )
-        info["sg_window_length"] = sg_window_length
-        info["sg_polyorder"] = sg_polyorder
-        info["sg_deriv"] = 1
-        info["delta"] = delta
-
-    elif method == "sg_d2":
-        if wavelengths is None:
-            delta = 1.0
-        else:
-            delta = float(np.mean(np.diff(wavelengths)))
-        X_pre = savgol_derivative(
-            X,
-            window_length=max(sg_window_length, 11),
-            polyorder=max(sg_polyorder, 3),
-            deriv=2,
-            delta=delta,
-        )
-        info["sg_window_length"] = max(sg_window_length, 11)
-        info["sg_polyorder"] = max(sg_polyorder, 3)
-        info["sg_deriv"] = 2
-        info["delta"] = delta
-    else:
-        raise ValueError(f"Unknown preprocessing method: {method}")
-    return X_pre, info
 
 
 def class_separation_scores(T, y, n_components=3):
@@ -210,92 +135,6 @@ def mahalanobis_centroid_distance(T, y, n_components=3, reg=1e-6):
     return float(np.sqrt(d2))
 
 
-def build_matrix_for_pca_method(
-    object_db,
-    matrix_method="object_mean",
-    m=40,
-    allowed_splits=None,
-    allowed_labels=None,
-    random_state=42,
-    replace=False,
-):
-    """
-    Build X and metadata for one PCA representation.
-
-    matrix_method options:
-    - "object_mean"
-    - "object_median"
-    - "all_pixels"
-    - "balanced_pixels"
-    """
-    if matrix_method == "object_mean":
-        X, y, obs_ids, source_images, batches, areas = object_db_to_object_matrix(
-            object_db,
-            spectrum_field="mean_spectrum",
-            allowed_splits=allowed_splits,
-            allowed_labels=allowed_labels,
-        )
-        metadata = {
-            "observation_ids": obs_ids,
-            "source_images": source_images,
-            "batches": batches,
-            "areas": areas,
-            "positions": None,
-        }
-
-    elif matrix_method == "object_median":
-        X, y, obs_ids, source_images, batches, areas = object_db_to_object_matrix(
-            object_db,
-            spectrum_field="median_spectrum",
-            allowed_splits=allowed_splits,
-            allowed_labels=allowed_labels,
-        )
-        metadata = {
-            "observation_ids": obs_ids,
-            "source_images": source_images,
-            "batches": batches,
-            "areas": areas,
-            "positions": None,
-        }
-
-    elif matrix_method == "all_pixels":
-        X, y, obs_ids, source_images, positions = object_db_to_pixel_matrix(
-            object_db,
-            allowed_splits=allowed_splits,
-            allowed_labels=allowed_labels,
-        )
-        metadata = {
-            "observation_ids": obs_ids,
-            "source_images": source_images,
-            "batches": None,
-            "areas": None,
-            "positions": positions,
-        }
-
-    elif matrix_method == "balanced_pixels":
-        X, y, obs_ids, source_images, positions = object_db_to_balanced_px_matrix(
-            object_db,
-            m=m,
-            allowed_splits=allowed_splits,
-            allowed_labels=allowed_labels,
-            random_state=random_state,
-            replace=replace,
-        )
-        metadata = {
-            "observation_ids": obs_ids,
-            "source_images": source_images,
-            "batches": None,
-            "areas": None,
-            "positions": positions,
-        }
-
-    else:
-        raise ValueError(
-            "matrix_method must be one of: "
-            "'object_mean', 'object_median', 'all_pixels', 'balanced_pixels'."
-        )
-    return X, y, metadata
-
 
 def compare_pca_representations(
     object_db,
@@ -331,15 +170,25 @@ def compare_pca_representations(
     allowed_labels = list(allowed_labels) if allowed_labels is not None else None
     rows = []
     results = {}
+    level_by_method = {
+        "object_mean": "object",
+        "object_median": "object",
+        "all_pixels": "pixel",
+        "balanced_pixels": "balanced_pixel",
+    }
+    spectrum_field_by_method = {
+        "object_mean": "mean_spectrum",
+        "object_median": "median_spectrum",
+    }
 
     for matrix_method in matrix_methods:
         print(f"\n=== Matrix method: {matrix_method} ===")
-        X_raw, y, metadata = build_matrix_for_pca_method(
+        X_raw, y, metadata = object_db_to_matrix(
             object_db=object_db,
-            matrix_method=matrix_method,
+            level=level_by_method[matrix_method],
+            spectrum_field=spectrum_field_by_method[matrix_method],
+            filters={"split": allowed_splits, "object_nut_type": allowed_labels},
             m=m,
-            allowed_splits=allowed_splits,
-            allowed_labels=allowed_labels,
             random_state=random_state,
             replace=replace,
         )
@@ -354,13 +203,12 @@ def compare_pca_representations(
 
         for preproc in preprocessing_methods:
             print(f"  - preprocessing: {preproc}")
-            X_pre, preproc_info = apply_preprocessing_for_pca(
-                X_raw,
-                method=preproc,
-                wavelengths=wavelengths,
-                sg_window_length=sg_window_length,
-                sg_polyorder=sg_polyorder,
-            )
+            if isinstance(preproc, str):
+                steps = [preproc]
+            else:
+                steps = list(preproc)
+            prep = SpectralPreprocessor(steps, sg_window_length=sg_window_length, sg_polyorder=sg_polyorder)
+            X_pre = prep.fit_transform(X_raw, wavelengths=wavelengths)
             X_c, mu = center_X(X_pre)
             pca_res = pca_from_cov(
                 X_c,
@@ -369,11 +217,7 @@ def compare_pca_representations(
             evr = pca_res["explained_variance_ratio"]
             cum = pca_res["cumulative_explained_variance_ratio"]
             T = pca_res["scores"]
-            sep = class_separation_scores(
-                T,
-                y,
-                n_components=n_components,
-            )
+            sep = class_separation_scores(T, y, n_components=n_components)
             row = {
                 "matrix_method": matrix_method,
                 "preprocessing": preproc,
@@ -403,7 +247,7 @@ def compare_pca_representations(
                 "center_mean": mu,
                 "y": y,
                 "metadata": metadata,
-                "preprocessing_info": preproc_info,
+                "preprocessing_info": prep,
                 "pca": pca_res,
                 "summary": row,
             }

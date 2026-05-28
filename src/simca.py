@@ -2,65 +2,8 @@ import numpy as np
 from scipy.stats import chi2
 
 from .pca import pca_from_cov
+from .utils import as_2d_array, safe_positive
 
-
-def _as_2d_array(X):
-    X = np.asarray(X, dtype=float)
-    if X.ndim == 1:
-        X = X.reshape(1, -1)
-    return X
-
-
-# def _pca_from_covariance(X_centered, n_components):
-#     """
-#     PCA from covariance matrix.
-
-#     Parameters
-#     ----------
-#     X_centered : ndarray, shape (N, B)
-#         Centered data matrix.
-#     n_components : int
-#         Number of PCs to keep.
-
-#     Returns
-#     -------
-#     dict
-#         PCA results.
-#     """
-#     X_centered = np.asarray(X_centered, dtype=float)
-
-#     n_samples = X_centered.shape[0]
-
-#     S = (X_centered.T @ X_centered) / (n_samples - 1)
-
-#     eigvals, eigvecs = np.linalg.eigh(S)
-
-#     idx = np.argsort(eigvals)[::-1]
-#     eigvals = eigvals[idx]
-#     eigvecs = eigvecs[:, idx]
-
-#     loadings = eigvecs[:, :n_components]
-#     scores = X_centered @ loadings
-
-#     explained_variance_ratio = eigvals / np.sum(eigvals)
-#     cumulative_explained_variance_ratio = np.cumsum(explained_variance_ratio)
-
-#     return {
-#         "covariance": S,
-#         "eigenvalues": eigvals,
-#         "eigenvectors": eigvecs,
-#         "loadings": loadings,
-#         "scores": scores,
-#         "explained_variance_ratio": explained_variance_ratio,
-#         "cumulative_explained_variance_ratio": cumulative_explained_variance_ratio,
-#     }
-
-def _safe_positive(x, eps=1e-12):
-    """
-    Replace too-small positive values by eps.
-    Useful to avoid division by zero.
-    """
-    return np.maximum(np.asarray(x, dtype=float), eps)
 
 
 
@@ -113,7 +56,7 @@ class SIMCAClassModel:
         X : ndarray, shape (N, B)
             Training spectra from the target class only.
         """
-        X = _as_2d_array(X)
+        X = as_2d_array(X)
         self.n_samples_, self.n_features_ = X.shape
 
         if self.n_components < 1:
@@ -160,7 +103,7 @@ class SIMCAClassModel:
         residuals : ndarray, shape (N, B)
         X_reconstructed_centered : ndarray, shape (N, B)
         """
-        X = _as_2d_array(X)
+        X = as_2d_array(X)
 
         if self.mean_ is None:
             raise RuntimeError("Model must be fitted before transform.")
@@ -178,9 +121,9 @@ class SIMCAClassModel:
         H = score distance, similar to Hotelling T².
         Q = orthogonal distance, squared residual norm.
         """
-        #X = _as_2d_array(X)
+        #X = as_2d_array(X)
         scores, residuals, _ = self.transform(X)
-        lambdas = _safe_positive(self.eigenvalues_score_, self.eps)
+        lambdas = safe_positive(self.eigenvalues_score_, self.eps)
         #lambdas = np.where(lambdas < self.eps, self.eps, lambdas)
         H = np.sum((scores ** 2) / lambdas, axis=1)
         Q = np.sum(residuals ** 2, axis=1)
@@ -457,7 +400,7 @@ class SIMCAClassifier:
         X : ndarray, shape (N, B)
         y : ndarray, shape (N,)
         """
-        X = _as_2d_array(X)
+        X = as_2d_array(X)
         y = np.asarray(y)
         self.models_ = {}
         for class_name in self.class_names:
@@ -484,7 +427,7 @@ class SIMCAClassifier:
         results : dict
             results[class_name] contains H, Q, H_norm, Q_norm, accepted.
         """
-        X = _as_2d_array(X)
+        X = as_2d_array(X)
         results = {}
         for class_name, model in self.models_.items():
             values = model.decision_values(X)
@@ -516,7 +459,7 @@ class SIMCAClassifier:
         class internally by combined normalized distance, but final label remains
         'ambiguous' to preserve SIMCA's soft decision.
         """
-        X = _as_2d_array(X)
+        X = as_2d_array(X)
         results = self.decision_function(X)
         n = X.shape[0]
         predictions = []
