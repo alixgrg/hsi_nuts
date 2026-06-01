@@ -1,7 +1,7 @@
 import numpy as np
 from scipy.stats import chi2
 
-from .pca import pca_from_cov
+from .pca import PCAModel
 from .utils import as_2d_array, safe_positive
 
 
@@ -73,15 +73,11 @@ class SIMCAClassModel:
             )
         
         # target class mean and PCA model
-        self.mean_ = np.mean(X, axis=0)
-        Xc = X - self.mean_
-        self.pca_ = pca_from_cov(
-            Xc,
-            n_components=self.n_components,
-        )
-        self.loadings_ = self.pca_["loadings"]
-        self.eigenvalues_score_full_ = self.pca_["eigenvalues_score"]
-        self.eigenvalues_score_ = self.pca_["eigenvalues_score"][: self.n_components]
+        self.pca_ = PCAModel(n_components=self.n_components, center=True, eps=self.eps).fit(X)
+        self.mean_ = self.pca_.mean_
+        self.loadings_ = self.pca_.loadings_
+        self.eigenvalues_score_full_ = self.pca_.eigenvalues_
+        self.eigenvalues_score_ = self.pca_.eigenvalues_[: self.n_components]
         H, Q, _, _ = self.compute_distances(X)
         self.H_train_ = H
         self.Q_train_ = Q
@@ -90,7 +86,6 @@ class SIMCAClassModel:
         self._fit_individual_limits()
         #self.H_limit_ = np.quantile(H, 1.0 - self.alpha)
         #self.Q_limit_ = np.quantile(Q, 1.0 - self.alpha)
-
         return self
 
     def transform(self, X):

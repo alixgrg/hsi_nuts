@@ -1,17 +1,13 @@
 """
 Public API for the src package.
 
-This file exposes the stable functions/classes used in the notebooks.
-
-Example
--------
-from src import load_mat_file, SIMCAClassifier, plot_spectra, plot_scores
+The PCA public workflow is now based on PCAModel. The low-level pca_from_cov
+function remains inside src.pca for implementation/debugging but is not exported
+here to avoid using raw PCA dictionaries in notebooks.
 """
 
 # Dataload
-from .dataload import (
-    load_mat_file,
-)
+from .dataload import load_mat_file
 
 # Segmentation
 from .segmentation import (
@@ -30,11 +26,12 @@ from .database import (
     build_minimal_nir_uco_object_database,
 )
 
-# Redim Matrix
+# Matrix construction / feature extraction
 from .redim_matrix import object_db_to_matrix
 
 # Preprocessing
 from .preprocessing import (
+    SpectralPreprocessor,
     center_X,
     snv,
     vector_normalize,
@@ -44,27 +41,17 @@ from .preprocessing import (
     reflectance_to_absorbance,
 )
 
-# Pca
-from .pca import (
-    pca_from_cov,
-    pca_sklearn,
-)
+# PCA
+from .pca import PCAModel
 
-# Pca Comparison
+# PCA comparison
 from .pca_comparison import (
     class_separation_scores,
     mahalanobis_centroid_distance,
     compare_pca_representations,
 )
 
-# Stats
-from .stats import (
-    mean_spectrum,
-    hotelling_t2,
-    q_residuals,
-)
-
-# Simca
+# SIMCA
 from .simca import (
     SIMCAClassModel,
     BaseSIMCARule,
@@ -106,15 +93,18 @@ from .plotting import (
     plot_simca_rule_metric,
 )
 
-from utils import(
+# Utilities
+from .utils import (
     as_2d_array,
-    safe_positive,
-    mask_value_to_nan,
-    wavelength_axis,
     as_1d_array,
-    wavelength_axis,
+    as_list,
+    check_same_length,
     is_float_like,
+    safe_positive,
+    safe_divide,
+    mask_value_to_nan,
     filter_records,
+    wavelength_axis,
 )
 
 __all__ = [
@@ -129,6 +119,7 @@ __all__ = [
     "extract_objects_from_labeled_image",
     "build_minimal_nir_uco_object_database",
     "object_db_to_matrix",
+    "SpectralPreprocessor",
     "center_X",
     "snv",
     "vector_normalize",
@@ -136,14 +127,10 @@ __all__ = [
     "msc_transform",
     "savgol_derivative",
     "reflectance_to_absorbance",
-    "pca_from_cov",
-    "pca_sklearn",
+    "PCAModel",
     "class_separation_scores",
     "mahalanobis_centroid_distance",
     "compare_pca_representations",
-    "mean_spectrum",
-    "hotelling_t2",
-    "q_residuals",
     "SIMCAClassModel",
     "BaseSIMCARule",
     "SimpleSIMCARule",
@@ -179,11 +166,13 @@ __all__ = [
     "plot_simca_distance",
     "plot_simca_rule_metric",
     "as_2d_array",
-    "safe_positive",
-    "mask_value_to_nan",
-    "wavelength_axis",
     "as_1d_array",
-    "wavelength_axis",
+    "as_list",
+    "check_same_length",
     "is_float_like",
+    "safe_positive",
+    "safe_divide",
+    "mask_value_to_nan",
     "filter_records",
+    "wavelength_axis",
 ]

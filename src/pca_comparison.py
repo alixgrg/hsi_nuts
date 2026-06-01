@@ -1,20 +1,9 @@
 import numpy as np
 import pandas as pd
 
-from src.redim_matrix import (
-    object_db_to_matrix,
-)
-from src.preprocessing import (
-    SpectralPreprocessor,
-    center_X,
-    snv,
-    vector_normalize,
-    msc_fit,
-    msc_transform,
-    savgol_derivative,
-    reflectance_to_absorbance,
-)
-from src.pca import pca_from_cov
+from src.redim_matrix import object_db_to_matrix
+from src.preprocessing import SpectralPreprocessor
+from src.pca import pca_from_cov, PCAModel
 
 
 def class_separation_scores(T, y, n_components=3):
@@ -135,6 +124,22 @@ def mahalanobis_centroid_distance(T, y, n_components=3, reg=1e-6):
     return float(np.sqrt(d2))
 
 
+def _preproc_to_steps(preproc):
+    if isinstance(preproc, str):
+        aliases = {
+            "absorbance_snv": ("absorbance", "snv"),
+            "absorbance_sg_d1": ("absorbance", "sg_d1"),
+            "absorbance_sg_d2": ("absorbance", "sg_d2"),
+        }
+        return list(aliases.get(preproc, (preproc,)))
+    return list(preproc)
+
+
+def _preproc_name(preproc):
+    if isinstance(preproc, str):
+        return preproc
+    return "+".join(preproc)
+
 
 def compare_pca_representations(
     object_db,
@@ -182,6 +187,8 @@ def compare_pca_representations(
     }
 
     for matrix_method in matrix_methods:
+        if matrix_method not in level_by_method:
+            raise ValueError(f"Unknown matrix_method: {matrix_method}")
         print(f"\n=== Matrix method: {matrix_method} ===")
         X_raw, y, metadata = object_db_to_matrix(
             object_db=object_db,
@@ -193,6 +200,11 @@ def compare_pca_representations(
             replace=replace,
         )
         results[matrix_method] = {}
+        metadata = dict(metadata)
+        metadata.setdefault("observation_ids", metadata.get("object_id"))
+        metadata.setdefault("source_images", metadata.get("source_image"))
+        metadata.setdefault("batches", metadata.get("batch"))
+        metadata.setdefault("areas", metadata.get("area"))
         label_values, label_counts = np.unique(y, return_counts=True)
         label_count_dict = {
             str(label): int(count)
@@ -202,25 +214,19 @@ def compare_pca_representations(
         print(f"Labels: {label_count_dict}")
 
         for preproc in preprocessing_methods:
-            print(f"  - preprocessing: {preproc}")
-            if isinstance(preproc, str):
-                steps = [preproc]
-            else:
-                steps = list(preproc)
+            preproc_name = _preproc_name(preproc)
+            steps = _preproc_to_steps(preproc)
+            print(f"  - preprocessing: {preproc_name}")
             prep = SpectralPreprocessor(steps, sg_window_length=sg_window_length, sg_polyorder=sg_polyorder)
             X_pre = prep.fit_transform(X_raw, wavelengths=wavelengths)
-            X_c, mu = center_X(X_pre)
-            pca_res = pca_from_cov(
-                X_c,
-                n_components=n_components,
-            )
-            evr = pca_res["explained_variance_ratio"]
-            cum = pca_res["cumulative_explained_variance_ratio"]
-            T = pca_res["scores"]
+            pca = PCAModel(n_components=n_components, center=True).fit(X_pre)
+            T = pca.scores_
+            evr = pca.explained_variance_ratio_
+            cum = pca.cumulative_explained_variance_ratio_
             sep = class_separation_scores(T, y, n_components=n_components)
             row = {
                 "matrix_method": matrix_method,
-                "preprocessing": preproc,
+                "preprocessing": preproc_name,
                 "n_observations": int(X_raw.shape[0]),
                 "n_bands": int(X_raw.shape[1]),
                 "n_components": int(n_components),
@@ -240,15 +246,20 @@ def compare_pca_representations(
                 "mahalanobis_pc1_pc2_pc3": sep["mahalanobis_pc1_pc2_pc3"],
             }
             rows.append(row)
-            results[matrix_method][preproc] = {
+            results[matrix_method][preproc_name] = {
                 "X_raw": X_raw,
                 "X_preprocessed": X_pre,
-                "X_centered": X_c,
-                "center_mean": mu,
+                "pca": pca,
+                "covariance": pca.covariance_,
+                "eigenvalues": pca.eigenvalues_,
+                "eigenvectors": pca.eigenvectors_,
+                "scores": pca.scores_,
+                "loadings": pca.loadings_,
+                "explained_variance_ratio" : evr,
+                "cum = pca.cumulative_explained_variance_ratio": cum,
                 "y": y,
                 "metadata": metadata,
                 "preprocessing_info": prep,
-                "pca": pca_res,
                 "summary": row,
             }
     summary_df = pd.DataFrame(rows)

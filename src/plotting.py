@@ -4,7 +4,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from src.stats import hotelling_t2, q_residuals
+#from src.stats import hotelling_t2, q_residuals
 from src.utils import (
     mask_value_to_nan, 
     as_1d_array, 
@@ -16,8 +16,6 @@ from src.utils import (
 # -----------------------------------------------------------------------------
 # Utils
 # -----------------------------------------------------------------------------
-
-
 
 def _show_or_return(fig: go.Figure, show: bool = True):
     if show:
@@ -40,6 +38,7 @@ def _mean_spectrum_from_cube(cube: np.ndarray) -> np.ndarray:
     if cube.ndim != 3:
         raise ValueError("Expected a hyperspectral cube with shape (H, W, B).")
     return np.nanmean(cube.reshape(-1, cube.shape[2]), axis=0)
+
 
 def _extract_spectral_matrix(
     data,
@@ -380,7 +379,6 @@ def plot_object_view(
 ):
     obj = object_db_or_obj[object_id] if object_id is not None else object_db_or_obj
     object_label = object_id or "object"
-
     fig = make_subplots(rows=1, cols=2 if show_spectrum else 1, subplot_titles=(f"{object_label} — crop", spectrum_field) if show_spectrum else (f"{object_label} — crop",))
     fig.add_trace(go.Heatmap(z=obj["image_ref_crop"], colorscale="Gray", showscale=True, colorbar=dict(title="Image ref")), row=1, col=1)
     fig.add_trace(go.Heatmap(z=mask_value_to_nan(obj["mask"], 0), colorscale="Reds", opacity=0.35, showscale=False), row=1, col=1)
@@ -422,7 +420,6 @@ def plot_object_grid(
     selected = objects[:max_objects]
     if not selected:
         raise ValueError("No object to plot.")
-
     n_rows = int(np.ceil(len(selected) / n_cols))
     fig = make_subplots(rows=n_rows, cols=n_cols, subplot_titles=[f"{oid}<br>area={obj.get('area_pixels')}" for oid, obj in selected])
     for idx, (_, obj) in enumerate(selected):
@@ -455,20 +452,20 @@ def plot_object_areas(object_db, source_image=None, nut_type=None, show=True):
 # PCA / score-space functions
 # -----------------------------------------------------------------------------
 
-def _pca_scores_from_args(scores=None, pca_res=None):
-    if scores is not None:
-        return np.asarray(scores, dtype=float)
-    if pca_res is not None:
-        return np.asarray(pca_res["scores"], dtype=float)
-    raise ValueError("Provide scores or pca_res.")
+# def _pca_scores_from_args(scores=None, pca_res=None):
+#     if scores is not None:
+#         return np.asarray(scores, dtype=float)
+#     if pca_res is not None:
+#         return np.asarray(pca_res["scores"], dtype=float)
+#     raise ValueError("Provide scores or pca_res.")
 
 
-def _pca_loadings_from_args(loadings=None, pca_res=None):
-    if loadings is not None:
-        return np.asarray(loadings, dtype=float)
-    if pca_res is not None:
-        return np.asarray(pca_res["loadings"], dtype=float)
-    raise ValueError("Provide loadings or pca_res.")
+# def _pca_loadings_from_args(loadings=None, pca_res=None):
+#     if loadings is not None:
+#         return np.asarray(loadings, dtype=float)
+#     if pca_res is not None:
+#         return np.asarray(pca_res["loadings"], dtype=float)
+#     raise ValueError("Provide loadings or pca_res.")
 
 # Previously plot_pca_explained_variance
 def plot_explained_variance(
@@ -486,7 +483,6 @@ def plot_explained_variance(
         evr = evr[:n_components_to_show]
         cum = cum[:n_components_to_show]
     pcs = np.arange(1, len(evr) + 1)
-
     fig = go.Figure()
     fig.add_trace(go.Bar(x=pcs, y=evr, name="Explained variance", hovertemplate="PC%{x}<br>variance: %{y:.4f}<extra></extra>"))
     fig.add_trace(go.Scatter(x=pcs, y=cum, mode="lines+markers", name="Cumulative variance", hovertemplate="PC%{x}<br>cumulative: %{y:.4f}<extra></extra>"))
@@ -496,8 +492,8 @@ def plot_explained_variance(
 
 # Merged version of plot_pca_scores_2d, plot_pca_scores_3d
 def plot_scores(
-    scores=None,
-    pca_res=None,
+    scores,
+    #pca_res=None,
     dims: Sequence[int] | None = None,
     pcx: int = 1,
     pcy: int = 2,
@@ -515,12 +511,11 @@ def plot_scores(
     show: bool = True,
     **metadata,
 ):
-    T = _pca_scores_from_args(scores, pca_res)
     if dims is None:
         dims = (pcx, pcy) if pcz is None else (pcx, pcy, pcz)
     dims = tuple(dims)
     idx = [d - 1 for d in dims]
-    n = T.shape[0]
+    n = scores.shape[0]
 
     if color_values is None:
         if color_by == "source_image":
@@ -541,7 +536,7 @@ def plot_scores(
         for group in np.unique(groups):
             mask = groups == group
             fig.add_trace(go.Scatter(
-                x=T[mask, idx[0]], y=T[mask, idx[1]], mode="markers", name=str(group), customdata=custom[mask],
+                x=scores[mask, idx[0]], y=scores[mask, idx[1]], mode="markers", name=str(group), customdata=custom[mask],
                 marker=dict(size=9, opacity=0.8),
                 hovertemplate=f"C{dims[0]}: %{{x:.4f}}<br>C{dims[1]}: %{{y:.4f}}<br>" + hover_meta + "<extra></extra>",
             ))
@@ -552,7 +547,7 @@ def plot_scores(
         for group in np.unique(groups):
             mask = groups == group
             fig.add_trace(go.Scatter3d(
-                x=T[mask, idx[0]], y=T[mask, idx[1]], z=T[mask, idx[2]], mode="markers", name=str(group), customdata=custom[mask],
+                x=scores[mask, idx[0]], y=scores[mask, idx[1]], z=scores[mask, idx[2]], mode="markers", name=str(group), customdata=custom[mask],
                 marker=dict(size=5, opacity=0.85),
                 hovertemplate=f"C{dims[0]}: %{{x:.4f}}<br>C{dims[1]}: %{{y:.4f}}<br>C{dims[2]}: %{{z:.4f}}<br>" + hover_meta + "<extra></extra>",
             ))
@@ -565,7 +560,7 @@ def plot_scores(
 # Generic version of plot_pca_loadings, and old plot_loadings
 def plot_loadings(
     loadings: np.ndarray,
-    pca_res=None,
+    #pca_res=None,
     wavelengths=None,
     components: Sequence[int] = (1, 2, 3),
     component_names: Sequence[str] | None = None,
@@ -574,27 +569,21 @@ def plot_loadings(
     height: int = 500,
     show: bool = True,
 ):
-    if component_names is None and pca_res is not None and not isinstance(pca_res, Mapping):
-        maybe_names = list(pca_res) if isinstance(pca_res, (list, tuple, np.ndarray)) else None
-        if maybe_names and all(isinstance(v, str) for v in maybe_names):
-            component_names = maybe_names
-            pca_res = None
-            components = tuple(range(1, len(component_names) + 1))
-    P = _pca_loadings_from_args(loadings, pca_res)
-    x, x_title = wavelength_axis(P.shape[0], wavelengths)
+    x, x_title = wavelength_axis(loadings.shape[0], wavelengths)
     fig = go.Figure()
     for k, comp in enumerate(components):
         j = comp - 1
-        name = component_names[k] if component_names is not None and k < len(component_names) else f"{component_prefix}{comp}"
-        fig.add_trace(go.Scatter(x=x, y=P[:, j], mode="lines+markers", name=name))
+        if j >= loadings.shape[1]:
+            continue
+        name = component_names[k] if component_names is not None and k < len(component_names) else f"PC{comp}"
+        fig.add_trace(go.Scatter(x=x, y=loadings[:, j], mode="lines+markers", name=name))
     fig.update_layout(title=title, xaxis_title=x_title, yaxis_title="Loading", width=width, height=height)
     return _show_or_return(fig, show)
 
 # Generic version of plot_pca_biplot_2D
 def plot_biplot(
-    scores: np.ndarray=None,
-    pca_res=None,
-    loadings: np.ndarray=None,
+    scores: np.ndarray,
+    loadings: np.ndarray,
     dims: Sequence[int] = (1, 2),
     labels=None,
     color_by: str = "label",
@@ -608,12 +597,12 @@ def plot_biplot(
     show: bool = True,
     **metadata,
 ):
-    T = _pca_scores_from_args(scores, pca_res)
-    P = _pca_loadings_from_args(loadings, pca_res)
+    scores = np.asarray(scores, dtype=float)
+    loadings = np.asarray(loadings, dtype=float)
     if len(dims) != 2:
         raise ValueError("Biplot is implemented only in 2D.")
     fig = plot_scores(
-        T,
+        scores,
         dims=dims, 
         labels=labels, 
         color_values=color_values, 
@@ -625,12 +614,12 @@ def plot_biplot(
         **metadata
     )
     ix, iy = dims[0] - 1, dims[1] - 1
-    strength = np.sqrt(P[:, ix] ** 2 + P[:, iy] ** 2)
+    strength = np.sqrt(loadings[:, ix] ** 2 + loadings[:, iy] ** 2)
     top_idx = np.argsort(strength)[-n_loadings:]
-    score_range = max(np.nanmax(np.abs(T[:, ix])), np.nanmax(np.abs(T[:, iy])))
+    score_range = max(np.nanmax(np.abs(scores[:, ix])), np.nanmax(np.abs(scores[:, iy])))
     for j in top_idx:
-        x_end = P[j, ix] * score_range * loading_scale
-        y_end = P[j, iy] * score_range * loading_scale
+        x_end = loadings[j, ix] * score_range * loading_scale
+        y_end = loadings[j, iy] * score_range * loading_scale
         label = f"band {j}" if wavelengths is None else f"{np.asarray(wavelengths)[j]:.1f} nm"
         fig.add_annotation(x=x_end, y=y_end, ax=0, ay=0, xref="x", yref="y", axref="x", ayref="y", showarrow=True, arrowhead=3, text=label)
     return _show_or_return(fig, show)
@@ -701,16 +690,21 @@ def plot_xy_diagnostic(
 
 
 # Wrappers
-def plot_pca_metric_t2(pca_res, labels=None, object_ids=None, source_images=None, n_components=None, title="Hotelling T²", show=True):
-    return plot_metric_by_index(hotelling_t2(pca_res, n_components), labels=labels, object_ids=object_ids, source_images=source_images, title=title, y_title="Hotelling T²", show=show)
+def plot_pca_metric_t2(pca_model, X=None, labels=None, object_ids=None, source_images=None, n_components=None, title="Hotelling T²", show=True):
+    T2 = pca_model.hotelling_t2(X, n_components=n_components)
+    return plot_metric_by_index(T2, labels=labels, object_ids=object_ids, source_images=source_images, title=title, y_title="Hotelling T²", show=show)
 
-def plot_pca_metric_q(X_centered, pca_res, labels=None, object_ids=None, source_images=None, n_components=None, title="Q residuals", show=True):
-    Q, _ = q_residuals(X_centered, pca_res, n_components)
+def plot_pca_metric_q(pca_model, X=None, labels=None, object_ids=None, source_images=None, n_components=None, title="Q residuals", show=True):
+    if X is None:
+        X = pca_model.inverse_transform(pca_model.scores_)
+    Q, _ = pca_model.q_residuals(X, n_components=n_components)
     return plot_metric_by_index(Q, labels=labels, object_ids=object_ids, source_images=source_images, title=title, y_title="Q residual", show=show)
 
-def plot_pca_diagnostic(X_centered, pca_res, labels=None, object_ids=None, source_images=None, n_components=None, title="PCA diagnostic: Q residuals vs Hotelling T²", show=True):
-    Q, _ = q_residuals(X_centered, pca_res, n_components)
-    T2 = hotelling_t2(pca_res, n_components)
+
+def plot_pca_diagnostic(pca_model, X=None, labels=None, object_ids=None, source_images=None, n_components=None, title="PCA diagnostic: Q residuals vs Hotelling T²", show=True):
+    if X is None:
+        X = pca_model.inverse_transform(pca_model.scores_)
+    T2, Q = pca_model.distances(X, n_components=n_components)
     return plot_xy_diagnostic(T2, Q, labels=labels, object_ids=object_ids, source_images=source_images, title=title, x_title="Hotelling T²", y_title="Q residual", show=show)
 
 
