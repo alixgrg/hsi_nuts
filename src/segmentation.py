@@ -99,7 +99,7 @@ def clean_mask(
     """
     Clean binary mask.
 
-    For your current images, avoid being too aggressive:
+    For current images, avoid being too aggressive:
     - small min_area
     - opening_radius=0 or 1
     - closing_radius=1 or 2
@@ -154,7 +154,7 @@ def segment_objects(
     tau=None,
     tau_min=0.02,
     band_index=None,
-    min_area=20,
+    min_area=10,
     opening_radius=0,
     closing_radius=1,
     fill_holes=True,
@@ -164,11 +164,11 @@ def segment_objects(
     """
     Segment individual objects in a hyperspectral cube.
 
-    Recommended starting point for your NIR UCO images:
+    Recommended starting values:
         reference_method="max"
         threshold_method="fixed"
         tau_min=0.02
-        min_area=20
+        min_area=10
         opening_radius=0
         closing_radius=1
         use_watershed=False

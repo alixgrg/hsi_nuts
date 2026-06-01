@@ -21,6 +21,7 @@ from .segmentation import (
 # Database
 from .database import (
     NIR_UCO_NAME_CONFIG,
+    preprocess_nir_uco_cube,
     parse_image_key,
     extract_objects_from_labeled_image,
     build_minimal_nir_uco_object_database,

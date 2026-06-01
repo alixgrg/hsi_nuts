@@ -146,6 +146,20 @@ def _unpack_segmentation_result(seg_result):
     )
 
 
+def preprocess_nir_uco_cube(
+    raw_cube,
+    n_remove:int,
+):
+    """
+    Minimal preprocessing for NIR UCO cubes
+
+    Remove first noisy bands:
+        X_clean = X_raw[:, :, 6:]
+    Expend Later
+    """
+    cube = raw_cube[:, :, n_remove:]
+    return cube
+
 
 def parse_image_key(key, config=None):
     """
@@ -394,6 +408,7 @@ def build_minimal_nir_uco_object_database(
     selected_keys=None,
     config=None,
     preprocess_func=None,
+    n_remove=6,
     wavelengths=None,
     data_mode="reflectance",
     min_area=100,
@@ -417,6 +432,8 @@ def build_minimal_nir_uco_object_database(
         Function applied to each raw cube before segmentation.
         Example: preprocess_nir_uco_cube.
         If None, cubes are used as they are.
+    n_remove : int
+        Number of initial bands to remove if using preprocess_nir_uco_cube.
     wavelengths : np.ndarray or None
         Wavelength axis after preprocessing.
     data_mode : str
@@ -462,7 +479,7 @@ def build_minimal_nir_uco_object_database(
 
         raw_cube = data[key]
         if preprocess_func is not None:
-            cube = preprocess_func(raw_cube)
+            cube = preprocess_func(raw_cube, n_remove=n_remove)
         else:
             cube = np.asarray(raw_cube)
         seg_result = segment_objects(

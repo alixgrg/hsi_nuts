@@ -20,6 +20,7 @@ from src.utils import (
 def _show_or_return(fig: go.Figure, show: bool = True):
     if show:
         fig.show()
+        return None
     return fig
 
 

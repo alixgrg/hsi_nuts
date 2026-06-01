@@ -9,7 +9,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import numpy as np
 
 from src.dataload import load_mat_file
-from src.database import build_minimal_nir_uco_object_database
+from src.database import build_minimal_nir_uco_object_database, preprocess_nir_uco_cube
 from src.utils import wavelength_axis
 
 START_NM = 889
@@ -25,21 +25,6 @@ SELECTED_KEYS = [
     "peanut4_sb",
 ]
 DATA_MODE = "reflectance"
-
-def preprocess_nir_uco_cube(
-    raw_cube,
-    n_remove=N_REMOVE,
-):
-    """
-    Minimal preprocessing for NIR UCO cubes
-
-    Remove first noisy bands:
-        X_clean = X_raw[:, :, 6:]
-    Expend Later
-    """
-    cube = raw_cube[:, :, n_remove:]
-    return cube
-
 
 
 
@@ -101,7 +86,7 @@ def main():
     wavelengths = wavelength_axis()
 
     def preprocess_func(raw_cube):
-        return preprocess_nir_uco_cube(raw_cube)
+        return preprocess_nir_uco_cube(raw_cube, n_remove=N_REMOVE)
 
     object_db, image_db = build_minimal_nir_uco_object_database(
         data=data,
