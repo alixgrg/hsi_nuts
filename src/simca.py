@@ -25,11 +25,16 @@ class SIMCAClassModel:
         n_components=3,
         alpha=0.05,
         eps=1e-12,
+        h_dof_method="theoretical",
+        q_dof_method="box",
     ):
         self.class_name = class_name
         self.n_components = n_components
         self.alpha = float(alpha)
         self.eps = eps
+
+        self.h_dof_method = h_dof_method
+        self.q_dof_method = q_dof_method
 
         self.mean_ = None
         self.loadings_ = None
@@ -41,8 +46,15 @@ class SIMCAClassModel:
         self.Q_train_ = None
         self.H0_ = None
         self.Q0_ = None
+        self.NH_ = None
+        self.NQ_ = None
         self.H_limit_ = None
         self.Q_limit_ = None
+
+        self.var_H_ = None
+        self.var_Q_ = None
+        self.q1_residual_ = None
+        self.q2_residual_ = None
 
         self.n_samples_ = None
         self.n_features_ = None
@@ -126,36 +138,134 @@ class SIMCAClassModel:
     
     def _fit_distribution_parameters(self):
         """
-        Estimate H0, Q0, NH and NQ for DD-SIMCA and CI-SIMCA.
+        Estimate H0, Q0, NH and NQ for SIMCA decision rules.
 
-        Paper formulas:
-            H0 = A / I
-            Q0 = mean(Q)
-            NH = 2 H0^2 / Var(H)
-            NQ = 2 Q0^2 / Var(Q)
+        Important convention
+        --------------------
+        PCAModel stores covariance eigenvalues:
 
-        Variances are computed with denominator I, as in the paper.
+            lambda_cov = sum_i(t_ia^2) / (I - 1)
+
+        Therefore the score distance used here,
+
+            H = sum_a t_ia^2 / lambda_cov_a
+
+        is on the covariance scale.
+
+        With this convention:
+
+            mean(H) = A * (I - 1) / I
+
+        instead of A / I in the paper convention.
+
+        For H:
+            default uses theoretical NH = A.
+
+        For Q:
+            default uses Box/Qin moments from residual covariance eigenvalues:
+
+                Q0 = sum residual eigenvalues
+                NQ = q1^2 / q2
+
+            where:
+                q1 = sum(lambda_residual)
+                q2 = sum(lambda_residual^2)
         """
-        I = self.n_samples_
-        A = self.n_components
-        H = self.H_train_
-        Q = self.Q_train_
-        self.H0_ = A / I
-        self.Q0_ = np.mean(Q)
-        var_H = np.mean((H - self.H0_) ** 2)
-        var_Q = np.mean((Q - self.Q0_) ** 2)
-        if var_H <= self.eps:
+        I = int(self.n_samples_)
+        A = int(self.n_components)
+
+        H = np.asarray(self.H_train_, dtype=float)
+        Q = np.asarray(self.Q_train_, dtype=float)
+
+        # ------------------------------------------------------------
+        # H distribution
+        # ------------------------------------------------------------
+        # Because H is computed with covariance eigenvalues, not score
+        # eigenvalues, the expected mean is A * (I - 1) / I.
+        self.H0_ = float(A * (I - 1) / I)
+
+        if self.h_dof_method == "theoretical":
+            # Under approximately normal scores, NH = A.
+            # This avoids unstable empirical variance estimation.
             self.NH_ = float(A)
+            self.var_H_ = float(2.0 * self.H0_**2 / self.NH_)
+
+        elif self.h_dof_method == "moment":
+            # Optional empirical method of moments.
+            # Use only for diagnostics or if you explicitly want data-driven H DoF.
+            var_H = float(np.mean((H - self.H0_) ** 2))
+            self.var_H_ = var_H
+
+            if var_H <= self.eps:
+                self.NH_ = float(A)
+            else:
+                self.NH_ = float(2.0 * self.H0_**2 / var_H)
+
         else:
-            self.NH_ = float(2.0 * self.H0_ ** 2 / var_H)
-        if var_Q <= self.eps or self.Q0_ <= self.eps:
-            # If residuals are almost zero, set a large effective DoF.
-            self.NQ_ = float(max(self.n_features_ - A, 1))
+            raise ValueError(
+                "h_dof_method must be either 'theoretical' or 'moment'."
+            )
+
+        # ------------------------------------------------------------
+        # Q distribution
+        # ------------------------------------------------------------
+        eigenvalues = np.asarray(self.pca_.eigenvalues_, dtype=float)
+
+        # Residual covariance eigenvalues after the retained A components.
+        residual_eigenvalues = eigenvalues[A:]
+        residual_eigenvalues = residual_eigenvalues[
+            residual_eigenvalues > self.eps
+        ]
+
+        if self.q_dof_method == "box" and residual_eigenvalues.size > 0:
+            q1 = float(np.sum(residual_eigenvalues))
+            q2 = float(np.sum(residual_eigenvalues ** 2))
+
+            self.q1_residual_ = q1
+            self.q2_residual_ = q2
+
+            self.Q0_ = q1
+
+            if q2 <= self.eps:
+                self.NQ_ = float(max(self.n_features_ - A, 1))
+            else:
+                self.NQ_ = float(q1**2 / q2)
+
+            self.var_Q_ = float(2.0 * self.Q0_**2 / self.NQ_)
+
+        elif self.q_dof_method == "moment":
+            # Empirical fallback based on the observed Q distribution.
+            self.Q0_ = float(np.mean(Q))
+            var_Q = float(np.mean((Q - self.Q0_) ** 2))
+            self.var_Q_ = var_Q
+
+            if var_Q <= self.eps or self.Q0_ <= self.eps:
+                self.NQ_ = float(max(self.n_features_ - A, 1))
+            else:
+                self.NQ_ = float(2.0 * self.Q0_**2 / var_Q)
+
         else:
-            self.NQ_ = float(2.0 * self.Q0_ ** 2 / var_Q)
-        # Keep DoF numerically valid
-        self.NH_ = max(self.NH_, self.eps)
-        self.NQ_ = max(self.NQ_, self.eps)
+            # Degenerate case: residual eigenvalues are numerically zero.
+            # This can happen when the retained PCs reconstruct almost all variation.
+            self.Q0_ = float(np.mean(Q))
+            self.var_Q_ = float(np.mean((Q - self.Q0_) ** 2))
+
+            if self.Q0_ <= self.eps:
+                self.NQ_ = float(max(self.n_features_ - A, 1))
+            elif self.var_Q_ <= self.eps:
+                self.NQ_ = float(max(self.n_features_ - A, 1))
+            else:
+                self.NQ_ = float(2.0 * self.Q0_**2 / self.var_Q_)
+
+        # ------------------------------------------------------------
+        # Safety
+        # ------------------------------------------------------------
+        self.H0_ = max(float(self.H0_), self.eps)
+        self.Q0_ = max(float(self.Q0_), self.eps)
+
+        self.NH_ = max(float(self.NH_), self.eps)
+        self.NQ_ = max(float(self.NQ_), self.eps)
+
 
     def _fit_individual_limits(self):
         """
@@ -202,6 +312,8 @@ class SIMCAClassModel:
             "Q_limit": self.Q_limit_,
             "H0": self.H0_,
             "Q0": self.Q0_,
+            "var_H": self.var_H_,
+            "var_Q": self.var_Q_,
             "NH": self.NH_,
             "NQ": self.NQ_,
         }

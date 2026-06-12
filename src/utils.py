@@ -8,6 +8,8 @@ not specific to PCA, SIMCA, spectroscopy, segmentation, or plotting.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
+import pickle
 from typing import Any
 
 import numpy as np
@@ -171,3 +173,21 @@ def wavelength_axis(n_features: int, wavelengths=None, default_label: str = "Ban
     if wavelengths is None:
         return np.arange(n_features), default_label
     return np.asarray(wavelengths), "Wavelength (nm)"
+
+def make_wavelengths(start_nm:int, end_nm:int, original_bands:int, n_remove:int):
+    """
+    Build wavelength axis after removing the first noisy bands.
+    Raw data: 69 bands from 889 to 1702 nm.
+    Processed data: bands [n_remove:] only.
+    """
+    full_axis = np.linspace(float(start_nm), float(end_nm), int(original_bands))
+    return full_axis[int(n_remove):]
+
+
+def save_pickle(obj, path):
+    """Save a Python object with pickle."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
+    return path

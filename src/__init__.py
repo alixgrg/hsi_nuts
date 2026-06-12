@@ -122,6 +122,8 @@ from .utils import (
     mask_value_to_nan,
     filter_records,
     wavelength_axis,
+    make_wavelengths,
+    save_pickle,
 )
 
 __all__ = [
@@ -208,4 +210,6 @@ __all__ = [
     "mask_value_to_nan",
     "filter_records",
     "wavelength_axis",
+    "make_wavelengths",
+    "save_pickle",
 ]
