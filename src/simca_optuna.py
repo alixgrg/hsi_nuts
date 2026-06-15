@@ -87,7 +87,7 @@ def make_simca_optuna_objective(
     replace: bool = False,
     wavelengths=None,
     sg_window_choices: Sequence[int] = (7, 9, 11, 13, 20),
-    sg_polyorder_choices: Sequence[int] = (2, 3),
+    sg_polyorder_choices: Sequence[int] = [2],
     position_dilation_radius_choices: Sequence[int] = (0, 2, 3, 5),
     objective_metric: str = "weighted",
     sensitivity_weight: float = 0.0,
