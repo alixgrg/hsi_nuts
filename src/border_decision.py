@@ -81,19 +81,30 @@ def binary_detection_metrics(
     true_col: str = "true_peanut_object",
     pred_col: str = "predicted_peanut_object",
 ) -> dict:
-    """Compute binary object-level peanut detection metrics."""
+    """Compute binary object-level peanut detection metrics.
+
+    The positive class is peanut. In addition to sensitivity/specificity, this
+    returns accuracy, precision, F1 score, false-negative rate and false-positive
+    rate so hyperparameter ranking can explicitly prioritize FN minimization.
+    """
     d = df.dropna(subset=[true_col, pred_col]).copy()
+    empty = {
+        "n": 0,
+        "tp": 0,
+        "fn": 0,
+        "fp": 0,
+        "tn": 0,
+        "peanut_sensitivity": np.nan,
+        "almond_specificity": np.nan,
+        "balanced_accuracy": np.nan,
+        "accuracy": np.nan,
+        "precision": np.nan,
+        "f1_score": np.nan,
+        "fn_rate": np.nan,
+        "fp_rate": np.nan,
+    }
     if len(d) == 0:
-        return {
-            "n": 0,
-            "tp": 0,
-            "fn": 0,
-            "fp": 0,
-            "tn": 0,
-            "peanut_sensitivity": np.nan,
-            "almond_specificity": np.nan,
-            "balanced_accuracy": np.nan,
-        }
+        return empty
 
     y_true = d[true_col].astype(bool).to_numpy()
     y_pred = d[pred_col].astype(bool).to_numpy()
@@ -103,12 +114,22 @@ def binary_detection_metrics(
     fp = int(np.sum(~y_true & y_pred))
     tn = int(np.sum(~y_true & ~y_pred))
 
+    n = int(len(d))
     sens = tp / (tp + fn) if tp + fn > 0 else np.nan
     spec = tn / (tn + fp) if tn + fp > 0 else np.nan
     ba = 0.5 * (sens + spec) if np.isfinite(sens) and np.isfinite(spec) else np.nan
+    acc = (tp + tn) / n if n > 0 else np.nan
+    precision = tp / (tp + fp) if tp + fp > 0 else np.nan
+    f1 = (
+        2.0 * precision * sens / (precision + sens)
+        if np.isfinite(precision) and np.isfinite(sens) and (precision + sens) > 0
+        else np.nan
+    )
+    fn_rate = fn / (tp + fn) if tp + fn > 0 else np.nan
+    fp_rate = fp / (fp + tn) if fp + tn > 0 else np.nan
 
     return {
-        "n": int(len(d)),
+        "n": n,
         "tp": tp,
         "fn": fn,
         "fp": fp,
@@ -116,6 +137,11 @@ def binary_detection_metrics(
         "peanut_sensitivity": sens,
         "almond_specificity": spec,
         "balanced_accuracy": ba,
+        "accuracy": acc,
+        "precision": precision,
+        "f1_score": f1,
+        "fn_rate": fn_rate,
+        "fp_rate": fp_rate,
     }
 
 

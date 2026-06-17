@@ -93,9 +93,10 @@ class SIMCAClassModel:
         H, Q, _, _ = self.compute_distances(X)
         self.H_train_ = H
         self.Q_train_ = Q
-        # empirical limits
+        # chi2 based distribution parameters and theoretical limits
         self._fit_distribution_parameters()
         self._fit_individual_limits()
+        self.fit_empirical_limits()
         #self.H_limit_ = np.quantile(H, 1.0 - self.alpha)
         #self.Q_limit_ = np.quantile(Q, 1.0 - self.alpha)
         return self
@@ -290,6 +291,29 @@ class SIMCAClassModel:
         self.H_limit_ = max(float(self.H_limit_), self.eps)
         self.Q_limit_ = max(float(self.Q_limit_), self.eps)
 
+    def fit_empirical_limits(self, alpha=None):
+        """
+        Compute empirical H and Q limits from training distances.
+
+        This is useful for comparing chi-square theoretical limits
+        with empirical quantile-based limits.
+        """
+        if alpha is None:
+            alpha = self.alpha
+        H = np.asarray(self.H_train_, dtype=float)
+        Q = np.asarray(self.Q_train_, dtype=float)
+        self.H_empirical_limit_ = float(np.quantile(H, 1.0 - alpha))
+        self.Q_empirical_limit_ = float(np.quantile(Q, 1.0 - alpha))
+        C_chi2 = H / self.H_limit_ + Q / self.Q_limit_
+        self.C_alt_empirical_limit_chi2_HQ_ = float(
+            np.quantile(C_chi2, 1.0 - alpha)
+        )
+        C_emp = H / self.H_empirical_limit_ + Q / self.Q_empirical_limit_
+        self.C_alt_empirical_limit_empirical_HQ_ = float(
+            np.quantile(C_emp, 1.0 - alpha)
+        )
+        return self
+
     def decision_values(self, X):
         """
         Compute all useful quantities for decision rules.
@@ -378,24 +402,57 @@ class AltSIMCARule(BaseSIMCARule):
     """
     Alternative SIMCA rule.
 
-    Accept if:
+    Default: Accept if:
         H / H_limit + Q / Q_limit < 2
+
+    Options:
+        limit_mode="chi2" or "empirical"
+        threshold_mode="fixed" or "empirical"
     """
     name = "alternative"
 
-    def __init__(self, threshold=2.0, eps=1e-12):
+    def __init__(self, threshold=2.0, limit_mode="chi2", threshold_mode="fixed", eps=1e-12):
         self.threshold = threshold
+        self.limit_mode = limit_mode
+        self.threshold_mode = threshold_mode
         self.eps = eps
 
-    def statistic(self, H, Q, model):
-        C_alt = H / model.H_limit_ + Q / model.Q_limit_
-        return C_alt
+    def _get_HQ_limits(self, model):
+        if self.limit_mode == "chi2":
+            return model.H_limit_, model.Q_limit_
+        if self.limit_mode == "empirical":
+            if not hasattr(model, "H_empirical_limit_"):
+                model.fit_empirical_limits()
+            return model.H_empirical_limit_, model.Q_empirical_limit_
+        raise ValueError("limit_mode must be 'chi2' or 'empirical'.")
 
-    def limit(self,model):
-        return self.threshold
+    def statistic(self, H, Q, model):
+        H_limit, Q_limit = self._get_HQ_limits(model)
+        return H / max(H_limit, self.eps) + Q / max(Q_limit, self.eps)
+    
+    def fit(self, model):
+        if not hasattr(model, "H_empirical_limit_"):
+            model.fit_empirical_limits()
+        if self.threshold_mode == "empirical":
+            H = model.H_train_
+            Q = model.Q_train_
+            C = self.statistic(H, Q, model)
+            self.empirical_threshold_ = float(
+                np.quantile(C, 1.0 - model.alpha)
+            )
+        return self
+    
+    def limit(self, model):
+        if self.threshold_mode == "fixed":
+            return float(self.threshold)
+        if self.threshold_mode == "empirical":
+            if not hasattr(self, "empirical_threshold_"):
+                self.fit(model)
+            return float(self.empirical_threshold_)
+        raise ValueError("threshold_mode must be 'fixed' or 'empirical'.")
 
     def accept(self, H, Q, model):
-        return self.statistic(H, Q, model) < self.threshold
+        return self.statistic(H, Q, model) < self.limit(model)
 
 
 class CombinedIndexSIMCARule(BaseSIMCARule):

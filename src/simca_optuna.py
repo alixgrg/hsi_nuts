@@ -27,7 +27,7 @@ def _require_optuna():
 
 def _score_from_metrics(
     metrics: Mapping[str, Any],
-    objective_metric: str = "weighted",
+    objective_metric: str = "fn_fp_hierarchical",
     sensitivity_weight: float = 0.0,
     specificity_weight: float = 0.0,
     balanced_accuracy_weight: float = 0.1,
@@ -38,17 +38,36 @@ def _score_from_metrics(
     """
     Build the scalar score maximized by Optuna.
 
-    objective_metric="balanced_accuracy" uses the selected metric directly.
-    objective_metric="weighted" uses:
-        w_ba * balanced_accuracy + w_sens * peanut_sensitivity + w_spec * almond_specificity
+    Recommended for this project:
+        objective_metric="fn_fp_hierarchical"
 
-    Optional constraints are applied as soft penalties.
+    This approximates the tutor's hierarchy: minimize false negatives first,
+    then false positives, while keeping F1 and accuracy as weak tie-breakers.
+    Higher is better. The implicit FN:FP cost ratio is 10:1 on rates.
+
+    objective_metric="weighted" keeps the previous behavior.
     """
     ba = float(metrics.get("balanced_accuracy", np.nan))
     sens = float(metrics.get("peanut_sensitivity", np.nan))
     spec = float(metrics.get("almond_specificity", np.nan))
+    fn_rate = float(metrics.get("fn_rate", np.nan))
+    fp_rate = float(metrics.get("fp_rate", np.nan))
+    f1 = float(metrics.get("f1_score", np.nan))
+    acc = float(metrics.get("accuracy", np.nan))
 
-    if objective_metric == "weighted":
+    if not np.isfinite(fn_rate) and np.isfinite(sens):
+        fn_rate = 1.0 - sens
+    if not np.isfinite(fp_rate) and np.isfinite(spec):
+        fp_rate = 1.0 - spec
+
+    if objective_metric == "fn_fp_hierarchical":
+        if not np.isfinite(fn_rate) or not np.isfinite(fp_rate):
+            return -np.inf
+        f1_term = f1 if np.isfinite(f1) else 0.0
+        acc_term = acc if np.isfinite(acc) else 0.0
+        score = -(10.0 * fn_rate + 1.0 * fp_rate) + 0.05 * f1_term + 0.02 * acc_term
+
+    elif objective_metric == "weighted":
         score = (
             balanced_accuracy_weight * ba
             + sensitivity_weight * sens
@@ -89,7 +108,7 @@ def make_simca_optuna_objective(
     sg_window_choices: Sequence[int] = (7, 9, 11, 13, 20),
     sg_polyorder_choices: Sequence[int] = [2],
     position_dilation_radius_choices: Sequence[int] = (0, 2, 3, 5),
-    objective_metric: str = "weighted",
+    objective_metric: str = "fn_fp_hierarchical",
     sensitivity_weight: float = 0.0,
     specificity_weight: float = 0.0,
     balanced_accuracy_weight: float = 0.1,
@@ -244,13 +263,15 @@ def run_optuna_simca_pixel_optimization(
     random_state: int = 42,
     n_jobs: int = 1,
     show_progress_bar: bool = True,
+    close_storage: bool = True,
+    sqlite_timeout: float = 30.0,
     **objective_kwargs,
 ):
     """
     Run Optuna optimization and return (study, trials_df).
 
     If storage_path is given, the study is saved as a SQLite database and can be resumed.
-    Example: storage_path="outputs/optuna/simca_optuna.db".
+    The storage session is explicitly closed at the end to avoid database locks.
     """
     optuna = _require_optuna()
 
@@ -258,10 +279,24 @@ def run_optuna_simca_pixel_optimization(
     pruner = optuna.pruners.NopPruner()
 
     storage = None
+    storage_obj = None
+
     if storage_path is not None:
         storage_path = Path(storage_path)
         storage_path.parent.mkdir(parents=True, exist_ok=True)
-        storage = f"sqlite:///{storage_path.as_posix()}"
+
+        storage_url = f"sqlite:///{storage_path.as_posix()}"
+
+        storage_obj = optuna.storages.RDBStorage(
+            url=storage_url,
+            engine_kwargs={
+                "connect_args": {
+                    "timeout": float(sqlite_timeout),
+                }
+            },
+        )
+
+        storage = storage_obj
 
     objective = make_simca_optuna_objective(
         object_db=object_db,
@@ -277,23 +312,36 @@ def run_optuna_simca_pixel_optimization(
         **objective_kwargs,
     )
 
-    study = optuna.create_study(
-        study_name=study_name,
-        direction="maximize",
-        sampler=sampler,
-        pruner=pruner,
-        storage=storage,
-        load_if_exists=load_if_exists,
-    )
-    study.optimize(
-        objective,
-        n_trials=n_trials,
-        timeout=timeout,
-        n_jobs=n_jobs,
-        show_progress_bar=show_progress_bar,
-    )
+    study = None
 
-    return study, optuna_trials_dataframe(study)
+    try:
+        study = optuna.create_study(
+            study_name=study_name,
+            direction="maximize",
+            sampler=sampler,
+            pruner=pruner,
+            storage=storage,
+            load_if_exists=load_if_exists,
+        )
+
+        study.optimize(
+            objective,
+            n_trials=n_trials,
+            timeout=timeout,
+            n_jobs=n_jobs,
+            show_progress_bar=show_progress_bar,
+        )
+
+        trials_df = optuna_trials_dataframe(study)
+
+        return study, trials_df
+
+    finally:
+        if close_storage and storage_obj is not None:
+            try:
+                storage_obj.remove_session()
+            except Exception as exc:
+                print(f"[WARNING] Could not remove Optuna storage session: {exc!r}")
 
 
 def optuna_trials_dataframe(study) -> pd.DataFrame:
@@ -369,3 +417,45 @@ def refit_optuna_best_trial(
         sg_polyorder=int(best_row.get("sg_polyorder", 2)),
         position_dilation_radius=int(best_row.get("position_dilation_radius", 3)),
     )
+
+
+def close_optuna_study(study):
+    """
+    Explicitly close Optuna RDB storage sessions.
+
+    Useful in notebooks or on Windows when SQLite files remain locked.
+    """
+    if study is None:
+        return
+
+    storage = getattr(study, "_storage", None)
+
+    candidates = [storage]
+
+    # In recent Optuna versions, study._storage may be a cached wrapper.
+    backend = getattr(storage, "_backend", None)
+    if backend is not None:
+        candidates.append(backend)
+
+    for storage_candidate in candidates:
+        if storage_candidate is None:
+            continue
+
+        if hasattr(storage_candidate, "remove_session"):
+            try:
+                storage_candidate.remove_session()
+            except Exception as exc:
+                print(f"[WARNING] remove_session failed: {exc!r}")
+
+        # Optional fallback: dispose SQLAlchemy engine if accessible.
+        engine = getattr(storage_candidate, "engine", None)
+        if engine is None:
+            engine = getattr(storage_candidate, "_engine", None)
+
+        if engine is not None:
+            try:
+                engine.dispose()
+            except Exception as exc:
+                print(f"[WARNING] engine.dispose failed: {exc!r}")
+
+                
