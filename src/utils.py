@@ -10,9 +10,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 import pickle
+import json
 from typing import Any
 
 import numpy as np
+import pandas as pd
+from pathlib import Path
 
 
 def as_2d_array(X, dtype=float) -> np.ndarray:
@@ -174,14 +177,14 @@ def wavelength_axis(n_features: int, wavelengths=None, default_label: str = "Ban
         return np.arange(n_features), default_label
     return np.asarray(wavelengths), "Wavelength (nm)"
 
-def make_wavelengths(start_nm:int, end_nm:int, original_bands:int, n_remove:int):
+def make_wavelengths(start_nm:int, end_nm:int, original_bands:int, n_remove_start:int, n_stop_end:int):
     """
-    Build wavelength axis after removing the first noisy bands.
+    Build wavelength axis after removing the first and last noisy bands.
     Raw data: 69 bands from 889 to 1702 nm.
-    Processed data: bands [n_remove:] only.
+    Processed data: bands [n_remove_start:n_stop_end] only.
     """
     full_axis = np.linspace(float(start_nm), float(end_nm), int(original_bands))
-    return full_axis[int(n_remove):]
+    return full_axis[int(n_remove_start):int(n_stop_end)]
 
 
 def save_pickle(obj, path):
@@ -191,3 +194,215 @@ def save_pickle(obj, path):
     with open(path, "wb") as f:
         pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
     return path
+
+
+def ensure_parent_dir(path):
+    """Create parent directory and return Path."""
+    from pathlib import Path
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def optimize_dataframe_for_parquet(
+    df,
+    float_dtype: str = "float32",
+    object_to_category: bool = True,
+    category_max_ratio: float = 0.50,
+):
+    """
+    Reduce DataFrame memory before Parquet export.
+
+    - float64 -> float32
+    - integer columns -> smaller integer dtype
+    - low-cardinality object columns -> category
+    """
+    out = df.copy()
+
+    for col in out.columns:
+        s = out[col]
+
+        if pd.api.types.is_float_dtype(s):
+            out[col] = s.astype(float_dtype)
+
+        elif pd.api.types.is_integer_dtype(s):
+            out[col] = pd.to_numeric(s, downcast="integer")
+
+        elif object_to_category and pd.api.types.is_object_dtype(s):
+            s_non_na = s.dropna()
+
+            simple_types = (
+                str,
+                int,
+                float,
+                bool,
+                np.integer,
+                np.floating,
+                np.bool_,
+            )
+
+            only_simple_scalars = s_non_na.map(
+                lambda x: isinstance(x, simple_types)
+            ).all()
+
+            if only_simple_scalars:
+                n = len(s)
+                nunique = s.nunique(dropna=True)
+
+                if n > 0 and nunique / n <= category_max_ratio:
+                    try:
+                        out[col] = s.astype("category")
+                    except Exception:
+                        pass
+
+    return out
+
+
+def make_dataframe_parquet_safe(df):
+    """
+    Convert complex object/category columns to JSON strings before Parquet export.
+
+    This avoids pyarrow errors with nested dictionaries/lists/arrays.
+    Compatible with recent pandas versions.
+    """
+
+    def _json_default_for_parquet(x):
+        if isinstance(x, np.integer):
+            return int(x)
+        if isinstance(x, np.floating):
+            return float(x)
+        if isinstance(x, np.bool_):
+            return bool(x)
+        if isinstance(x, np.ndarray):
+            return x.tolist()
+        if isinstance(x, Path):
+            return str(x)
+        return str(x)
+
+    def _safe_value(x):
+        if x is None:
+            return None
+
+        if isinstance(x, (dict, list, tuple, set, np.ndarray)):
+            return json.dumps(
+                x,
+                default=_json_default_for_parquet,
+                ensure_ascii=False,
+            )
+
+        if isinstance(x, Path):
+            return str(x)
+
+        if isinstance(x, np.generic):
+            return x.item()
+
+        try:
+            if pd.isna(x):
+                return None
+        except Exception:
+            pass
+
+        return x
+
+    out = df.copy()
+    complex_types = (dict, list, tuple, set, np.ndarray, Path)
+
+    for col in out.columns:
+        s = out[col]
+
+        is_object = pd.api.types.is_object_dtype(s)
+        is_category = isinstance(s.dtype, pd.CategoricalDtype)
+
+        if is_object or is_category:
+            s_obj = s.astype("object")
+
+            has_complex_values = s_obj.map(
+                lambda x: isinstance(x, complex_types)
+            ).any()
+
+            if has_complex_values:
+                out[col] = s_obj.map(_safe_value).astype("string")
+
+    return out
+
+
+def save_parquet(
+    df,
+    path,
+    index: bool = False,
+    compression: str = "zstd",
+    optimize: bool = True,
+):
+    """
+    Save a pandas DataFrame as compressed Parquet.
+
+    Use this for all result tables:
+    - summaries
+    - metrics
+    - grid-search outputs
+    - errors
+    - selected configurations
+    """
+    path = ensure_parent_dir(path)
+
+    if path.suffix != ".parquet":
+        path = path.with_suffix(".parquet")
+
+    df_safe = make_dataframe_parquet_safe(df)
+
+    df_to_save = (
+        optimize_dataframe_for_parquet(df_safe)
+        if optimize
+        else df_safe.copy()
+    )
+
+    df_to_save.to_parquet(
+        path,
+        index=index,
+        compression=compression,
+    )
+
+    return path
+
+
+def load_parquet(path):
+    """Load a pandas DataFrame saved with save_parquet."""
+    path = Path(path)
+    return pd.read_parquet(path)
+
+
+def save_empty_parquet(path):
+    """Create an empty parquet table when a result dataframe is empty."""
+    return save_parquet(
+        pd.DataFrame(),
+        path=path,
+        index=False,
+        optimize=False,
+    )
+
+
+def row_value(row: pd.Series, col: str, default=None):
+    if col not in row.index:
+        return default
+    value = row[col]
+    try:
+        if pd.isna(value):
+            return default
+    except Exception:
+        pass
+    return value
+
+
+def row_int(row: pd.Series, col: str, default: int) -> int:
+    return int(row_value(row, col, default))
+
+
+def row_float(row: pd.Series, col: str, default: float) -> float:
+    return float(row_value(row, col, default))
+
+
+def row_str(row: pd.Series, col: str, default: str) -> str:
+    return str(row_value(row, col, default))
+
+

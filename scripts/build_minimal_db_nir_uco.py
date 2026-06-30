@@ -8,10 +8,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import numpy as np
 
-from src.dataload import load_mat_file
-from src.database import build_minimal_nir_uco_object_database, preprocess_nir_uco_cube, parse_image_key
+from src.io.dataload import load_mat_file
+from src.data.database import build_minimal_nir_uco_object_database, preprocess_nir_uco_cube, parse_image_key
 from src.utils import wavelength_axis, save_pickle, make_wavelengths
-from src.database_h5 import save_nir_uco_h5
+from src.io.database_h5 import save_nir_uco_h5
 
 START_NM = 889
 END_NM = 1702
@@ -143,7 +143,7 @@ def main():
     parser.add_argument(
         "--format",
         choices=["pkl", "h5", "both"],
-        default="pkl",
+        default="h5",
         help="Database output format: pkl, h5, or both.",
     )
     parser.add_argument(
