@@ -1,8 +1,10 @@
 from src.visualization.common import (
-    show_or_return,
+    background_image,
     make_customdata,
     make_dynamic_color_map,
-    background_image,
+    ordered_unique,
+    show_or_return,
+    validate_columns,
 )
 
 from src.visualization.plot_generic import (
@@ -44,6 +46,7 @@ from src.visualization.plot_scores import (
 )
 
 from src.visualization.plot_diagnostics import (
+    plot_metric_heatmap,
     plot_metric_by_index,
     plot_xy_diagnostic,
 )
@@ -68,8 +71,62 @@ from src.visualization.plot_simca import (
 
 from src.visualization.plot_decision import (
     plot_object_decision_map,
+    plot_object_error_overlay,
+    plot_object_fp_fn_overlay,
     plot_pixel_error_overlay,
     plot_pixel_fp_fn_overlay,
-    plot_object_fp_fn_overlay,
-    plot_object_error_overlay,
+    plot_pixel_prediction_overlay,
 )
+
+__all__ = [
+    "background_image",
+    "build_scores_dataframe",
+    "extract_spectral_matrix",
+    "make_customdata",
+    "make_dynamic_color_map",
+    "mean_spectrum_from_cube",
+    "ordered_unique",
+    "plot_bar_values",
+    "plot_biplot",
+    "plot_counts_by_group",
+    "plot_decision_counts",
+    "plot_distribution_with_curve",
+    "plot_explained_variance",
+    "plot_hypercube_band_slider",
+    "plot_image2d",
+    "plot_image_overlay",
+    "plot_label_overlay_from_image_db",
+    "plot_lines_from_dataframe",
+    "plot_loadings",
+    "plot_metric_by_index",
+    "plot_metric_heatmap",
+    "plot_object_areas",
+    "plot_object_decision_map",
+    "plot_object_error_overlay",
+    "plot_object_fp_fn_overlay",
+    "plot_object_grid",
+    "plot_object_score_summary",
+    "plot_object_spectra",
+    "plot_object_view",
+    "plot_pca_diagnostic",
+    "plot_pca_metric_heatmap",
+    "plot_pca_metric_q",
+    "plot_pca_metric_ranking",
+    "plot_pca_metric_t2",
+    "plot_pca_metric_tradeoff",
+    "plot_pixel_error_overlay",
+    "plot_pixel_fp_fn_overlay",
+    "plot_pixel_prediction_overlay",
+    "plot_scores",
+    "plot_scores_density",
+    "plot_scores_distribution",
+    "plot_simca_distance",
+    "plot_simca_rule_metric",
+    "plot_spectra",
+    "plot_spectral_distribution",
+    "plot_xy_diagnostic",
+    "sample_scores_dataframe",
+    "show_or_return",
+    "summarize_scores_by_object",
+    "validate_columns",
+]

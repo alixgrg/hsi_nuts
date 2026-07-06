@@ -27,6 +27,14 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
     # ------------------------------------------------------------------
     # Data / database / segmentation
     # ------------------------------------------------------------------
+    "NIR_UCO_NAME_CONFIG": ("src.data.database", "NIR_UCO_NAME_CONFIG"),
+    "make_reference_image": ("src.data.segmentation", "make_reference_image"),
+    "make_binary_mask": ("src.data.segmentation", "make_binary_mask"),
+    "clean_mask": ("src.data.segmentation", "clean_mask"),
+    "label_objects_with_watershed": (
+        "src.data.segmentation",
+        "label_objects_with_watershed",
+    ),
     "segment_objects": ("src.data.segmentation", "segment_objects"),
     "parse_image_key": ("src.data.database", "parse_image_key"),
     "preprocess_nir_uco_cube": ("src.data.database", "preprocess_nir_uco_cube"),
@@ -38,6 +46,9 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
         "src.data.database",
         "build_minimal_nir_uco_object_database",
     ),
+    "is_hyperspectral_cube": ("src.data.database", "is_hyperspectral_cube"),
+    "detect_known_image_keys": ("src.data.database", "detect_known_image_keys"),
+    "resolve_selected_keys": ("src.data.database", "resolve_selected_keys"),
 
     # ------------------------------------------------------------------
     # Decision labels
@@ -175,6 +186,7 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
     # ------------------------------------------------------------------
     # Matrices
     # ------------------------------------------------------------------
+    "MatrixSpec": ("src.matrices.matrix_registry", "MatrixSpec"),
     "build_matrix": ("src.matrices.matrix_registry", "build_matrix"),
     "get_matrix_spec": ("src.matrices.matrix_registry", "get_matrix_spec"),
     "matrix_method_to_args": (
@@ -194,6 +206,14 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
     "pca_from_cov": ("src.models.pca", "pca_from_cov"),
     "SIMCAClassModel": ("src.models.simca", "SIMCAClassModel"),
     "SIMCAClassifier": ("src.models.simca", "SIMCAClassifier"),
+    "BaseSIMCARule": ("src.models.simca_rules", "BaseSIMCARule"),
+    "SimpleSIMCARule": ("src.models.simca_rules", "SimpleSIMCARule"),
+    "AltSIMCARule": ("src.models.simca_rules", "AltSIMCARule"),
+    "CombinedIndexSIMCARule": (
+        "src.models.simca_rules",
+        "CombinedIndexSIMCARule",
+    ),
+    "DataDrivenSIMCARule": ("src.models.simca_rules", "DataDrivenSIMCARule"),
     "make_simca_rule": ("src.models.simca_rules", "make_simca_rule"),
     "compute_rule_variant_stat_limit": (
         "src.models.simca_rules",
@@ -211,6 +231,44 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
         "src.spectra.preprocessing",
         "SpectralPreprocessor",
     ),
+    "center_X": ("src.spectra.preprocessing", "center_X"),
+    "snv": ("src.spectra.preprocessing", "snv"),
+    "vector_normalize": ("src.spectra.preprocessing", "vector_normalize"),
+    "msc_fit": ("src.spectra.preprocessing", "msc_fit"),
+    "msc_transform": ("src.spectra.preprocessing", "msc_transform"),
+    "savgol_derivative": ("src.spectra.preprocessing", "savgol_derivative"),
+    "reflectance_to_absorbance": (
+        "src.spectra.preprocessing",
+        "reflectance_to_absorbance",
+    ),
+    "VALID_PREPROCESSING_STEPS": (
+        "src.spectra.preprocessing_configs",
+        "VALID_PREPROCESSING_STEPS",
+    ),
+    "PREPROCESSING_ALIASES": (
+        "src.spectra.preprocessing_configs",
+        "PREPROCESSING_ALIASES",
+    ),
+    "DEFAULT_PREPROCESSING_CONFIGS": (
+        "src.spectra.preprocessing_configs",
+        "DEFAULT_PREPROCESSING_CONFIGS",
+    ),
+    "SIMCA_SEARCH_PREPROCESSING_CONFIGS": (
+        "src.spectra.preprocessing_configs",
+        "SIMCA_SEARCH_PREPROCESSING_CONFIGS",
+    ),
+    "preprocessing_name_from_steps": (
+        "src.spectra.preprocessing_configs",
+        "preprocessing_name_from_steps",
+    ),
+    "validate_preprocessing_steps": (
+        "src.spectra.preprocessing_configs",
+        "validate_preprocessing_steps",
+    ),
+    "resolve_preprocessing_steps": (
+        "src.spectra.preprocessing_configs",
+        "resolve_preprocessing_steps",
+    ),
     "normalize_preprocessing_configs": (
         "src.spectra.preprocessing_configs",
         "normalize_preprocessing_configs",
@@ -227,6 +285,16 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
     # ------------------------------------------------------------------
     # PCA workflow
     # ------------------------------------------------------------------
+    "OBJECT_MATRIX_METHODS": ("src.workflows.pca", "OBJECT_MATRIX_METHODS"),
+    "PIXEL_MATRIX_METHODS": ("src.workflows.pca", "PIXEL_MATRIX_METHODS"),
+    "pca_matrix_family_from_method": (
+        "src.workflows.pca",
+        "pca_matrix_family_from_method",
+    ),
+    "pca_matrix_variant_from_method": (
+        "src.workflows.pca",
+        "pca_matrix_variant_from_method",
+    ),
     "binary_class_separation_scores": (
         "src.workflows.pca",
         "binary_class_separation_scores",
@@ -352,6 +420,10 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
         "src.workflows.simca_selection_utils",
         "sort_detection_selection",
     ),
+    "infer_model_family_from_rule_token": (
+        "src.workflows.simca_selection_utils",
+        "infer_model_family_from_rule_token",
+    ),
     "normalize_simca_rule_columns": (
         "src.workflows.simca_selection_utils",
         "normalize_simca_rule_columns",
@@ -423,6 +495,19 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
         "src.workflows.simca_optuna",
         "close_optuna_study",
     ),
+
+    # ------------------------------------------------------------------
+    # Visualization: common
+    # ------------------------------------------------------------------
+    "show_or_return": ("src.visualization.common", "show_or_return"),
+    "make_customdata": ("src.visualization.common", "make_customdata"),
+    "ordered_unique": ("src.visualization.common", "ordered_unique"),
+    "make_dynamic_color_map": (
+        "src.visualization.common",
+        "make_dynamic_color_map",
+    ),
+    "background_image": ("src.visualization.common", "background_image"),
+    "validate_columns": ("src.visualization.common", "validate_columns"),
 
     # ------------------------------------------------------------------
     # Visualization: generic
@@ -623,6 +708,14 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
     "make_wavelengths": ("src.utils", "make_wavelengths"),
     "save_pickle": ("src.utils", "save_pickle"),
     "ensure_parent_dir": ("src.utils", "ensure_parent_dir"),
+    "optimize_dataframe_for_parquet": (
+        "src.utils",
+        "optimize_dataframe_for_parquet",
+    ),
+    "make_dataframe_parquet_safe": (
+        "src.utils",
+        "make_dataframe_parquet_safe",
+    ),
     "save_parquet": ("src.utils", "save_parquet"),
     "save_parquet_if_nonempty": ("src.utils", "save_parquet_if_nonempty"),
     "load_parquet": ("src.utils", "load_parquet"),

@@ -1,57 +1,120 @@
-from src.workflows.legacy.pixel_projection import (
-    predict_pixels_with_simca,
-    fit_one_class_simca,
-)
-
-from src.workflows.simca_optuna import (
-    make_simca_optuna_objective,
-    run_optuna_simca_pixel_optimization,
-    optuna_trials_dataframe,
-    best_completed_trial_row,
-    refit_optuna_best_trial,
-    close_optuna_study,
-)
-
-from src.workflows.legacy.pca_comparison import (
-    compare_pca_representations,
+from src.workflows.pca import (
+    OBJECT_MATRIX_METHODS,
+    PIXEL_MATRIX_METHODS,
     add_pca_selection_score,
-)
-
-from src.workflows.legacy.pca_diagnostic import (
     binary_class_separation_scores,
+    compare_pca_representations,
     compute_pca_summary_metrics,
+    mahalanobis_centroid_distance,
+    n_components_for_cumulative_variance,
+    pca_distance_summary,
+    pca_matrix_family_from_method,
+    pca_matrix_variant_from_method,
+    pixel_object_score_metrics,
+    trace_ratio_by_group,
+    train_projection_shift_by_label,
 )
-
-from src.workflows.legacy.simca_pixel_grid import (
-    make_target_train_filters,
-    run_single_simca_pixel_projection,
-    run_simca_pixel_projection_grid,
-    refit_best_grid_row,
-    refit_selected_simca_row,
-    refit_selected_simca_configs,
-)
-
-from src.workflows.legacy.simca_cv_calibration import (
+from src.workflows.simca import (
+    balanced_strategy_grid_for_matrix,
     calibrate_simca_thresholds_cv,
     fit_final_simca_model,
+    fit_one_class_simca,
+    make_target_train_filters,
+    matrix_family_from_method,
+    predict_pixels_with_simca,
     project_pixels_with_rule_variants,
-    summarize_cv_calibration,
-    run_simca_empirical_rule_grid,
+    refit_best_grid_row,
     refit_empirical_cv_rule_row,
+    refit_selected_simca_configs,
+    refit_selected_simca_row,
+    run_simca_empirical_rule_grid,
+    run_simca_pixel_projection_grid,
+    run_single_simca_pixel_projection,
+    standard_grid_sort,
+    summarize_cv_calibration,
+    uses_sg,
+    valid_sg_parameter_pairs,
 )
-
-from src.workflows.legacy.notebook_helpers import (
-    add_simca_selection_score,
-    sort_simca_selection,
+from src.workflows.simca_optuna import (
+    best_completed_trial_row,
+    close_optuna_study,
+    make_simca_optuna_objective,
+    optuna_trials_dataframe,
+    refit_optuna_best_trial,
+    run_optuna_simca_pixel_optimization,
 )
-
 from src.workflows.simca_selection_utils import (
-    normalize_simca_rule_columns,
-    fill_selected_config_defaults,
-    select_top_models,
-    ensure_candidate_columns,
+    SIMCA_RULE_METADATA,
+    add_detection_selection_score,
     add_reference_selection_scores,
-    select_top_by_score,
+    detection_selection_score,
+    ensure_candidate_columns,
+    fill_selected_config_defaults,
+    infer_model_family_from_rule_token,
+    normalize_simca_rule_columns,
     pareto_front,
+    select_top_by_score,
+    select_top_models,
+    sort_detection_selection,
     summarize_parameter_tendencies,
 )
+
+add_simca_selection_score = add_detection_selection_score
+sort_simca_selection = sort_detection_selection
+
+__all__ = [
+    "OBJECT_MATRIX_METHODS",
+    "PIXEL_MATRIX_METHODS",
+    "SIMCA_RULE_METADATA",
+    "add_detection_selection_score",
+    "add_pca_selection_score",
+    "add_reference_selection_scores",
+    "add_simca_selection_score",
+    "balanced_strategy_grid_for_matrix",
+    "best_completed_trial_row",
+    "binary_class_separation_scores",
+    "calibrate_simca_thresholds_cv",
+    "close_optuna_study",
+    "compare_pca_representations",
+    "compute_pca_summary_metrics",
+    "detection_selection_score",
+    "ensure_candidate_columns",
+    "fill_selected_config_defaults",
+    "fit_final_simca_model",
+    "fit_one_class_simca",
+    "infer_model_family_from_rule_token",
+    "mahalanobis_centroid_distance",
+    "make_simca_optuna_objective",
+    "make_target_train_filters",
+    "matrix_family_from_method",
+    "n_components_for_cumulative_variance",
+    "normalize_simca_rule_columns",
+    "optuna_trials_dataframe",
+    "pareto_front",
+    "pca_distance_summary",
+    "pca_matrix_family_from_method",
+    "pca_matrix_variant_from_method",
+    "pixel_object_score_metrics",
+    "predict_pixels_with_simca",
+    "project_pixels_with_rule_variants",
+    "refit_best_grid_row",
+    "refit_empirical_cv_rule_row",
+    "refit_optuna_best_trial",
+    "refit_selected_simca_configs",
+    "refit_selected_simca_row",
+    "run_optuna_simca_pixel_optimization",
+    "run_simca_empirical_rule_grid",
+    "run_simca_pixel_projection_grid",
+    "run_single_simca_pixel_projection",
+    "select_top_by_score",
+    "select_top_models",
+    "sort_detection_selection",
+    "sort_simca_selection",
+    "standard_grid_sort",
+    "summarize_cv_calibration",
+    "summarize_parameter_tendencies",
+    "trace_ratio_by_group",
+    "train_projection_shift_by_label",
+    "uses_sg",
+    "valid_sg_parameter_pairs",
+]
