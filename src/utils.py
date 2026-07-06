@@ -177,14 +177,14 @@ def wavelength_axis(n_features: int, wavelengths=None, default_label: str = "Ban
         return np.arange(n_features), default_label
     return np.asarray(wavelengths), "Wavelength (nm)"
 
-def make_wavelengths(start_nm:int, end_nm:int, original_bands:int, n_remove_start:int, n_stop_end:int):
+def make_wavelengths(start_nm:int, end_nm:int, original_bands:int, n_remove_start:int, n_stop_end:int=None):
     """
     Build wavelength axis after removing the first and last noisy bands.
     Raw data: 69 bands from 889 to 1702 nm.
     Processed data: bands [n_remove_start:n_stop_end] only.
     """
     full_axis = np.linspace(float(start_nm), float(end_nm), int(original_bands))
-    return full_axis[int(n_remove_start):int(n_stop_end)]
+    return full_axis[int(n_remove_start):] if n_stop_end is None else full_axis[int(n_remove_start):int(n_stop_end)]
 
 
 def save_pickle(obj, path):
@@ -366,6 +366,25 @@ def save_parquet(
     return path
 
 
+def save_parquet_if_nonempty(
+    df,
+    path,
+    index: bool = False,
+    compression: str = "zstd",
+    optimize: bool = True,
+):
+    """Save a parquet file only if the dataframe is not empty."""
+    if df is None or len(df) == 0:
+        return None
+    return save_parquet(
+        df,
+        path=path,
+        index=index,
+        compression=compression,
+        optimize=optimize,
+    )
+
+
 def load_parquet(path):
     """Load a pandas DataFrame saved with save_parquet."""
     path = Path(path)
@@ -406,3 +425,62 @@ def row_str(row: pd.Series, col: str, default: str) -> str:
     return str(row_value(row, col, default))
 
 
+def filter_dataframe_by_values(
+    df: pd.DataFrame,
+    filters: dict,
+    strict: bool = True,
+) -> pd.DataFrame:
+    """Filter a dataframe with dict-style equality / isin filters."""
+    out = df.copy()
+    mask = pd.Series(True, index=out.index)
+
+    for col, allowed in filters.items():
+        if col not in out.columns:
+            if strict:
+                raise KeyError(f"Column not found in dataframe: {col}")
+            continue
+        if allowed is None:
+            continue
+        allowed_values = list(allowed) if isinstance(allowed, (list, tuple, set, np.ndarray, pd.Index)) else [allowed]
+        mask = mask & out[col].isin(allowed_values)
+
+    return out.loc[mask].copy()
+
+
+def list_result_files(directory: str | Path) -> pd.DataFrame:
+    """List result files with sizes to monitor output bloat in notebooks."""
+    root = Path(directory)
+    rows = []
+
+    for path in root.rglob("*"):
+        if path.is_file():
+            rows.append(
+                {
+                    "file": str(path.relative_to(root)),
+                    "suffixes": "".join(path.suffixes),
+                    "size_mb": path.stat().st_size / 1024**2,
+                }
+            )
+
+    if not rows:
+        return pd.DataFrame(columns=["file", "suffixes", "size_mb"])
+
+    return pd.DataFrame(rows).sort_values("size_mb", ascending=False).reset_index(drop=True)
+
+
+def is_missing_value(x: Any) -> bool:
+    """Robust scalar missing-value test used for row/config helpers."""
+    try:
+        return bool(pd.isna(x))
+    except Exception:
+        return False
+
+
+def first_available_value(row: pd.Series, columns: list[str], default=None):
+    """Return the first non-missing value found in a row among candidate columns."""
+    for col in columns:
+        if col in row.index:
+            value = row[col]
+            if not is_missing_value(value):
+                return value
+    return default

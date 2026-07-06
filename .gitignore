@@ -4,4 +4,3 @@ HSI Data/
 __pycache__/
 *.egg-info/
 results/
-notebooks/04A_simca_presel_63bands.ipynb

@@ -6,7 +6,15 @@ from scipy import ndimage as ndi
 
 from src.decision.aggregation import add_object_metadata
 from src.decision.metrics import binary_detection_metrics
-
+from src.decision.labels import (
+    DEFAULT_TARGET_CLASS,
+    DEFAULT_NON_TARGET_LABEL,
+    predicted_col as make_predicted_col,
+    true_col as make_true_col,
+    pixel_ratio_col,
+    true_pixel_ratio_total_col,
+    n_predicted_pixels_col,
+)
 
 def _object_distance_map(obj: dict) -> tuple[np.ndarray, tuple[int, int, int, int]]:
     """Return distance-to-background inside an object's crop mask."""
@@ -79,7 +87,8 @@ def add_border_flags_to_pixel_df(
 def aggregate_pixel_predictions_to_objects_core(
     pixel_df: pd.DataFrame,
     object_db: dict,
-    target_class: str = "peanut",
+    target_class: str = DEFAULT_TARGET_CLASS,
+    non_target_label: str = DEFAULT_NON_TARGET_LABEL,
     object_threshold: float = 0.75,
     truth_threshold: float = 0.50,
     border_width: int = 2,
@@ -100,11 +109,9 @@ def aggregate_pixel_predictions_to_objects_core(
         mean(predicted_target_pixel on core pixels) >= object_threshold
     """
     if pred_col is None:
-        pred_col = f"predicted_{target_class}_pixel"
-
+        pred_col = make_predicted_col(target_class, "pixel")
     if true_pixel_col is None:
-        true_pixel_col = f"true_{target_class}_pixel"
-
+        true_pixel_col = make_true_col(target_class, "pixel")
     if pred_col not in pixel_df.columns:
         raise ValueError(f"pixel_df must contain {pred_col!r}.")
 
@@ -159,10 +166,10 @@ def aggregate_pixel_predictions_to_objects_core(
             "decision_used_core": bool(use_core),
             "border_width": int(border_width),
             "min_core_pixels": int(min_core_pixels),
-            f"n_predicted_{target_class}_pixels": n_pred,
-            f"{target_class}_pixel_ratio": target_ratio,
-            f"predicted_{target_class}_object": pred_object,
-            "predicted_label_object": target_class if pred_object else f"non_{target_class}",
+            n_predicted_pixels_col(target_class): n_pred,
+            pixel_ratio_col(target_class): target_ratio,
+            make_predicted_col(target_class, "object"): pred_object,
+            "predicted_label_object": target_class if pred_object else non_target_label,
             "object_threshold": float(object_threshold),
         }
 
@@ -179,12 +186,12 @@ def aggregate_pixel_predictions_to_objects_core(
                 true_ratio_total = np.nan
                 true_object = np.nan
 
-            row[f"true_{target_class}_pixel_ratio_total"] = true_ratio_total
-            row[f"true_{target_class}_object"] = true_object
+            row[true_pixel_ratio_total_col(target_class)] = true_ratio_total
+            row[make_true_col(target_class, "object")] = true_object
             row["true_label_object"] = (
                 target_class
                 if true_object is True
-                else f"non_{target_class}"
+                else non_target_label
                 if true_object is False
                 else np.nan
             )
@@ -207,7 +214,8 @@ def aggregate_pixel_predictions_to_objects_core(
 def border_width_object_threshold_grid(
     pixel_df: pd.DataFrame,
     object_db: dict,
-    target_class: str = "peanut",
+    target_class: str = DEFAULT_TARGET_CLASS,
+    non_target_label: str = DEFAULT_NON_TARGET_LABEL,
     border_widths=(0, 1, 2, 3, 4),
     object_thresholds=(0.60, 0.70, 0.75, 0.80, 0.85, 0.90),
     min_core_pixels: int = 20,
@@ -217,8 +225,8 @@ def border_width_object_threshold_grid(
     rows = []
     tables = {}
 
-    true_col = f"true_{target_class}_object"
-    pred_col = f"predicted_{target_class}_object"
+    true_col = make_true_col(target_class, "object")
+    pred_col = make_predicted_col(target_class, "object")
 
     for bw in border_widths:
         for thr in object_thresholds:
@@ -226,6 +234,7 @@ def border_width_object_threshold_grid(
                 pixel_df=pixel_df,
                 object_db=object_db,
                 target_class=target_class,
+                non_target_label=non_target_label,
                 object_threshold=float(thr),
                 border_width=int(bw),
                 min_core_pixels=int(min_core_pixels),
@@ -240,6 +249,8 @@ def border_width_object_threshold_grid(
                     obj_df,
                     true_col=true_col,
                     pred_col=pred_col,
+                    target_class=target_class,
+                    non_target_class=non_target_label,
                 )
 
                 metrics.update({
@@ -260,7 +271,7 @@ def border_width_object_threshold_grid(
 
     if len(summary) > 0:
         summary = summary.sort_values(
-            ["balanced_accuracy", "peanut_sensitivity", "almond_specificity"],
+            ["balanced_accuracy", "target_sensitivity", "non_target_specificity"],
             ascending=False,
         ).reset_index(drop=True)
 
@@ -270,17 +281,16 @@ def border_width_object_threshold_grid(
 def summarize_pixel_errors_by_border_zone(
     pixel_df: pd.DataFrame,
     object_db: dict,
-    target_class: str = "peanut",
+    target_class: str = DEFAULT_TARGET_CLASS,
     border_width: int = 2,
     pred_col: str | None = None,
     true_col: str | None = None,
 ) -> pd.DataFrame:
     """Summarize TP/TN/FP/FN separately for border and core pixels."""
     if pred_col is None:
-        pred_col = f"predicted_{target_class}_pixel"
-
+        pred_col = make_predicted_col(target_class, "pixel")
     if true_col is None:
-        true_col = f"true_{target_class}_pixel"
+        true_col = make_true_col(target_class, "pixel")
 
     df = add_border_flags_to_pixel_df(
         pixel_df=pixel_df,

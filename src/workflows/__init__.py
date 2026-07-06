@@ -1,7 +1,4 @@
-from src.workflows.pixel_projection import (
-    build_training_matrix,
-    build_projection_pixel_matrix,
-    fit_one_class_peanut_simca,
+from src.workflows.legacy.pixel_projection import (
     predict_pixels_with_simca,
     fit_one_class_simca,
 )
@@ -15,19 +12,18 @@ from src.workflows.simca_optuna import (
     close_optuna_study,
 )
 
-from src.workflows.pca_comparison import (
+from src.workflows.legacy.pca_comparison import (
     compare_pca_representations,
     add_pca_selection_score,
 )
 
-from src.workflows.pca_diagnostic import (
-    class_separation_scores,
+from src.workflows.legacy.pca_diagnostic import (
+    binary_class_separation_scores,
     compute_pca_summary_metrics,
 )
 
-from src.workflows.simca_pixel_grid import (
+from src.workflows.legacy.simca_pixel_grid import (
     make_target_train_filters,
-    make_peanut_train_filters,
     run_single_simca_pixel_projection,
     run_simca_pixel_projection_grid,
     refit_best_grid_row,
@@ -35,11 +31,27 @@ from src.workflows.simca_pixel_grid import (
     refit_selected_simca_configs,
 )
 
-from src.workflows.simca_cv_calibration import (
+from src.workflows.legacy.simca_cv_calibration import (
     calibrate_simca_thresholds_cv,
     fit_final_simca_model,
     project_pixels_with_rule_variants,
     summarize_cv_calibration,
     run_simca_empirical_rule_grid,
     refit_empirical_cv_rule_row,
+)
+
+from src.workflows.legacy.notebook_helpers import (
+    add_simca_selection_score,
+    sort_simca_selection,
+)
+
+from src.workflows.simca_selection_utils import (
+    normalize_simca_rule_columns,
+    fill_selected_config_defaults,
+    select_top_models,
+    ensure_candidate_columns,
+    add_reference_selection_scores,
+    select_top_by_score,
+    pareto_front,
+    summarize_parameter_tendencies,
 )

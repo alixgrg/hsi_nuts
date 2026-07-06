@@ -525,3 +525,80 @@ def build_minimal_nir_uco_object_database(
         print(f"  -> {len(objects)} objects detected")
 
     return object_database, image_database
+
+
+def is_hyperspectral_cube(value):
+    """Return True for values that look like HSI cubes with shape (H, W, B)."""
+    return isinstance(value, np.ndarray) and value.ndim == 3
+
+
+def detect_known_image_keys(data, skip_non_cubes=True):
+    """
+    Automatically keep images recognized by parse_image_key().
+
+    Recognized examples:
+        almond1_sb, peanut2_sb, alm1pea2_sb, pea2_pos1_sb
+    """
+    rows = []
+
+    for key, value in data.items():
+        if skip_non_cubes and not is_hyperspectral_cube(value):
+            continue
+
+        meta = parse_image_key(key)
+
+        if meta["is_unknown"]:
+            continue
+
+        rows.append((key, meta))
+
+    return rows
+
+
+def resolve_selected_keys(data, selected_keys):
+    """
+    Resolve user-provided selected keys.
+
+    Accepts exact raw keys, e.g. almond1_sb,
+    and clean keys, e.g. almond1.
+    """
+    if not selected_keys:
+        return None
+
+    raw_keys = set(data.keys())
+    clean_to_raw = {}
+
+    for raw_key in data.keys():
+        meta = parse_image_key(raw_key)
+        if not meta["is_unknown"]:
+            clean_to_raw[meta["clean_key"]] = raw_key
+
+    resolved = []
+    missing = []
+
+    for key in selected_keys:
+        if key in raw_keys:
+            resolved.append(key)
+            continue
+
+        key_lower = str(key).strip().lower()
+
+        if key_lower in clean_to_raw:
+            resolved.append(clean_to_raw[key_lower])
+            continue
+
+        key_with_suffix = f"{key_lower}_sb"
+
+        if key_with_suffix in raw_keys:
+            resolved.append(key_with_suffix)
+            continue
+
+        missing.append(key)
+
+    if missing:
+        raise KeyError(
+            "Some selected keys were not found in the .mat file: "
+            + ", ".join(map(str, missing))
+        )
+
+    return resolved

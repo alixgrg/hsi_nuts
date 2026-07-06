@@ -3,12 +3,18 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from src.decision.labels import (
+    DEFAULT_TARGET_CLASS,
+    predicted_col as make_predicted_col,
+    true_col as make_true_col,
+)
+
 
 def make_pixel_error_map(
     image_key: str,
     image_db: dict,
     pixel_df: pd.DataFrame,
-    target_class: str = "peanut",
+    target_class: str = DEFAULT_TARGET_CLASS,
     pred_col: str | None = None,
     true_col: str | None = None,
     truth_available_col: str = "truth_available",
@@ -28,9 +34,9 @@ def make_pixel_error_map(
     4 : FN
     """
     if pred_col is None:
-        pred_col = f"predicted_{target_class}_pixel"
+        pred_col = make_predicted_col(target_class, "pixel")
     if true_col is None:
-        true_col = f"true_{target_class}_pixel"
+        true_col = make_true_col(target_class, "pixel")
     if true_col not in pixel_df.columns:
         raise KeyError(f"Missing true column in pixel_df: {true_col}")
 
@@ -130,7 +136,7 @@ def make_object_error_map(
     image_db: dict,
     object_db: dict,
     object_df: pd.DataFrame,
-    target_class: str = "peanut",
+    target_class: str = DEFAULT_TARGET_CLASS,
     pred_col: str | None = None,
     true_col: str | None = None,
     source_col: str = "source_image",
@@ -150,11 +156,9 @@ def make_object_error_map(
     4 : FN
     """
     if pred_col is None:
-        pred_col = f"predicted_{target_class}_object"
-
+        pred_col = make_predicted_col(target_class, "object")
     if true_col is None:
-        true_col = f"true_{target_class}_object"
-
+        true_col = make_true_col(target_class, "object")
     if image_key not in image_db:
         raise KeyError(f"Image not found in image_db: {image_key}")
 
@@ -220,7 +224,7 @@ def make_object_fp_fn_map(
     image_db: dict,
     object_db: dict,
     object_df: pd.DataFrame,
-    target_class: str = "peanut",
+    target_class: str = DEFAULT_TARGET_CLASS,
     pred_col: str | None = None,
     true_col: str | None = None,
     source_col: str = "source_image",
@@ -262,7 +266,7 @@ def make_pixel_prediction_map(
     image_key: str,
     image_db: dict,
     pixel_df: pd.DataFrame,
-    target_class: str = "peanut",
+    target_class: str = DEFAULT_TARGET_CLASS,
     pred_col: str | None = None,
     source_col: str = "source_image",
     row_col: str = "row",
@@ -272,8 +276,7 @@ def make_pixel_prediction_map(
     Create a binary map of pixels predicted as target class.
     """
     if pred_col is None:
-        pred_col = f"predicted_{target_class}_pixel"
-
+        pred_col = make_predicted_col(target_class, "pixel")
     if image_key not in image_db:
         raise KeyError(f"Image not found in image_db: {image_key}")
 

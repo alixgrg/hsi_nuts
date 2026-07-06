@@ -5,7 +5,10 @@ import pandas as pd
 from skimage import morphology
 
 from src.data.database import parse_image_key
-
+from src.decision.labels import (
+    DEFAULT_TARGET_CLASS,
+    true_col as make_true_col,
+)
 
 def expected_position_key_for_mixture(
     mixture_clean_key: str,
@@ -17,12 +20,12 @@ def expected_position_key_for_mixture(
     Current NIR UCO convention:
         alm3pea2 -> pea2_pos3
 
-    This is currently peanut-specific because the position-reference images
-    encode peanut positions.
+    This resolver is specific to peanut position-reference images.
     """
     if target_class != "peanut":
         raise NotImplementedError(
-            "Position-reference truth is currently implemented for target_class='peanut'."
+            "NIR UCO position-reference truth is currently implemented "
+            "only for target_class='peanut'."
         )
 
     meta = parse_image_key(mixture_clean_key)
@@ -69,7 +72,7 @@ def target_truth_map_for_image(
     image_key: str,
     image_db: dict,
     object_db: dict,
-    target_class: str = "peanut",
+    target_class: str = DEFAULT_TARGET_CLASS,
     dilation_radius: int = 3,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
@@ -137,7 +140,6 @@ def peanut_truth_map_for_image(
     object_db: dict,
     dilation_radius: int = 3,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Backward-compatible peanut-specific wrapper."""
     return target_truth_map_for_image(
         image_key=image_key,
         image_db=image_db,
@@ -151,7 +153,7 @@ def add_pixel_truth_labels(
     pixel_df: pd.DataFrame,
     image_db: dict,
     object_db: dict,
-    target_class: str = "peanut",
+    target_class: str = DEFAULT_TARGET_CLASS,
     dilation_radius: int = 3,
     source_col: str = "source_image",
     row_col: str = "row",
@@ -163,18 +165,17 @@ def add_pixel_truth_labels(
     Add pixel-level target truth labels to a pixel dataframe.
 
     Default output:
-        true_peanut_pixel
+        true_target_class_pixel
         truth_available
     """
     if true_col is None:
-        true_col = f"true_{target_class}_pixel"
+        true_col = make_true_col(target_class, "pixel")
 
     df = pixel_df.copy()
     df[true_col] = False
     df[available_col] = False
 
     cache = {}
-
     for image_key in df[source_col].astype(str).unique():
         cache[str(image_key)] = target_truth_map_for_image(
             image_key=image_key,

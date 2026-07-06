@@ -4,7 +4,15 @@ import numpy as np
 import pandas as pd
 
 from src.decision.metrics import binary_detection_metrics
-
+from src.decision.labels import (
+    DEFAULT_TARGET_CLASS,
+    DEFAULT_NON_TARGET_LABEL,
+    predicted_col as make_predicted_col,
+    true_col as make_true_col,
+    pixel_ratio_col,
+    true_pixel_ratio_col,
+    n_predicted_pixels_col,
+)
 
 def add_object_metadata(
     object_df: pd.DataFrame,
@@ -47,7 +55,8 @@ def add_object_metadata(
 def aggregate_pixel_predictions_to_objects(
     pixel_df: pd.DataFrame,
     object_db: dict | None = None,
-    target_class: str = "peanut",
+    target_class: str = DEFAULT_TARGET_CLASS,
+    non_target_label: str =  DEFAULT_NON_TARGET_LABEL,
     object_threshold: float = 0.75,
     truth_threshold: float = 0.50,
     min_truth_available_ratio: float = 0.50,
@@ -66,10 +75,9 @@ def aggregate_pixel_predictions_to_objects(
         mean(predicted_target_pixel over object pixels) >= object_threshold
     """
     if pred_col is None:
-        pred_col = f"predicted_{target_class}_pixel"
-
+        pred_col = make_predicted_col(target_class, "pixel")
     if true_pixel_col is None:
-        true_pixel_col = f"true_{target_class}_pixel"
+        true_pixel_col = make_true_col(target_class, "pixel")
 
     if pred_col not in pixel_df.columns:
         raise ValueError(f"pixel_df must contain {pred_col!r}.")
@@ -77,10 +85,11 @@ def aggregate_pixel_predictions_to_objects(
     df = pixel_df.copy()
     df[pred_col] = df[pred_col].astype(bool)
 
+    ratio_col = pixel_ratio_col(target_class)
     agg_dict = {
         "n_pixels_projected": (pred_col, "size"),
-        f"n_predicted_{target_class}_pixels": (pred_col, "sum"),
-        f"{target_class}_pixel_ratio": (pred_col, "mean"),
+        n_predicted_pixels_col(target_class): (pred_col, "sum"),
+        ratio_col: (pred_col, "mean"),
     }
 
     # Optional SIMCA diagnostic columns.
@@ -103,29 +112,29 @@ def aggregate_pixel_predictions_to_objects(
                 df[true_pixel_col].astype(bool),
                 np.nan,
             )
-            agg_dict[f"true_{target_class}_pixel_ratio"] = ("_truth_for_ratio", "mean")
+            agg_dict[true_pixel_ratio_col(target_class)] = ("_truth_for_ratio", "mean")
             agg_dict["truth_available_ratio"] = (truth_available_col, "mean")
         else:
-            agg_dict[f"true_{target_class}_pixel_ratio"] = (true_pixel_col, "mean")
+            agg_dict[true_pixel_ratio_col(target_class)] = (true_pixel_col, "mean")
 
     out = df.groupby(
         [object_id_col, source_col],
         as_index=False,
     ).agg(**agg_dict)
 
-    ratio_col = f"{target_class}_pixel_ratio"
-    pred_object_col = f"predicted_{target_class}_object"
+    ratio_col = pixel_ratio_col(target_class)
+    pred_object_col = make_predicted_col(target_class, "object")
 
     out[pred_object_col] = out[ratio_col] >= float(object_threshold)
     out["predicted_label_object"] = np.where(
         out[pred_object_col],
         target_class,
-        f"non_{target_class}",
+        non_target_label,
     )
     out["object_threshold"] = float(object_threshold)
 
-    true_ratio_col = f"true_{target_class}_pixel_ratio"
-    true_object_col = f"true_{target_class}_object"
+    true_ratio_col = true_pixel_ratio_col(target_class)
+    true_object_col = make_true_col(target_class, "object")
 
     if true_ratio_col in out.columns:
         if "truth_available_ratio" in out.columns:
@@ -139,7 +148,7 @@ def aggregate_pixel_predictions_to_objects(
         out.loc[valid_truth, true_object_col] = truth_values.tolist()
         out["true_label_object"] = pd.Series(pd.NA, index=out.index, dtype="object")
         out.loc[out[true_object_col] == True, "true_label_object"] = target_class
-        out.loc[out[true_object_col] == False, "true_label_object"] = f"non_{target_class}"
+        out.loc[out[true_object_col] == False, "true_label_object"] = non_target_label
 
     if object_db is not None:
         out = add_object_metadata(
@@ -154,7 +163,8 @@ def aggregate_pixel_predictions_to_objects(
 def object_threshold_grid(
     pixel_df: pd.DataFrame,
     object_db: dict | None = None,
-    target_class: str = "peanut",
+    target_class: str = DEFAULT_TARGET_CLASS,
+    non_target_label: str = DEFAULT_NON_TARGET_LABEL,
     thresholds=(0.30, 0.50, 0.70, 0.80, 0.90),
     truth_threshold: float = 0.50,
     min_truth_available_ratio: float = 0.50,
@@ -163,14 +173,15 @@ def object_threshold_grid(
     rows = []
     object_tables = {}
 
-    true_col = f"true_{target_class}_object"
-    pred_col = f"predicted_{target_class}_object"
+    true_col = make_true_col(target_class, "object")
+    pred_col = make_predicted_col(target_class, "object")
 
     for thr in thresholds:
         obj_df = aggregate_pixel_predictions_to_objects(
             pixel_df=pixel_df,
             object_db=object_db,
             target_class=target_class,
+            non_target_label=non_target_label,
             object_threshold=float(thr),
             truth_threshold=truth_threshold,
             min_truth_available_ratio=min_truth_available_ratio,
@@ -183,6 +194,8 @@ def object_threshold_grid(
                 obj_df,
                 true_col=true_col,
                 pred_col=pred_col,
+                target_class=target_class,
+                non_target_class=non_target_label,
             )
             metrics["object_threshold"] = float(thr)
             rows.append(metrics)
