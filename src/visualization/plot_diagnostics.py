@@ -88,6 +88,9 @@ def plot_xy_diagnostic(
     width: int = 850,
     height: int = 650,
     show: bool = True,
+    category_order: Sequence[str] | None = None,
+    color_map: dict[str, str] | None = None,
+    force_legend_groups: bool = False,
     **metadata,
 ):
     x = np.asarray(x, dtype=float)
@@ -109,8 +112,21 @@ def plot_xy_diagnostic(
 
     fig = go.Figure()
 
-    for lab in np.unique(labels):
-        mask = labels == lab
+    if category_order is None:
+        label_groups = list(dict.fromkeys(labels.astype(str)))
+    else:
+        label_groups = [str(x) for x in category_order]
+
+    for lab in label_groups:
+        mask = labels.astype(str) == str(lab)
+
+        if not mask.any() and not force_legend_groups:
+            continue
+
+        marker_kwargs = dict(size=9, opacity=0.8)
+
+        if color_map is not None and str(lab) in color_map:
+            marker_kwargs["color"] = color_map[str(lab)]
 
         fig.add_trace(
             go.Scatter(
@@ -119,7 +135,8 @@ def plot_xy_diagnostic(
                 mode="markers",
                 name=str(lab),
                 customdata=custom[mask],
-                marker=dict(size=9, opacity=0.8),
+                showlegend=True,
+                marker=marker_kwargs,
                 hovertemplate=(
                     f"{x_title}: %{{x:.4f}}<br>"
                     f"{y_title}: %{{y:.4f}}<br>"
@@ -143,6 +160,8 @@ def plot_xy_diagnostic(
         title=title,
         xaxis_title=x_title,
         yaxis_title=y_title,
+        showlegend=True,
+        legend_title_text="class / decision",
         width=width,
         height=height,
     )

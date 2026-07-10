@@ -7,7 +7,7 @@ not specific to PCA, SIMCA, spectroscopy, segmentation, or plotting.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 import pickle
 import json
@@ -484,3 +484,11 @@ def first_available_value(row: pd.Series, columns: list[str], default=None):
             if not is_missing_value(value):
                 return value
     return default
+
+
+def to_numeric_metrics(df: pd.DataFrame, cols: Sequence[str]) -> pd.DataFrame:
+    out = df.copy()
+    for col in cols:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+    return out

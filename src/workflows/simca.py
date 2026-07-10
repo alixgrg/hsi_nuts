@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from scipy.stats import chi2
+import gc
 from sklearn.model_selection import GroupKFold, LeaveOneGroupOut
 
 from src.decision.aggregation import object_threshold_grid
@@ -845,7 +846,7 @@ def _cv_rule_diagnostics(cv_calibration_summary: pd.DataFrame, rule_variant: str
     }
 
 
-def run_simca_empirical_rule_grid(
+def run_simca_rule_variant_grid(
     object_db,
     image_db,
     train_filters: dict,
@@ -1199,7 +1200,7 @@ def refit_empirical_cv_rule_row(
     target_class = row_str(best_row, "target_class", target_class)
     non_target_label = row_str(best_row, "non_target_label", non_target_label)
 
-    summary_df, results, errors_df = run_simca_empirical_rule_grid(
+    summary_df, results, errors_df = run_simca_rule_variant_grid(
         object_db=object_db,
         image_db=image_db,
         train_filters=train_filters,
@@ -1328,7 +1329,7 @@ def refit_selected_simca_row(
         )
         object_df = res["object_tables"][float(selected_row["object_threshold"])].copy()
         pixel_df = res["pixel_df"].copy()
-    elif model_family == "empirical_cv_rule":
+    elif model_family in {"empirical_cv_rule", "rule_variant_grid"}:
         res = refit_empirical_cv_rule_row(
             object_db=object_db,
             image_db=image_db,
@@ -1456,3 +1457,195 @@ def refit_selected_simca_configs(
         pd.concat(pixel_error_parts, ignore_index=True, sort=False) if pixel_error_parts else pd.DataFrame(),
         pd.DataFrame(errors),
     )
+
+
+def run_selected_simca_random_state_stability(
+    selected_configs_df: pd.DataFrame,
+    object_db,
+    image_db,
+    train_filters: dict,
+    projection_filters: dict,
+    preprocessing_configs,
+    seeds: Sequence[int] = (0, 1, 2, 3, 4, 5, 10, 20, 42, 100),
+    evaluation_split: str = "random_state_stability",
+    wavelengths=None,
+    replace: bool = False,
+    cv_n_splits: int | None = 5,
+    cv_group_col: str = "object_id",
+    target_class: str = DEFAULT_TARGET_CLASS,
+    non_target_label: str = DEFAULT_NON_TARGET_LABEL,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Refit selected SIMCA configs over several random seeds.
+
+    Returns
+    -------
+    metrics_df:
+        One row per selected configuration and random seed.
+
+    pixel_errors_by_image_df:
+        Lightweight pixel-error summaries by image/config/seed.
+
+    errors_df:
+        Refit errors, if any.
+
+    Notes
+    -----
+    This is mainly useful for balanced_pixels models.
+    """
+    metric_parts = []
+    pixel_error_parts = []
+    error_parts = []
+
+    for seed in seeds:
+        print(f"[random_state_stability] seed={seed}")
+
+        (
+            metrics_df,
+            _objects_df,
+            _pixels_df,
+            pixel_errors_df,
+            errors_df,
+        ) = refit_selected_simca_configs(
+            selected_configs_df=selected_configs_df,
+            object_db=object_db,
+            image_db=image_db,
+            train_filters=train_filters,
+            projection_filters=projection_filters,
+            preprocessing_configs=preprocessing_configs,
+            evaluation_split=evaluation_split,
+            wavelengths=wavelengths,
+            random_state=int(seed),
+            replace=replace,
+            cv_n_splits=cv_n_splits,
+            cv_group_col=cv_group_col,
+            target_class=target_class,
+            non_target_label=non_target_label,
+        )
+
+        if metrics_df is not None and len(metrics_df) > 0:
+            metrics_df = metrics_df.copy()
+            metrics_df["random_state"] = int(seed)
+            metric_parts.append(metrics_df)
+
+        if pixel_errors_df is not None and len(pixel_errors_df) > 0:
+            pixel_errors_df = pixel_errors_df.copy()
+            pixel_errors_df["random_state"] = int(seed)
+            pixel_error_parts.append(pixel_errors_df)
+
+        if errors_df is not None and len(errors_df) > 0:
+            errors_df = errors_df.copy()
+            errors_df["random_state"] = int(seed)
+            error_parts.append(errors_df)
+
+        del metrics_df, _objects_df, _pixels_df, pixel_errors_df, errors_df
+        gc.collect()
+
+    metrics_out = (
+        pd.concat(metric_parts, ignore_index=True, sort=False)
+        if metric_parts
+        else pd.DataFrame()
+    )
+
+    pixel_errors_out = (
+        pd.concat(pixel_error_parts, ignore_index=True, sort=False)
+        if pixel_error_parts
+        else pd.DataFrame()
+    )
+
+    errors_out = (
+        pd.concat(error_parts, ignore_index=True, sort=False)
+        if error_parts
+        else pd.DataFrame()
+    )
+
+    return metrics_out, pixel_errors_out, errors_out
+
+
+def run_selected_simca_random_state_stability_full(
+    selected_configs_df: pd.DataFrame,
+    object_db,
+    image_db,
+    train_filters: dict,
+    projection_filters: dict,
+    preprocessing_configs,
+    seeds: Sequence[int] = (0, 1, 2, 3, 4, 5, 10, 20, 42, 100),
+    evaluation_split: str = "random_state_stability",
+    wavelengths=None,
+    replace: bool = False,
+    cv_n_splits: int | None = 5,
+    cv_group_col: str = "object_id",
+    target_class: str = DEFAULT_TARGET_CLASS,
+    non_target_label: str = DEFAULT_NON_TARGET_LABEL,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Refit selected SIMCA configs over several random seeds.
+
+    Returns
+    -------
+    metrics_df
+    objects_df
+    pixel_errors_by_image_df
+    errors_df
+    """
+    metric_parts = []
+    object_parts = []
+    pixel_error_parts = []
+    error_parts = []
+
+    for seed in seeds:
+        print(f"[random_state_stability_full] seed={seed}")
+
+        (
+            metrics_df,
+            objects_df,
+            _pixels_df,
+            pixel_errors_df,
+            errors_df,
+        ) = refit_selected_simca_configs(
+            selected_configs_df=selected_configs_df,
+            object_db=object_db,
+            image_db=image_db,
+            train_filters=train_filters,
+            projection_filters=projection_filters,
+            preprocessing_configs=preprocessing_configs,
+            evaluation_split=evaluation_split,
+            wavelengths=wavelengths,
+            random_state=int(seed),
+            replace=replace,
+            cv_n_splits=cv_n_splits,
+            cv_group_col=cv_group_col,
+            target_class=target_class,
+            non_target_label=non_target_label,
+        )
+
+        if len(metrics_df) > 0:
+            metrics_df = metrics_df.copy()
+            metrics_df["random_state"] = int(seed)
+            metric_parts.append(metrics_df)
+
+        if len(objects_df) > 0:
+            objects_df = objects_df.copy()
+            objects_df["random_state"] = int(seed)
+            object_parts.append(objects_df)
+
+        if len(pixel_errors_df) > 0:
+            pixel_errors_df = pixel_errors_df.copy()
+            pixel_errors_df["random_state"] = int(seed)
+            pixel_error_parts.append(pixel_errors_df)
+
+        if len(errors_df) > 0:
+            errors_df = errors_df.copy()
+            errors_df["random_state"] = int(seed)
+            error_parts.append(errors_df)
+
+        del metrics_df, objects_df, _pixels_df, pixel_errors_df, errors_df
+        gc.collect()
+
+    return (
+        pd.concat(metric_parts, ignore_index=True, sort=False) if metric_parts else pd.DataFrame(),
+        pd.concat(object_parts, ignore_index=True, sort=False) if object_parts else pd.DataFrame(),
+        pd.concat(pixel_error_parts, ignore_index=True, sort=False) if pixel_error_parts else pd.DataFrame(),
+        pd.concat(error_parts, ignore_index=True, sort=False) if error_parts else pd.DataFrame(),
+    )
+

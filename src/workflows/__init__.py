@@ -27,13 +27,15 @@ from src.workflows.simca import (
     refit_empirical_cv_rule_row,
     refit_selected_simca_configs,
     refit_selected_simca_row,
-    run_simca_empirical_rule_grid,
+    run_simca_rule_variant_grid,
     run_simca_pixel_projection_grid,
     run_single_simca_pixel_projection,
     standard_grid_sort,
     summarize_cv_calibration,
     uses_sg,
     valid_sg_parameter_pairs,
+    run_selected_simca_random_state_stability,
+    run_selected_simca_random_state_stability_full,
 )
 from src.workflows.simca_optuna import (
     best_completed_trial_row,
@@ -57,6 +59,8 @@ from src.workflows.simca_selection_utils import (
     select_top_models,
     sort_detection_selection,
     summarize_parameter_tendencies,
+    summarize_metric_stability,
+    summarize_ablation_effects,
 )
 
 add_simca_selection_score = add_detection_selection_score
@@ -103,7 +107,7 @@ __all__ = [
     "refit_selected_simca_configs",
     "refit_selected_simca_row",
     "run_optuna_simca_pixel_optimization",
-    "run_simca_empirical_rule_grid",
+    "run_simca_rule_variant_grid",
     "run_simca_pixel_projection_grid",
     "run_single_simca_pixel_projection",
     "select_top_by_score",
@@ -117,4 +121,8 @@ __all__ = [
     "train_projection_shift_by_label",
     "uses_sg",
     "valid_sg_parameter_pairs",
+    "summarize_metric_stability",
+    "summarize_ablation_effects",
+    "run_selected_simca_random_state_stability",
+    "run_selected_simca_random_state_stability_full",
 ]

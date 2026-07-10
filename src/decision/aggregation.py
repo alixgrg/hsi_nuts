@@ -96,6 +96,8 @@ def aggregate_pixel_predictions_to_objects(
     optional_mean_cols = [
         "H",
         "Q",
+        "H_norm_limit",
+        "Q_norm_limit",
         "rule_statistic",
         "rule_limit",
         "distance_to_border",

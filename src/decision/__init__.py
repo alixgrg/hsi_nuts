@@ -8,6 +8,7 @@ from src.decision.border import (
     aggregate_pixel_predictions_to_objects_core,
     border_width_object_threshold_grid,
     summarize_pixel_errors_by_border_zone,
+    summarize_border_diagnostics_by_config,
 )
 from src.decision.labels import (
     DEFAULT_NON_TARGET_LABEL,
@@ -47,6 +48,11 @@ from src.decision.uncertainty import (
     summarize_three_way_decision,
     three_way_object_threshold_grid,
     three_way_object_threshold_grid_by_group,
+    select_three_way_threshold_one_config,
+    select_three_way_threshold_pareto,
+    calibrate_three_way_thresholds_by_config,
+    apply_three_way_thresholds_by_config,
+    evaluate_three_way_by_config,
 )
 
 __all__ = [
@@ -86,4 +92,10 @@ __all__ = [
     "true_pixel_ratio_col",
     "true_pixel_ratio_total_col",
     "union_object_masks",
+    "summarize_border_diagnostics_by_config",
+    "select_three_way_threshold_one_config",
+    "select_three_way_threshold_pareto",
+    "calibrate_three_way_thresholds_by_config",
+    "apply_three_way_thresholds_by_config",
+    "evaluate_three_way_by_config",
 ]

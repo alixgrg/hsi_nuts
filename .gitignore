@@ -4,3 +4,5 @@ HSI Data/
 __pycache__/
 *.egg-info/
 results/
+.agents/
+.venv/

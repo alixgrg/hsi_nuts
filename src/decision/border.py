@@ -334,3 +334,97 @@ def summarize_pixel_errors_by_border_zone(
         })
 
     return pd.DataFrame(rows)
+
+
+def summarize_border_diagnostics_by_config(
+    pixel_df: pd.DataFrame,
+    object_db: dict,
+    target_class: str = DEFAULT_TARGET_CLASS,
+    border_widths=(1, 2, 3),
+    config_cols=("selected_config_id",),
+) -> pd.DataFrame:
+    """
+    Summarize border/core pixel errors for several configs and border widths.
+
+    This wraps summarize_pixel_errors_by_border_zone while preserving
+    configuration metadata.
+    """
+    if pixel_df is None or len(pixel_df) == 0:
+        return pd.DataFrame()
+
+    if isinstance(config_cols, str):
+        config_cols = [config_cols]
+    else:
+        config_cols = list(config_cols)
+
+    config_cols = [col for col in config_cols if col in pixel_df.columns]
+
+    if not config_cols:
+        config_cols = ["selected_config_id"] if "selected_config_id" in pixel_df.columns else []
+
+    rows = []
+
+    if config_cols:
+        grouped = pixel_df.groupby(config_cols, dropna=False)
+    else:
+        grouped = [((), pixel_df)]
+
+    for key, group in grouped:
+        if not isinstance(key, tuple):
+            key = (key,)
+
+        meta = {
+            col: value
+            for col, value in zip(config_cols, key)
+        }
+
+        for border_width in border_widths:
+            summary = summarize_pixel_errors_by_border_zone(
+                pixel_df=group,
+                object_db=object_db,
+                target_class=target_class,
+                border_width=int(border_width),
+            )
+
+            if summary is None or len(summary) == 0:
+                continue
+
+            summary = summary.copy()
+
+            for col, value in meta.items():
+                summary[col] = value
+
+            summary["n_errors"] = summary["fp"].astype(int) + summary["fn"].astype(int)
+            summary["error_rate"] = summary["n_errors"] / summary["n_pixels"].clip(lower=1)
+
+            rows.append(summary)
+
+    if not rows:
+        return pd.DataFrame()
+
+    out = pd.concat(rows, ignore_index=True, sort=False)
+
+    ordered_cols = (
+        config_cols
+        + [
+            "border_width",
+            "zone",
+            "n_pixels",
+            "tp",
+            "tn",
+            "fp",
+            "fn",
+            "n_errors",
+            "error_rate",
+            "fp_rate",
+            "fn_rate",
+            "pixel_accuracy",
+        ]
+    )
+
+    ordered_cols = [col for col in ordered_cols if col in out.columns]
+    other_cols = [col for col in out.columns if col not in ordered_cols]
+
+    return out[ordered_cols + other_cols].sort_values(
+        config_cols + ["border_width", "zone"] if config_cols else ["border_width", "zone"]
+    ).reset_index(drop=True)

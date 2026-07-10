@@ -1,0 +1,32 @@
+# Pip/venv environment for the HSI nuts project.
+# Tested against Python 3.14.6 on 2026-07-06.
+#
+# Create without conda:
+#   python -m venv .venv
+#   .\.venv\Scripts\python -m pip install --upgrade pip
+#   .\.venv\Scripts\python -m pip install -r requirements.txt
+#
+# On macOS/Linux:
+#   python -m venv .venv
+#   . .venv/bin/activate
+#   python -m pip install --upgrade pip
+#   python -m pip install -r requirements.txt
+
+numpy==2.4.6
+pandas==3.0.3
+scipy==1.18.0
+scikit-image==0.26.0
+scikit-learn==1.9.0
+h5py==3.16.0
+pyarrow==24.0.0
+openpyxl==3.1.5
+optuna==4.9.0
+plotly==6.7.0
+matplotlib==3.11.0
+ipython==9.14.1
+ipykernel==7.3.0
+jupyterlab==4.6.0
+notebook==7.6.0
+nbformat==5.10.4
+ipywidgets==8.1.8
+

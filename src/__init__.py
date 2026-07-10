@@ -380,9 +380,9 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
         "src.workflows.simca",
         "summarize_cv_calibration",
     ),
-    "run_simca_empirical_rule_grid": (
+    "run_simca_rule_variant_grid": (
         "src.workflows.simca",
-        "run_simca_empirical_rule_grid",
+        "run_simca_rule_variant_grid",
     ),
     "refit_best_grid_row": (
         "src.workflows.simca",

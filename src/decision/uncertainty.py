@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Sequence
+
 import numpy as np
 import pandas as pd
 
@@ -10,6 +12,7 @@ from src.decision.labels import (
     pixel_ratio_col,
     true_col as make_true_col,
 )
+from src.workflows.simca_selection_utils import pareto_front_by_group
 
 def add_three_way_object_decision(
     object_df: pd.DataFrame,
@@ -376,3 +379,442 @@ def three_way_object_threshold_grid_by_group(
         )
         .reset_index(drop=True)
     )
+
+
+def select_three_way_threshold_one_config(
+        group: pd.DataFrame,
+        max_target_miss_rate: float,
+        max_false_accept_rate: float,
+        max_uncertain_rate: float) -> pd.Series:
+    group = group.copy()
+
+    eligible = group[
+        (group["target_miss_rate"].fillna(1.0) <= max_target_miss_rate)
+        & (group["non_target_false_accept_rate"].fillna(1.0) <= max_false_accept_rate)
+        & (group["uncertain_rate"].fillna(1.0) <= max_uncertain_rate)
+    ].copy()
+
+    if eligible.empty:
+        eligible = group.copy()
+
+    return (
+        eligible
+        .sort_values(
+            [
+                "target_miss_rate",
+                "non_target_false_accept_rate",
+                "uncertain_rate",
+                "three_way_score",
+            ],
+            ascending=[True, True, True, False],
+        )
+        .iloc[0]
+    )
+
+
+def select_three_way_threshold_pareto(
+    threshold_grid_df: pd.DataFrame,
+    max_target_miss_rate: float = 0.00,
+    max_false_accept_rate: float | None = None,
+    max_uncertain_rate: float | None = None,
+) -> pd.Series:
+    """
+    Select one lower/upper threshold pair using constraints and Pareto logic.
+
+    Priority:
+    1. target_miss_rate
+    2. non_target_false_accept_rate
+    3. uncertain_rate
+    4. coverage_rate
+    """
+    df = threshold_grid_df.copy()
+
+    for col in [
+        "target_miss_rate",
+        "non_target_false_accept_rate",
+        "uncertain_rate",
+        "coverage_rate",
+        "decided_balanced_accuracy",
+    ]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    feasible = df.copy()
+
+    feasible = feasible[
+        feasible["target_miss_rate"].fillna(1.0) <= float(max_target_miss_rate)
+    ].copy()
+
+    if max_false_accept_rate is not None and len(feasible) > 0:
+        feasible = feasible[
+            feasible["non_target_false_accept_rate"].fillna(1.0)
+            <= float(max_false_accept_rate)
+        ].copy()
+
+    if max_uncertain_rate is not None and len(feasible) > 0:
+        feasible = feasible[
+            feasible["uncertain_rate"].fillna(1.0)
+            <= float(max_uncertain_rate)
+        ].copy()
+
+    if feasible.empty:
+        feasible = df.copy()
+
+    front = pareto_front_by_group(
+        feasible,
+        group_cols=[],
+        minimize_cols=[
+            "target_miss_rate",
+            "non_target_false_accept_rate",
+            "uncertain_rate",
+        ],
+        maximize_cols=["coverage_rate"],
+    )
+
+    return (
+        front.sort_values(
+            [
+                "target_miss_rate",
+                "non_target_false_accept_rate",
+                "uncertain_rate",
+                "coverage_rate",
+            ],
+            ascending=[True, True, True, False],
+        )
+        .iloc[0]
+    )
+
+
+def calibrate_three_way_thresholds_by_config(
+    object_df: pd.DataFrame,
+    config_cols: Sequence[str],
+    target_class: str = DEFAULT_TARGET_CLASS,
+    non_target_label: str = DEFAULT_NON_TARGET_LABEL,
+    lower_thresholds=np.round(np.arange(0.05, 0.61, 0.05), 2),
+    upper_thresholds=np.round(np.arange(0.40, 0.96, 0.05), 2),
+    max_target_miss_rate: float = 0.00,
+    max_false_accept_rate: float | None = None,
+    max_uncertain_rate: float | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    For each selected model/config, evaluate all 3-way thresholds
+    and select one lower/upper pair.
+    """
+    config_cols = [col for col in config_cols if col in object_df.columns]
+
+    grid_parts = []
+    selected_rows = []
+
+    for key, group in object_df.groupby(config_cols, dropna=False):
+        if not isinstance(key, tuple):
+            key = (key,)
+
+        grid = three_way_object_threshold_grid(
+            object_df=group,
+            target_class=target_class,
+            non_target_label=non_target_label,
+            lower_thresholds=lower_thresholds,
+            upper_thresholds=upper_thresholds,
+        )
+
+        for col, value in zip(config_cols, key):
+            grid[col] = value
+
+        selected = select_three_way_threshold_pareto(
+            grid,
+            max_target_miss_rate=max_target_miss_rate,
+            max_false_accept_rate=max_false_accept_rate,
+            max_uncertain_rate=max_uncertain_rate,
+        )
+
+        grid_parts.append(grid)
+        selected_rows.append(selected)
+
+    grid_df = pd.concat(grid_parts, ignore_index=True, sort=False) if grid_parts else pd.DataFrame()
+    selected_df = pd.DataFrame(selected_rows)
+
+    return grid_df, selected_df
+
+
+def apply_three_way_thresholds_by_config(
+    object_df: pd.DataFrame,
+    thresholds_df: pd.DataFrame,
+    config_id_col: str = "selected_config_id",
+    target_class: str = DEFAULT_TARGET_CLASS,
+    non_target_label: str = DEFAULT_NON_TARGET_LABEL,
+) -> pd.DataFrame:
+    """
+    Apply previously selected 3-way thresholds to an object-level table.
+    No calibration is done here.
+    """
+    if object_df is None or len(object_df) == 0:
+        return pd.DataFrame() if object_df is None else object_df.copy()
+
+    if config_id_col not in object_df.columns:
+        raise KeyError(f"Missing {config_id_col!r} in object_df.")
+    if config_id_col not in thresholds_df.columns:
+        raise KeyError(f"Missing {config_id_col!r} in thresholds_df.")
+
+    threshold_lookup = (
+        thresholds_df
+        .drop_duplicates(config_id_col)
+        .set_index(config_id_col)
+    )
+
+    parts = []
+
+    for config_id, group in object_df.groupby(config_id_col, dropna=False):
+        if config_id not in threshold_lookup.index:
+            raise KeyError(f"No 3-way thresholds found for config {config_id!r}.")
+
+        row = threshold_lookup.loc[config_id]
+        lower = float(row["three_way_lower_threshold"])
+        upper = float(row["three_way_upper_threshold"])
+
+        tmp = add_three_way_object_decision(
+            group,
+            target_class=target_class,
+            non_target_label=non_target_label,
+            lower_threshold=lower,
+            upper_threshold=upper,
+        )
+
+        parts.append(tmp)
+
+    return (
+        pd.concat(parts, ignore_index=True, sort=False)
+        if parts
+        else object_df.copy()
+    )
+
+
+def evaluate_three_way_by_config(
+    object_df: pd.DataFrame,
+    thresholds_df: pd.DataFrame,
+    config_id_col: str = "selected_config_id",
+    extra_group_cols: Sequence[str] = (),
+    target_class: str = DEFAULT_TARGET_CLASS,
+    non_target_label: str = DEFAULT_NON_TARGET_LABEL,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Apply fixed 3-way thresholds and evaluate metrics by configuration.
+    """
+    if object_df is None or len(object_df) == 0:
+        return pd.DataFrame(), pd.DataFrame() if object_df is None else object_df.copy()
+
+    objects_3way_df = apply_three_way_thresholds_by_config(
+        object_df=object_df,
+        thresholds_df=thresholds_df,
+        config_id_col=config_id_col,
+        target_class=target_class,
+        non_target_label=non_target_label,
+    )
+
+    if len(objects_3way_df) == 0:
+        return pd.DataFrame(), objects_3way_df
+
+    group_cols = [config_id_col] + [
+        col for col in extra_group_cols
+        if col in objects_3way_df.columns
+    ]
+
+    rows = []
+
+    for key, group in objects_3way_df.groupby(group_cols, dropna=False):
+        if not isinstance(key, tuple):
+            key = (key,)
+
+        metrics = evaluate_three_way_object_decision(
+            group,
+            target_class=target_class,
+            non_target_label=non_target_label,
+        )
+
+        for col, value in zip(group_cols, key):
+            metrics[col] = value
+
+        rows.append(metrics)
+
+    return pd.DataFrame(rows), objects_3way_df
+
+
+def add_three_way_confidence(
+    object_df: pd.DataFrame,
+    target_class: str = DEFAULT_TARGET_CLASS,
+    non_target_label: str = DEFAULT_NON_TARGET_LABEL,
+    uncertain_label: str = UNCERTAIN_LABEL,
+    ratio_col: str | None = None,
+    decision_col: str = "decision_3way",
+    lower_col: str = "three_way_lower_threshold",
+    upper_col: str = "three_way_upper_threshold",
+    output_margin_col: str = "three_way_margin",
+    output_confidence_col: str = "three_way_confidence",
+    eps: float = 1e-12,
+) -> pd.DataFrame:
+    """
+    Add a simple confidence score for a fixed 3-way object decision.
+
+    Confidence is based on the distance to the closest decision boundary:
+    - non_target: distance below lower threshold;
+    - target: distance above upper threshold;
+    - uncertain: distance inside the uncertainty interval.
+
+    The score is normalized to [0, 1].
+    """
+    if object_df is None or len(object_df) == 0:
+        return pd.DataFrame() if object_df is None else object_df.copy()
+
+    if ratio_col is None:
+        ratio_col = pixel_ratio_col(target_class)
+
+    required = [ratio_col, decision_col, lower_col, upper_col]
+    missing = [col for col in required if col not in object_df.columns]
+
+    if missing:
+        raise KeyError(f"Missing columns for 3-way confidence: {missing}")
+
+    df = object_df.copy()
+
+    ratio = pd.to_numeric(df[ratio_col], errors="coerce")
+    lower = pd.to_numeric(df[lower_col], errors="coerce")
+    upper = pd.to_numeric(df[upper_col], errors="coerce")
+    decision = df[decision_col].astype(str)
+
+    margin = pd.Series(np.nan, index=df.index, dtype="float64")
+    confidence = pd.Series(np.nan, index=df.index, dtype="float64")
+
+    mask_target = decision.eq(str(target_class))
+    mask_non_target = decision.eq(str(non_target_label))
+    mask_uncertain = decision.eq(str(uncertain_label))
+
+    margin.loc[mask_target] = ratio.loc[mask_target] - upper.loc[mask_target]
+    confidence.loc[mask_target] = margin.loc[mask_target] / (
+        1.0 - upper.loc[mask_target]
+    ).clip(lower=eps)
+
+    margin.loc[mask_non_target] = lower.loc[mask_non_target] - ratio.loc[mask_non_target]
+    confidence.loc[mask_non_target] = margin.loc[mask_non_target] / (
+        lower.loc[mask_non_target]
+    ).clip(lower=eps)
+
+    width = (upper - lower).clip(lower=eps)
+    midpoint = 0.5 * (lower + upper)
+
+    margin.loc[mask_uncertain] = (
+        0.5 * width.loc[mask_uncertain]
+        - (ratio.loc[mask_uncertain] - midpoint.loc[mask_uncertain]).abs()
+    )
+
+    confidence.loc[mask_uncertain] = margin.loc[mask_uncertain] / (
+        0.5 * width.loc[mask_uncertain]
+    ).clip(lower=eps)
+
+    df[output_margin_col] = margin
+    df[output_confidence_col] = confidence.clip(lower=0.0, upper=1.0)
+
+    df["three_way_confidence_bin"] = pd.cut(
+        df[output_confidence_col],
+        bins=[-np.inf, 0.33, 0.66, np.inf],
+        labels=["low", "medium", "high"],
+    ).astype("object")
+
+    return df
+
+
+def three_way_confusion_table(
+    df: pd.DataFrame,
+    true_col: str,
+    decision_col: str = "decision_3way",
+    confidence_col: str | None = "three_way_confidence",
+    group_cols: Sequence[str] = (),
+    target_class: str = DEFAULT_TARGET_CLASS,
+    non_target_label: str = DEFAULT_NON_TARGET_LABEL,
+    uncertain_label: str = UNCERTAIN_LABEL,
+) -> pd.DataFrame:
+    """
+    Build a long-format 3-way confusion table.
+
+    Rows are true labels:
+    - target_class
+    - non_target_label
+
+    Columns are 3-way decisions:
+    - non_target_label
+    - uncertain_label
+    - target_class
+    """
+    if df is None or len(df) == 0:
+        return pd.DataFrame()
+
+    group_cols = [col for col in group_cols if col in df.columns]
+
+    required = [true_col, decision_col]
+    missing = [col for col in required if col not in df.columns]
+
+    if missing:
+        raise KeyError(f"Missing columns for 3-way confusion table: {missing}")
+
+    d = df.copy()
+    d = d[d[true_col].notna() & d[decision_col].notna()].copy()
+
+    if len(d) == 0:
+        return pd.DataFrame()
+
+    d["true_label_3way"] = np.where(
+        d[true_col].astype(bool),
+        target_class,
+        non_target_label,
+    )
+
+    decisions = [
+        non_target_label,
+        uncertain_label,
+        target_class,
+    ]
+
+    rows = []
+
+    for key, group in d.groupby(group_cols, dropna=False) if group_cols else [((), d)]:
+        if not isinstance(key, tuple):
+            key = (key,)
+
+        base = {
+            col: value
+            for col, value in zip(group_cols, key)
+        }
+
+        n_group = len(group)
+
+        for true_label in [non_target_label, target_class]:
+            true_group = group[group["true_label_3way"].astype(str).eq(str(true_label))]
+            n_true = len(true_group)
+
+            for decision in decisions:
+                cell = true_group[
+                    true_group[decision_col].astype(str).eq(str(decision))
+                ]
+
+                row = dict(base)
+                row.update(
+                    {
+                        "true_label_3way": true_label,
+                        "decision_3way": decision,
+                        "n": int(len(cell)),
+                        "n_true_label": int(n_true),
+                        "n_group": int(n_group),
+                        "row_rate": len(cell) / max(n_true, 1),
+                        "global_rate": len(cell) / max(n_group, 1),
+                    }
+                )
+
+                if confidence_col is not None and confidence_col in cell.columns:
+                    conf = pd.to_numeric(cell[confidence_col], errors="coerce")
+                    row["mean_confidence"] = float(conf.mean()) if conf.notna().any() else np.nan
+                    row["median_confidence"] = float(conf.median()) if conf.notna().any() else np.nan
+                else:
+                    row["mean_confidence"] = np.nan
+                    row["median_confidence"] = np.nan
+
+                rows.append(row)
+
+    return pd.DataFrame(rows)

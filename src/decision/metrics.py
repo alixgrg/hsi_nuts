@@ -218,6 +218,7 @@ def summarize_pixel_errors_by_image(
     target_class: str = DEFAULT_TARGET_CLASS,
     non_target_label: str = DEFAULT_NON_TARGET_LABEL,
     group_cols=("source_image",),
+    sort_worst_first: bool = True,
     truth_available_col: str = "truth_available",
 ) -> pd.DataFrame:
     """
@@ -273,15 +274,24 @@ def summarize_pixel_errors_by_image(
         rows.append(row)
     if not rows:
         return pd.DataFrame()
-
-    return (
-        pd.DataFrame(rows)
-        .sort_values(
-            ["fn_rate", "fp_rate", "balanced_accuracy"],
-            ascending=[False, False, True],
+    if sort_worst_first:
+        return (
+            pd.DataFrame(rows)
+            .sort_values(
+                ["fn_rate", "fp_rate", "balanced_accuracy"],
+                ascending=[False, False, True],
+            )
+            .reset_index(drop=True)
         )
-        .reset_index(drop=True)
-    )
+    else:
+        return (
+            pd.DataFrame(rows)
+            .sort_values(
+                ["fn_rate", "fp_rate", "balanced_accuracy"],
+                ascending=[True, True, False],
+            )
+            .reset_index(drop=True)
+        )
 
 
 def summarize_object_errors_by_image(
@@ -290,6 +300,7 @@ def summarize_object_errors_by_image(
     non_target_label: str = DEFAULT_NON_TARGET_LABEL,
     group_cols=("source_image",),
     truth_available_ratio_col: str = "truth_available_ratio",
+    sort_worst_first: bool = True,
     min_truth_available_ratio: float = 0.50,
 ) -> pd.DataFrame:
     """
@@ -346,11 +357,21 @@ def summarize_object_errors_by_image(
 
     if not rows:
         return pd.DataFrame()
-    return (
-        pd.DataFrame(rows)
-        .sort_values(
-            ["fn_rate", "fp_rate", "balanced_accuracy"],
-            ascending=[False, False, True],
+    if sort_worst_first:
+        return (
+            pd.DataFrame(rows)
+            .sort_values(
+                ["fn_rate", "fp_rate", "balanced_accuracy"],
+                ascending=[False, False, True],
+            )
+            .reset_index(drop=True)
         )
-        .reset_index(drop=True)
-    )
+    else:
+        return (
+            pd.DataFrame(rows)
+            .sort_values(
+                ["fn_rate", "fp_rate", "balanced_accuracy"],
+                ascending=[True, True, False],
+            )
+            .reset_index(drop=True)
+        )
