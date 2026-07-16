@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from src.decision.metrics import binary_detection_metrics
+from src.decision.metrics import binary_detection_metrics, coerce_binary_series
 from src.decision.labels import (
     DEFAULT_TARGET_CLASS,
     DEFAULT_NON_TARGET_LABEL,
@@ -83,7 +83,7 @@ def aggregate_pixel_predictions_to_objects(
         raise ValueError(f"pixel_df must contain {pred_col!r}.")
 
     df = pixel_df.copy()
-    df[pred_col] = df[pred_col].astype(bool)
+    df[pred_col] = coerce_binary_series(df[pred_col], target_class=target_class).fillna(False).astype(bool)
 
     ratio_col = pixel_ratio_col(target_class)
     agg_dict = {
@@ -108,16 +108,22 @@ def aggregate_pixel_predictions_to_objects(
             agg_dict[f"{col}_mean"] = (col, "mean")
 
     if true_pixel_col in df.columns:
+        df["_true_pixel_bool"] = coerce_binary_series(
+            df[true_pixel_col], target_class=target_class
+        ).astype("Float64")
         if truth_available_col in df.columns:
+            df["_truth_available_bool"] = coerce_binary_series(
+                df[truth_available_col]
+            ).fillna(False).astype(bool)
             df["_truth_for_ratio"] = np.where(
-                df[truth_available_col].astype(bool),
-                df[true_pixel_col].astype(bool),
+                df["_truth_available_bool"],
+                df["_true_pixel_bool"],
                 np.nan,
             )
             agg_dict[true_pixel_ratio_col(target_class)] = ("_truth_for_ratio", "mean")
-            agg_dict["truth_available_ratio"] = (truth_available_col, "mean")
+            agg_dict["truth_available_ratio"] = ("_truth_available_bool", "mean")
         else:
-            agg_dict[true_pixel_ratio_col(target_class)] = (true_pixel_col, "mean")
+            agg_dict[true_pixel_ratio_col(target_class)] = ("_true_pixel_bool", "mean")
 
     out = df.groupby(
         [object_id_col, source_col],

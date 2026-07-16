@@ -32,7 +32,6 @@ from src.visualization.plot_spectra import (
 from src.visualization.plot_objects import (
     plot_object_view,
     plot_object_grid,
-    plot_object_areas,
 )
 
 from src.visualization.plot_scores import (
@@ -100,7 +99,6 @@ __all__ = [
     "plot_loadings",
     "plot_metric_by_index",
     "plot_metric_heatmap",
-    "plot_object_areas",
     "plot_object_decision_map",
     "plot_object_error_overlay",
     "plot_object_fp_fn_overlay",

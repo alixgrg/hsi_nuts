@@ -492,3 +492,108 @@ def to_numeric_metrics(df: pd.DataFrame, cols: Sequence[str]) -> pd.DataFrame:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce")
     return out
+
+def parse_preprocessing_steps(value) -> list[str]:
+    """Normalize preprocessing definitions stored as strings, lists or JSON."""
+    if value is None:
+        return []
+
+    try:
+        if pd.isna(value):
+            return []
+    except Exception:
+        pass
+
+    if isinstance(value, (list, tuple, set, np.ndarray, pd.Index)):
+        return [
+            str(item).strip()
+            for item in value
+            if str(item).strip()
+        ]
+
+    text = str(value).strip()
+
+    if not text:
+        return []
+
+    if text.startswith("[") and text.endswith("]"):
+        try:
+            parsed = json.loads(text)
+
+            if isinstance(parsed, list):
+                return [
+                    str(item).strip()
+                    for item in parsed
+                    if str(item).strip()
+                ]
+        except Exception:
+            pass
+
+    normalized = (
+        text.lower()
+        .replace("+", "_")
+        .replace("-", "_")
+        .replace(" ", "_")
+        .replace("savitzky_golay_smooth", "sg_smooth")
+        .replace("savitzky_golay_d1", "sg_d1")
+        .replace("savitzky_golay_d2", "sg_d2")
+    )
+
+    raw_parts = [
+        part
+        for part in normalized.split("_")
+        if part
+    ]
+
+    steps = []
+    i = 0
+
+    while i < len(raw_parts):
+        current = raw_parts[i]
+
+        if (
+            current == "sg"
+            and i + 1 < len(raw_parts)
+            and raw_parts[i + 1] in {"smooth", "d1", "d2"}
+        ):
+            steps.append(f"sg_{raw_parts[i + 1]}")
+            i += 2
+            continue
+
+        steps.append(current)
+        i += 1
+
+    return steps
+
+
+def merge_config_metadata(
+    results_df: pd.DataFrame,
+    config_df: pd.DataFrame,
+    id_col: str = "selected_config_id",
+    columns: Sequence[str] | None = None,
+    overwrite: bool = False,
+    validate: str | None = "many_to_one",
+) -> pd.DataFrame:
+    """Attach one configuration table to result rows without notebook helpers.
+
+    Existing result columns are preserved by default. Set ``overwrite=True`` to
+    replace them with values from ``config_df``.
+    """
+    if id_col not in results_df.columns:
+        raise KeyError(f"Missing {id_col!r} in results_df.")
+    if id_col not in config_df.columns:
+        raise KeyError(f"Missing {id_col!r} in config_df.")
+
+    right = config_df.drop_duplicates(id_col).copy()
+    if columns is not None:
+        keep = [id_col] + [column for column in columns if column in right.columns and column != id_col]
+        right = right[keep]
+
+    overlapping = [column for column in right.columns if column in results_df.columns and column != id_col]
+    if overwrite:
+        left = results_df.drop(columns=overlapping)
+        return left.merge(right, on=id_col, how="left", validate=validate)
+
+    # Only merge columns not already present.
+    right = right[[column for column in right.columns if column == id_col or column not in results_df.columns]]
+    return results_df.merge(right, on=id_col, how="left", validate=validate)

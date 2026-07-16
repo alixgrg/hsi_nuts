@@ -1,83 +1,89 @@
 from __future__ import annotations
 
-from typing import Mapping
+import warnings
+from typing import Mapping, Sequence
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
 from src.decision.maps import (
-    make_pixel_error_map,
-    make_pixel_prediction_map,
     make_object_error_map,
     make_object_fp_fn_map,
+    make_pixel_error_map,
+    make_pixel_prediction_map,
 )
-from src.visualization.common import background_image, show_or_return
+from src.visualization.common import (
+    ERROR_COLOR_MAP,
+    apply_project_theme,
+    background_image,
+    class_color,
+    crop_arrays_to_foreground,
+    discrete_colorscale,
+    normalize_class_label,
+    show_or_return,
+)
 from src.visualization.plot_images import plot_image_overlay
 
 
-def _decision_color(label: str) -> str:
-    """
-    Stable colors for binary and 3-way SIMCA decisions.
-    """
-    lab = str(label).lower()
+DEFAULT_DECISION_CATEGORIES = {
+    1: {"label": "unknown", "color": "lightgray"},
+    2: {"label": "almond", "color": "royalblue"},
+    3: {"label": "peanut", "color": "limegreen"},
+    4: {"label": "uncertain", "color": "purple"},
+}
 
-    if lab in {"almond", "non_target", "non_peanut", "almond_only"}:
-        return "royalblue"
+DEFAULT_DECISION_TO_CODE = {
+    "unknown": 1,
+    "missing": 1,
+    "almond": 2,
+    "almond_only": 2,
+    "non_peanut": 2,
+    "non_target": 2,
+    "peanut": 3,
+    "peanut_only": 3,
+    "target": 3,
+    "ambiguous": 4,
+    "uncertain": 4,
+}
 
-    if lab in {"uncertain", "ambiguous"}:
-        return "purple"
 
-    if lab in {"peanut", "target", "peanut_only"}:
-        return "limegreen"
-
-    return "lightgray"
-
-
-def _discrete_colorscale(colors: list[str]) -> list[list[object]]:
-    """
-    Build a discrete Plotly colorscale from categorical colors.
-    """
-    n = len(colors)
-
-    if n == 1:
-        return [[0.0, colors[0]], [1.0, colors[0]]]
-
-    scale = []
-
-    for i, color in enumerate(colors):
-        left = i / n
-        right = (i + 1) / n
-        scale.append([left, color])
-        scale.append([right, color])
-
-    return scale
+def _category_spec(
+    categories: Mapping[int, Mapping[str, str]] | None,
+) -> dict[int, dict[str, str]]:
+    source = DEFAULT_DECISION_CATEGORIES if categories is None else categories
+    out: dict[int, dict[str, str]] = {}
+    for code, value in source.items():
+        if isinstance(value, Mapping):
+            label = str(value.get("label", code))
+            color = str(value.get("color", class_color(label)))
+        else:
+            label = str(value)
+            color = class_color(label)
+        out[int(code)] = {"label": label, "color": color}
+    return out
 
 
 def _apply_categorical_overlay_scale(
     fig: go.Figure,
-    tickvals: list[int],
-    ticktext: list[str],
+    categories: Mapping[int, Mapping[str, str]],
     colorbar_title: str = "decision",
 ) -> go.Figure:
-    """
-    Force the last Heatmap trace to behave as a categorical overlay.
-    """
-    colors = [_decision_color(label) for label in ticktext]
-
+    codes = sorted(categories)
+    colors = [categories[code]["color"] for code in codes]
+    labels = [categories[code]["label"] for code in codes]
     fig.data[-1].update(
-        zmin=min(tickvals),
-        zmax=max(tickvals),
-        colorscale=_discrete_colorscale(colors),
+        zmin=min(codes),
+        zmax=max(codes),
+        colorscale=discrete_colorscale(colors),
         colorbar=dict(
             title=colorbar_title,
             tickmode="array",
-            tickvals=tickvals,
-            ticktext=ticktext,
+            tickvals=codes,
+            ticktext=labels,
             x=1.12,
         ),
     )
-
     return fig
 
 
@@ -90,87 +96,133 @@ def plot_object_decision_map(
     object_id_col: str = "object_id",
     source_col: str = "source_image",
     decision_to_code: Mapping[str, int] | None = None,
+    categories: Mapping[int, Mapping[str, str]] | None = None,
     code_to_name: Mapping[int, str] | None = None,
     title: str | None = None,
     width: int = 850,
     height: int = 750,
     show: bool = True,
+    base: str = "image_ref",
+    band: int | None = None,
+    opacity: float = 0.55,
+    crop_to_objects: bool = True,
+    padding: int = 5,
 ):
-    """Overlay object-level decisions on an image."""
+    """Overlay object-level binary or 3-way decisions on an image.
+
+    Labels and colours are stored separately, so changing a legend label can no
+    longer accidentally turn a category grey.
+    """
     if image_key not in image_db:
         raise KeyError(f"Image not found in image_db: {image_key}")
-
     img = image_db[image_key]
-    labels_img = img["labels"]
+    if "labels" not in img:
+        raise KeyError(f"Image {image_key!r} has no labels image.")
 
-    if decision_to_code is None:
-        decision_to_code = {
-            "unknown": 1,
-            "almond_only": 2,
-            "non_peanut": 2,
-            "non_target": 2,
-            "peanut_only": 3,
-            "peanut": 3,
-            "target": 3,
-            "ambiguous": 4,
-            "uncertain": 4,
-        }
-
-    if code_to_name is None:
-        code_to_name = {
-            0: "background",
-            1: "unknown",
-            2: "non_peanut / almond_only",
-            3: "peanut",
-            4: "ambiguous / uncertain",
-        }
+    labels_img = np.asarray(img["labels"])
+    background = background_image(image_db, image_key, base=base, band=band)
+    decision_to_code = dict(DEFAULT_DECISION_TO_CODE if decision_to_code is None else decision_to_code)
+    category_map = _category_spec(categories)
+    if code_to_name is not None:
+        # Backward compatibility: display names change, colours stay code-based.
+        for code, name in code_to_name.items():
+            if int(code) in category_map:
+                category_map[int(code)]["label"] = str(name)
 
     decision_map = np.zeros_like(labels_img, dtype=float)
-    sub = results_df[results_df[source_col].astype(str) == str(image_key)]
-
+    sub = results_df[results_df[source_col].astype(str).eq(str(image_key))]
     for _, row in sub.iterrows():
-        obj_id = str(row[object_id_col])
-
-        if obj_id not in object_db:
+        object_id = str(row[object_id_col])
+        obj = object_db.get(object_id)
+        if obj is None or "label_id" not in obj:
             continue
+        raw_decision = str(row[decision_col]).strip().lower()
+        normalized = normalize_class_label(raw_decision)
+        code = decision_to_code.get(raw_decision, decision_to_code.get(normalized, 1))
+        decision_map[labels_img == int(obj["label_id"])] = int(code)
 
-        label_id = object_db[obj_id]["label_id"]
-        decision = str(row[decision_col])
-        decision_map[labels_img == label_id] = decision_to_code.get(decision, 1)
-
-    tickvals = sorted([c for c in code_to_name if c != 0])
-
-    colorbar = dict(
-        title="decision",
-        tickvals=tickvals,
-        ticktext=[code_to_name[c] for c in tickvals],
-        x=1.12,
-    )
+    used_codes = sorted(int(code) for code in np.unique(decision_map) if code != 0)
+    shown_categories = {
+        code: category_map.get(code, {"label": str(code), "color": "lightgray"})
+        for code in used_codes
+    }
+    if not shown_categories:
+        shown_categories = category_map
 
     fig = plot_image_overlay(
-        img["image_ref"],
+        background,
         decision_map,
         title=title or f"Object decisions — {image_key}",
-        background_title="image_ref",
+        background_title=base,
         overlay_title="decision",
-        overlay_colorscale="Viridis",  # overwritten below
-        overlay_colorbar=colorbar,
-        alpha=0.55,
+        overlay_colorscale="Viridis",
+        alpha=opacity,
         width=width,
         height=height,
+        zmin=min(shown_categories),
+        zmax=max(shown_categories),
+        crop_to_foreground=crop_to_objects,
+        foreground_mask=labels_img > 0,
+        padding=padding,
         show=False,
     )
+    _apply_categorical_overlay_scale(fig, shown_categories, "decision")
+    return show_or_return(fig, show)
 
-    tickvals = sorted([c for c in code_to_name if c != 0])
-    ticktext = [code_to_name[c] for c in tickvals]
 
-    fig = _apply_categorical_overlay_scale(
-        fig,
-        tickvals=tickvals,
-        ticktext=ticktext,
-        colorbar_title="decision",
+def _plot_coded_overlay(
+    background: np.ndarray,
+    overlay: np.ndarray,
+    *,
+    categories: Mapping[int, Mapping[str, str]],
+    title: str,
+    colorbar_title: str,
+    opacity: float,
+    width: int,
+    height: int,
+    crop_mask: np.ndarray | None = None,
+    crop_to_objects: bool = True,
+    padding: int = 5,
+    show: bool = True,
+):
+    background = np.asarray(background)
+    overlay = np.asarray(overlay, dtype=float)
+    overlay[overlay == 0] = np.nan
+    if crop_to_objects and crop_mask is not None:
+        (background, overlay), _ = crop_arrays_to_foreground(
+            [background, overlay], np.asarray(crop_mask, dtype=bool), padding=padding
+        )
+
+    codes = sorted(categories)
+    fig = go.Figure()
+    fig.add_trace(
+        go.Heatmap(z=background, colorscale="Gray", showscale=False)
     )
-
+    fig.add_trace(
+        go.Heatmap(
+            z=overlay,
+            zmin=min(codes),
+            zmax=max(codes),
+            colorscale=discrete_colorscale([categories[code]["color"] for code in codes]),
+            opacity=opacity,
+            colorbar=dict(
+                title=colorbar_title,
+                tickmode="array",
+                tickvals=codes,
+                ticktext=[categories[code]["label"] for code in codes],
+                x=1.12,
+            ),
+        )
+    )
+    fig.update_layout(
+        title=title,
+        width=width,
+        height=height,
+        xaxis_title="column",
+        yaxis_title="row",
+    )
+    fig.update_yaxes(autorange="reversed", scaleanchor="x")
+    apply_project_theme(fig)
     return show_or_return(fig, show)
 
 
@@ -188,25 +240,13 @@ def plot_object_error_overlay(
     opacity: float = 0.60,
     width: int = 850,
     height: int = 750,
+    error_cases: Sequence[str] = ("TP", "TN", "FP", "FN"),
+    crop_to_objects: bool = True,
+    padding: int = 5,
     show: bool = True,
 ):
-    """
-    Overlay TP/TN/FP/FN object-level errors on an image.
-
-    Codes
-    -----
-    TP : true target predicted target
-    TN : true non-target predicted non-target
-    FP : true non-target predicted target
-    FN : true target predicted non-target
-    """
-    background = background_image(
-        image_db,
-        image_key,
-        base=base,
-        band=band,
-    )
-
+    """Overlay selected object-level TP/TN/FP/FN cases."""
+    background = background_image(image_db, image_key, base=base, band=band)
     err = make_object_error_map(
         image_key=image_key,
         image_db=image_db,
@@ -216,140 +256,42 @@ def plot_object_error_overlay(
         pred_col=pred_col,
         true_col=true_col,
     )
-
-    overlay = err.astype(float)
-    overlay[overlay == 0] = np.nan
-
-    colorscale = [
-        [0.00, "limegreen"],   # 1 TP
-        [0.33, "royalblue"],   # 2 TN
-        [0.66, "orange"],      # 3 FP
-        [1.00, "red"],         # 4 FN
-    ]
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Heatmap(
-            z=background,
-            colorscale="Gray",
-            showscale=False,
-            colorbar=dict(title=base),
-        )
-    )
-
-    fig.add_trace(
-        go.Heatmap(
-            z=overlay,
-            zmin=1,
-            zmax=4,
-            colorscale=colorscale,
-            opacity=opacity,
-            colorbar=dict(
-                title="object error",
-                tickvals=[1, 2, 3, 4],
-                ticktext=["TP", "TN", "FP", "FN"],
-                x=1.12,
-            ),
-        )
-    )
-
-    fig.update_layout(
+    code_by_case = {"TP": 1, "TN": 2, "FP": 3, "FN": 4}
+    keep = [case for case in error_cases if case in code_by_case]
+    filtered = np.zeros_like(err, dtype=float)
+    categories = {}
+    for display_code, case in enumerate(keep, start=1):
+        filtered[err == code_by_case[case]] = display_code
+        categories[display_code] = {"label": case, "color": ERROR_COLOR_MAP[case]}
+    if not categories:
+        raise ValueError("error_cases must include at least one of TP, TN, FP, FN.")
+    crop_mask = np.asarray(image_db[image_key].get("labels", err)) > 0
+    return _plot_coded_overlay(
+        background,
+        filtered,
+        categories=categories,
         title=title or f"Object-level errors — {image_key}",
+        colorbar_title="object error",
+        opacity=opacity,
         width=width,
         height=height,
-        xaxis_title="column",
-        yaxis_title="row",
-    )
-    fig.update_yaxes(autorange="reversed", scaleanchor="x")
-
-    return show_or_return(fig, show)
-
-
-def plot_object_fp_fn_overlay(
-    image_key: str,
-    image_db,
-    object_db,
-    object_df: pd.DataFrame,
-    target_class: str = "peanut",
-    pred_col: str | None = None,
-    true_col: str | None = None,
-    base: str = "image_ref",
-    band: int | None = None,
-    title: str | None = None,
-    opacity: float = 0.75,
-    width: int = 850,
-    height: int = 750,
-    show: bool = True,
-):
-    """
-    Overlay only object-level false positives and false negatives.
-
-    Codes
-    -----
-    1 : FP
-    2 : FN
-    """
-    background = background_image(
-        image_db,
-        image_key,
-        base=base,
-        band=band,
+        crop_mask=crop_mask,
+        crop_to_objects=crop_to_objects,
+        padding=padding,
+        show=show,
     )
 
-    fp_fn = make_object_fp_fn_map(
-        image_key=image_key,
-        image_db=image_db,
-        object_db=object_db,
-        object_df=object_df,
-        target_class=target_class,
-        pred_col=pred_col,
-        true_col=true_col,
+
+def plot_object_fp_fn_overlay(*args, **kwargs):
+    """Deprecated compatibility wrapper for an FP/FN-only object map."""
+    warnings.warn(
+        "plot_object_fp_fn_overlay is deprecated; use plot_object_error_overlay "
+        "with error_cases=('FP', 'FN').",
+        DeprecationWarning,
+        stacklevel=2,
     )
-
-    overlay = fp_fn.astype(float)
-    overlay[overlay == 0] = np.nan
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Heatmap(
-            z=background,
-            colorscale="Gray",
-            showscale=False,
-            colorbar=dict(title=base),
-        )
-    )
-
-    fig.add_trace(
-        go.Heatmap(
-            z=overlay,
-            zmin=1,
-            zmax=2,
-            colorscale=[
-                [0.00, "orange"],  # FP
-                [1.00, "red"],     # FN
-            ],
-            opacity=opacity,
-            colorbar=dict(
-                title="object error",
-                tickvals=[1, 2],
-                ticktext=["FP", "FN"],
-                x=1.12,
-            ),
-        )
-    )
-
-    fig.update_layout(
-        title=title or f"False positive / false negative objects — {image_key}",
-        width=width,
-        height=height,
-        xaxis_title="column",
-        yaxis_title="row",
-    )
-    fig.update_yaxes(autorange="reversed", scaleanchor="x")
-
-    return show_or_return(fig, show)
+    kwargs["error_cases"] = ("FP", "FN")
+    return plot_object_error_overlay(*args, **kwargs)
 
 
 def plot_pixel_error_overlay(
@@ -363,145 +305,55 @@ def plot_pixel_error_overlay(
     opacity: float = 0.60,
     width: int = 850,
     height: int = 750,
+    error_cases: Sequence[str] = ("TP", "TN", "FP", "FN"),
+    crop_to_objects: bool = True,
+    padding: int = 5,
     show: bool = True,
 ):
-    """Overlay TP/TN/FP/FN pixel errors on an image."""
-    background = background_image(
-        image_db,
-        image_key,
-        base=base,
-        band=band,
-    )
-
+    """Overlay selected pixel-level TP/TN/FP/FN cases."""
+    background = background_image(image_db, image_key, base=base, band=band)
     err = make_pixel_error_map(
         image_key=image_key,
         image_db=image_db,
         pixel_df=pixel_df,
         target_class=target_class,
     )
-
-    overlay = err.astype(float)
-    overlay[overlay == 0] = np.nan
-
-    colorscale = [
-        [0.00, "limegreen"],   # 1 TP
-        [0.33, "royalblue"],   # 2 TN
-        [0.66, "orange"],      # 3 FP
-        [1.00, "red"],         # 4 FN
-    ]
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Heatmap(
-            z=background,
-            colorscale="Gray",
-            showscale=False,
-            colorbar=dict(title=base),
-        )
-    )
-
-    fig.add_trace(
-        go.Heatmap(
-            z=overlay,
-            zmin=1,
-            zmax=4,
-            colorscale=colorscale,
-            opacity=opacity,
-            colorbar=dict(
-                title="error",
-                tickvals=[1, 2, 3, 4],
-                ticktext=["TP", "TN", "FP", "FN"],
-                x=1.12,
-            ),
-        )
-    )
-
-    fig.update_layout(
+    code_by_case = {"TP": 1, "TN": 2, "FP": 3, "FN": 4}
+    keep = [case for case in error_cases if case in code_by_case]
+    filtered = np.zeros_like(err, dtype=float)
+    categories = {}
+    for display_code, case in enumerate(keep, start=1):
+        filtered[err == code_by_case[case]] = display_code
+        categories[display_code] = {"label": case, "color": ERROR_COLOR_MAP[case]}
+    if not categories:
+        raise ValueError("error_cases must include at least one of TP, TN, FP, FN.")
+    crop_mask = np.asarray(image_db[image_key].get("labels", err)) > 0
+    return _plot_coded_overlay(
+        background,
+        filtered,
+        categories=categories,
         title=title or f"Pixel errors — {image_key}",
+        colorbar_title="pixel error",
+        opacity=opacity,
         width=width,
         height=height,
-        xaxis_title="column",
-        yaxis_title="row",
-    )
-    fig.update_yaxes(autorange="reversed", scaleanchor="x")
-
-    return show_or_return(fig, show)
-
-
-def plot_pixel_fp_fn_overlay(
-    image_key: str,
-    image_db,
-    pixel_df: pd.DataFrame,
-    target_class: str = "peanut",
-    base: str = "image_ref",
-    band: int | None = None,
-    title: str | None = None,
-    opacity: float = 0.75,
-    width: int = 850,
-    height: int = 750,
-    show: bool = True,
-):
-    """Overlay only false positives and false negatives."""
-    background = background_image(
-        image_db,
-        image_key,
-        base=base,
-        band=band,
+        crop_mask=crop_mask,
+        crop_to_objects=crop_to_objects,
+        padding=padding,
+        show=show,
     )
 
-    err = make_pixel_error_map(
-        image_key=image_key,
-        image_db=image_db,
-        pixel_df=pixel_df,
-        target_class=target_class,
+
+def plot_pixel_fp_fn_overlay(*args, **kwargs):
+    """Deprecated compatibility wrapper for an FP/FN-only pixel map."""
+    warnings.warn(
+        "plot_pixel_fp_fn_overlay is deprecated; use plot_pixel_error_overlay "
+        "with error_cases=('FP', 'FN').",
+        DeprecationWarning,
+        stacklevel=2,
     )
-
-    overlay = np.zeros_like(err, dtype=float)
-    overlay[err == 3] = 1  # FP
-    overlay[err == 4] = 2  # FN
-    overlay[overlay == 0] = np.nan
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Heatmap(
-            z=background,
-            colorscale="Gray",
-            showscale=True,
-            colorbar=dict(title=base),
-        )
-    )
-
-    fig.add_trace(
-        go.Heatmap(
-            z=overlay,
-            zmin=1,
-            zmax=2,
-            colorscale=[
-                [0.00, "red"],
-                [1.00, "orange"],
-            ],
-            opacity=opacity,
-            colorbar=dict(
-                title="error",
-                tickvals=[1, 2],
-                ticktext=["FP", "FN"],
-                x=1.12,
-            ),
-        )
-    )
-
-    fig.update_layout(
-        title=title or f"False positive / false negative pixels — {image_key}",
-        width=width,
-        height=height,
-        xaxis_title="column",
-        yaxis_title="row",
-    )
-    fig.update_yaxes(autorange="reversed", scaleanchor="x")
-
-    return show_or_return(fig, show)
+    kwargs["error_cases"] = ("FP", "FN")
+    return plot_pixel_error_overlay(*args, **kwargs)
 
 
 def plot_pixel_prediction_overlay(
@@ -516,16 +368,12 @@ def plot_pixel_prediction_overlay(
     opacity: float = 0.60,
     width: int = 850,
     height: int = 750,
+    crop_to_objects: bool = True,
+    padding: int = 5,
     show: bool = True,
 ):
-    """Overlay binary pixel-level target predictions on an image."""
-    background = background_image(
-        image_db,
-        image_key,
-        base=base,
-        band=band,
-    )
-
+    """Overlay binary target predictions using the stable target colour."""
+    background = background_image(image_db, image_key, base=base, band=band)
     pred_map = make_pixel_prediction_map(
         image_key=image_key,
         image_db=image_db,
@@ -533,47 +381,21 @@ def plot_pixel_prediction_overlay(
         target_class=target_class,
         pred_col=pred_col,
     )
-
-    overlay = pred_map.astype(float)
-    overlay[overlay == 0] = np.nan
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Heatmap(
-            z=background,
-            colorscale="Gray",
-            showscale=False,
-            colorbar=dict(title=base),
-        )
-    )
-
-    fig.add_trace(
-        go.Heatmap(
-            z=overlay,
-            zmin=1,
-            zmax=1,
-            colorscale=[[0.0, "crimson"], [1.0, "crimson"]],
-            opacity=opacity,
-            colorbar=dict(
-                title=f"predicted {target_class}",
-                tickvals=[1],
-                ticktext=[target_class],
-                x=1.12,
-            ),
-        )
-    )
-
-    fig.update_layout(
+    crop_mask = np.asarray(image_db[image_key].get("labels", pred_map)) > 0
+    return _plot_coded_overlay(
+        background,
+        pred_map,
+        categories={1: {"label": str(target_class), "color": class_color(target_class)}},
         title=title or f"Pixel-level prediction — {image_key}",
+        colorbar_title=f"predicted {target_class}",
+        opacity=opacity,
         width=width,
         height=height,
-        xaxis_title="column",
-        yaxis_title="row",
+        crop_mask=crop_mask,
+        crop_to_objects=crop_to_objects,
+        padding=padding,
+        show=show,
     )
-    fig.update_yaxes(autorange="reversed", scaleanchor="x")
-
-    return show_or_return(fig, show)
 
 
 def plot_pixel_three_way_decision_overlay(
@@ -593,180 +415,138 @@ def plot_pixel_three_way_decision_overlay(
     opacity: float = 0.60,
     width: int = 850,
     height: int = 750,
+    crop_to_objects: bool = True,
+    padding: int = 5,
     show: bool = True,
 ):
-    """
-    Overlay pixel-level view of objectwise 3-way decisions.
-
-    Stable categorical colors:
-    - non_target_label / non_target / almond -> blue
-    - uncertain -> purple
-    - target_class / target / peanut -> green
-    """
-    background = background_image(
-        image_db,
-        image_key,
-        base=base,
-        band=band,
-    )
-
-    shape = background.shape
-    overlay = np.zeros(shape, dtype=float)
-
-    decision_to_code = {
-        str(non_target_label): 1,
-        "non_target": 1,
-        "non_peanut": 1,
-        "almond": 1,
-        "almond_only": 1,
-
-        str(uncertain_label): 2,
-        "uncertain": 2,
-        "ambiguous": 2,
-
-        str(target_class): 3,
-        "target": 3,
-        "peanut": 3,
-        "peanut_only": 3,
-    }
-
-    sub = pixel_df[
-        pixel_df[source_col].astype(str).eq(str(image_key))
-    ].copy()
-
-    if len(sub) > 0:
+    """Overlay pixel-level views of objectwise 3-way decisions."""
+    background = background_image(image_db, image_key, base=base, band=band)
+    overlay = np.zeros(background.shape, dtype=float)
+    sub = pixel_df[pixel_df[source_col].astype(str).eq(str(image_key))].copy()
+    if not sub.empty:
         rows = sub[row_col].astype(int).to_numpy()
         cols = sub[col_col].astype(int).to_numpy()
-
-        decisions = (
-            sub[decision_col]
-            .astype(str)
-            .map(decision_to_code)
-            .fillna(0)
-            .to_numpy()
+        normalized = [
+            normalize_class_label(
+                value,
+                target_class=target_class,
+                non_target_label=non_target_label,
+                uncertain_label=uncertain_label,
+            )
+            for value in sub[decision_col]
+        ]
+        code_lookup = {
+            str(non_target_label): 1,
+            str(uncertain_label): 2,
+            str(target_class): 3,
+        }
+        codes = np.asarray([code_lookup.get(value, 0) for value in normalized])
+        valid = (
+            (rows >= 0)
+            & (rows < overlay.shape[0])
+            & (cols >= 0)
+            & (cols < overlay.shape[1])
         )
+        overlay[rows[valid], cols[valid]] = codes[valid]
 
-        overlay[rows, cols] = decisions
-
-    overlay[overlay == 0] = np.nan
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Heatmap(
-            z=background,
-            colorscale="Gray",
-            showscale=False,
-        )
-    )
-
-    fig.add_trace(
-        go.Heatmap(
-            z=overlay,
-            zmin=1,
-            zmax=3,
-            colorscale=_discrete_colorscale(
-                [
-                    _decision_color(non_target_label),
-                    _decision_color(uncertain_label),
-                    _decision_color(target_class),
-                ]
-            ),
-            opacity=opacity,
-            colorbar=dict(
-                title="3-way decision",
-                tickmode="array",
-                tickvals=[1, 2, 3],
-                ticktext=[
-                    str(non_target_label),
-                    str(uncertain_label),
-                    str(target_class),
-                ],
-                x=1.12,
-            ),
-        )
-    )
-
-    fig.update_layout(
+    crop_mask = np.asarray(image_db[image_key].get("labels", overlay)) > 0
+    categories = {
+        1: {"label": str(non_target_label), "color": class_color(non_target_label)},
+        2: {"label": str(uncertain_label), "color": class_color(uncertain_label)},
+        3: {"label": str(target_class), "color": class_color(target_class)},
+    }
+    return _plot_coded_overlay(
+        background,
+        overlay,
+        categories=categories,
         title=title or f"Pixel view of 3-way decision — {image_key}",
+        colorbar_title="3-way decision",
+        opacity=opacity,
         width=width,
         height=height,
-        xaxis_title="column",
-        yaxis_title="row",
+        crop_mask=crop_mask,
+        crop_to_objects=crop_to_objects,
+        padding=padding,
+        show=show,
     )
 
-    fig.update_yaxes(autorange="reversed", scaleanchor="x")
 
-    return show_or_return(fig, show)
+def _coerce_true_target(series: pd.Series, target_class: str) -> pd.Series:
+    values = series.astype("object")
+    out = pd.Series(pd.NA, index=series.index, dtype="boolean")
+    numeric_bool = values.map(lambda value: isinstance(value, (bool, np.bool_)))
+    out.loc[numeric_bool] = values.loc[numeric_bool].astype(bool)
+    text = values.astype(str).str.strip().str.lower()
+    out.loc[text.isin({"true", "1", "yes", "y", "target", "peanut", str(target_class).lower()})] = True
+    out.loc[text.isin({"false", "0", "no", "n", "non_target", "almond", "non_peanut"})] = False
+    return out
 
 
 def three_way_confusion_table(
-        df: pd.DataFrame,
-        true_col: str,
-        decision_col: str = "decision_3way",
-        confidence_col: str | None = "three_way_confidence",
-        group_cols=(),
-        target_class: str = "peanut",
-        non_target_label: str = "almond",
-        uncertain_label: str = "uncertain",
-    ) -> pd.DataFrame:
-        if df is None or len(df) == 0:
-            return pd.DataFrame()
+    df: pd.DataFrame,
+    true_col: str,
+    decision_col: str = "decision_3way",
+    confidence_col: str | None = "three_way_confidence",
+    group_cols=(),
+    target_class: str = "peanut",
+    non_target_label: str = "almond",
+    uncertain_label: str = "uncertain",
+) -> pd.DataFrame:
+    """Build a complete long-format 3-way confusion table."""
+    if df is None or len(df) == 0:
+        return pd.DataFrame()
+    group_cols = [column for column in list(group_cols) if column in df.columns]
+    missing = [column for column in (true_col, decision_col) if column not in df.columns]
+    if missing:
+        raise KeyError(f"Missing columns for 3-way confusion table: {missing}")
 
-        group_cols = [col for col in list(group_cols) if col in df.columns]
-        required = [true_col, decision_col]
-        missing = [col for col in required if col not in df.columns]
-        if missing:
-            raise KeyError(f"Missing columns for 3-way confusion table: {missing}")
-
-        d = df[df[true_col].notna() & df[decision_col].notna()].copy()
-        if len(d) == 0:
-            return pd.DataFrame()
-
-        d["true_label_3way"] = np.where(
-            d[true_col].astype(bool),
-            target_class,
-            non_target_label,
+    d = df[df[true_col].notna() & df[decision_col].notna()].copy()
+    true_target = _coerce_true_target(d[true_col], target_class)
+    d = d[true_target.notna()].copy()
+    true_target = true_target.loc[d.index].astype(bool)
+    d["true_label_3way"] = np.where(true_target, target_class, non_target_label)
+    d[decision_col] = [
+        normalize_class_label(
+            value,
+            target_class=target_class,
+            non_target_label=non_target_label,
+            uncertain_label=uncertain_label,
         )
+        for value in d[decision_col]
+    ]
 
-        decisions = [non_target_label, uncertain_label, target_class]
-        rows = []
-
-        grouped = d.groupby(group_cols, dropna=False) if group_cols else [((), d)]
-        for key, group in grouped:
-            if not isinstance(key, tuple):
-                key = (key,)
-            base = {col: value for col, value in zip(group_cols, key)}
-            n_group = len(group)
-
-            for true_label in [non_target_label, target_class]:
-                true_group = group[group["true_label_3way"].astype(str).eq(str(true_label))]
-                n_true = len(true_group)
-
-                for decision in decisions:
-                    cell = true_group[true_group[decision_col].astype(str).eq(str(decision))]
-                    row = dict(base)
-                    row.update({
-                        "true_label_3way": true_label,
-                        "decision_3way": decision,
-                        "n": int(len(cell)),
-                        "n_true_label": int(n_true),
-                        "n_group": int(n_group),
-                        "row_rate": len(cell) / max(n_true, 1),
-                        "global_rate": len(cell) / max(n_group, 1),
-                    })
-
-                    if confidence_col is not None and confidence_col in cell.columns:
-                        conf = pd.to_numeric(cell[confidence_col], errors="coerce")
-                        row["mean_confidence"] = float(conf.mean()) if conf.notna().any() else np.nan
-                        row["median_confidence"] = float(conf.median()) if conf.notna().any() else np.nan
-                    else:
-                        row["mean_confidence"] = np.nan
-                        row["median_confidence"] = np.nan
-
-                    rows.append(row)
-
-        return pd.DataFrame(rows)
+    decisions = [non_target_label, uncertain_label, target_class]
+    rows = []
+    grouped = d.groupby(group_cols, dropna=False) if group_cols else [((), d)]
+    for key, group in grouped:
+        if not isinstance(key, tuple):
+            key = (key,)
+        base = dict(zip(group_cols, key))
+        n_group = len(group)
+        for true_label in [non_target_label, target_class]:
+            true_group = group[group["true_label_3way"].astype(str).eq(str(true_label))]
+            n_true = len(true_group)
+            for decision in decisions:
+                cell = true_group[true_group[decision_col].astype(str).eq(str(decision))]
+                row = dict(base)
+                row.update(
+                    true_label_3way=true_label,
+                    decision_3way=decision,
+                    n=int(len(cell)),
+                    n_true_label=int(n_true),
+                    n_group=int(n_group),
+                    row_rate=len(cell) / n_true if n_true else np.nan,
+                    global_rate=len(cell) / n_group if n_group else np.nan,
+                )
+                if confidence_col is not None and confidence_col in cell.columns:
+                    conf = pd.to_numeric(cell[confidence_col], errors="coerce")
+                    row["mean_confidence"] = conf.mean()
+                    row["median_confidence"] = conf.median()
+                else:
+                    row["mean_confidence"] = np.nan
+                    row["median_confidence"] = np.nan
+                rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def plot_confusion_heatmap_from_long(
@@ -777,70 +557,75 @@ def plot_confusion_heatmap_from_long(
     count_col: str = "n",
     rate_col: str = "row_rate",
     confidence_col: str = "mean_confidence",
+    true_order: Sequence[str] | None = None,
+    decision_order: Sequence[str] | None = None,
+    display: str = "both",
     width: int = 750,
     height: int = 550,
     show: bool = True,
 ):
+    """Plot a confusion heatmap with fixed category order and a [0, 1] scale."""
     if confusion_df is None or len(confusion_df) == 0:
         raise ValueError("Empty confusion table.")
-
     d = confusion_df.copy()
 
-    pivot_count = d.pivot_table(
+    # Sum counts first; derive rates from aggregated counts to avoid averaging rates.
+    counts = d.pivot_table(
         index=true_col_name,
         columns=decision_col_name,
         values=count_col,
         aggfunc="sum",
         fill_value=0,
     )
-    pivot_rate = d.pivot_table(
-        index=true_col_name,
-        columns=decision_col_name,
-        values=rate_col,
-        aggfunc="mean",
-        fill_value=0,
-    )
+    if true_order is not None:
+        counts = counts.reindex(index=list(true_order), fill_value=0)
+    if decision_order is not None:
+        counts = counts.reindex(columns=list(decision_order), fill_value=0)
+    row_totals = counts.sum(axis=1).replace(0, np.nan)
+    rates = counts.div(row_totals, axis=0).fillna(0.0)
 
+    confidence = None
     if confidence_col in d.columns:
-        pivot_conf = d.pivot_table(
+        confidence = d.pivot_table(
             index=true_col_name,
             columns=decision_col_name,
             values=confidence_col,
             aggfunc="mean",
-        )
-    else:
-        pivot_conf = None
+        ).reindex(index=counts.index, columns=counts.columns)
 
     text = []
-    for i in pivot_count.index:
-        row_text = []
-        for j in pivot_count.columns:
-            n = pivot_count.loc[i, j]
-            rate = pivot_rate.loc[i, j]
-            if pivot_conf is not None and i in pivot_conf.index and j in pivot_conf.columns and pd.notna(pivot_conf.loc[i, j]):
-                row_text.append(f"{int(n)}<br>{rate:.1%}<br>conf={pivot_conf.loc[i, j]:.2f}")
+    for true_label in counts.index:
+        row = []
+        for decision in counts.columns:
+            n = int(counts.loc[true_label, decision])
+            rate = float(rates.loc[true_label, decision])
+            if display == "count":
+                value = f"{n}"
+            elif display == "rate":
+                value = f"{rate:.1%}"
             else:
-                row_text.append(f"{int(n)}<br>{rate:.1%}")
-        text.append(row_text)
+                value = f"{n}<br>{rate:.1%}"
+            if confidence is not None and pd.notna(confidence.loc[true_label, decision]):
+                value += f"<br>conf={confidence.loc[true_label, decision]:.2f}"
+            row.append(value)
+        text.append(row)
 
     fig = go.Figure(
-        data=go.Heatmap(
-            z=pivot_rate.to_numpy(dtype=float),
-            x=pivot_rate.columns.astype(str),
-            y=pivot_rate.index.astype(str),
+        go.Heatmap(
+            z=rates.to_numpy(dtype=float),
+            x=rates.columns.astype(str),
+            y=rates.index.astype(str),
             text=text,
             texttemplate="%{text}",
             colorscale="Viridis",
+            zmin=0,
+            zmax=1,
             colorbar=dict(title="row rate"),
             hovertemplate=(
-                "True: %{y}<br>"
-                "Decision: %{x}<br>"
-                "Rate: %{z:.2%}<br>"
-                "<extra></extra>"
+                "True: %{y}<br>Decision: %{x}<br>Rate: %{z:.2%}<extra></extra>"
             ),
         )
     )
-
     fig.update_layout(
         title=title,
         xaxis_title="Decision",
@@ -848,8 +633,8 @@ def plot_confusion_heatmap_from_long(
         width=width,
         height=height,
     )
-
-    return show_or_return(fig, show=show)
+    apply_project_theme(fig)
+    return show_or_return(fig, show)
 
 
 def plot_three_way_confusion_heatmap(
@@ -859,33 +644,45 @@ def plot_three_way_confusion_heatmap(
     count_col: str = "n",
     rate_col: str = "row_rate",
     confidence_col: str = "mean_confidence",
+    target_class: str = "peanut",
+    non_target_label: str = "almond",
+    uncertain_label: str = "uncertain",
     title: str = "3-way confusion table",
     width: int = 750,
     height: int = 550,
     show: bool = True,
 ):
     return plot_confusion_heatmap_from_long(
-        confusion_df=confusion_df,
+        confusion_df,
         true_col_name=true_col,
         decision_col_name=decision_col,
         title=title,
         count_col=count_col,
         rate_col=rate_col,
         confidence_col=confidence_col,
+        true_order=[non_target_label, target_class],
+        decision_order=[non_target_label, uncertain_label, target_class],
         width=width,
         height=height,
         show=show,
     )
 
+
 def plot_binary_confusion_heatmap(
     confusion_df: pd.DataFrame,
+    true_col: str = "true_label_2way",
+    decision_col: str = "predicted_label_2way",
+    target_class: str = "peanut",
+    non_target_label: str = "almond",
     title: str = "2-way confusion table",
     show: bool = True,
 ):
     return plot_confusion_heatmap_from_long(
-        confusion_df=confusion_df,
-        true_col_name="true_label_2way",
-        decision_col_name="predicted_label_2way",
+        confusion_df,
+        true_col_name=true_col,
+        decision_col_name=decision_col,
         title=title,
+        true_order=[non_target_label, target_class],
+        decision_order=[non_target_label, target_class],
         show=show,
     )

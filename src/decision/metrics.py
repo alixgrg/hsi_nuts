@@ -48,8 +48,16 @@ def binary_detection_metrics(
     }
     if len(d) == 0:
         return empty
-    y_true = d[true_col].astype(bool).to_numpy()
-    y_pred = d[pred_col].astype(bool).to_numpy()
+    true_bool = coerce_binary_series(d[true_col], target_class=target_class, non_target_class=non_target_class)
+    pred_bool = coerce_binary_series(d[pred_col], target_class=target_class, non_target_class=non_target_class)
+    valid = true_bool.notna() & pred_bool.notna()
+    d = d.loc[valid].copy()
+    true_bool = true_bool.loc[valid].astype(bool)
+    pred_bool = pred_bool.loc[valid].astype(bool)
+    if len(d) == 0:
+        return empty
+    y_true = true_bool.to_numpy()
+    y_pred = pred_bool.to_numpy()
     tp = int(np.sum(y_true & y_pred))
     fn = int(np.sum(y_true & ~y_pred))
     fp = int(np.sum(~y_true & y_pred))
@@ -177,7 +185,7 @@ def add_binary_confusion_case(
     valid = out[true_col].notna() & out[pred_col].notna()
 
     if level == "pixel" and truth_available_col in out.columns:
-        valid = valid & out[truth_available_col].astype(bool)
+        valid = valid & coerce_binary_series(out[truth_available_col]).fillna(False).astype(bool)
 
     if level == "object" and truth_available_ratio_col in out.columns:
         truth_ratio = pd.to_numeric(
@@ -188,8 +196,11 @@ def add_binary_confusion_case(
             truth_ratio >= float(min_truth_available_ratio)
         )
 
-    truth = out[true_col].fillna(False).astype(bool)
-    pred = out[pred_col].fillna(False).astype(bool)
+    truth_nullable = coerce_binary_series(out[true_col], target_class=target_class)
+    pred_nullable = coerce_binary_series(out[pred_col], target_class=target_class)
+    valid = valid & truth_nullable.notna() & pred_nullable.notna()
+    truth = truth_nullable.fillna(False).astype(bool)
+    pred = pred_nullable.fillna(False).astype(bool)
 
     out[output_col] = "unavailable"
 
@@ -249,7 +260,8 @@ def summarize_pixel_errors_by_image(
         g = group.copy()
 
         if truth_available_col in g.columns:
-            g = g[g[truth_available_col].astype(bool)]
+            available = coerce_binary_series(g[truth_available_col]).fillna(False).astype(bool)
+            g = g[available]
         if len(g) == 0:
             continue
 
@@ -375,3 +387,111 @@ def summarize_object_errors_by_image(
             )
             .reset_index(drop=True)
         )
+
+
+def coerce_binary_series(
+    series: pd.Series,
+    *,
+    target_class: str = DEFAULT_TARGET_CLASS,
+    non_target_class: str = DEFAULT_NON_TARGET_LABEL,
+) -> pd.Series:
+    """Convert bool/numeric/string labels to pandas nullable booleans.
+
+    Unlike ``astype(bool)``, strings such as ``"False"`` are correctly mapped to
+    False instead of being treated as truthy.
+    """
+    values = series.astype("object")
+    out = pd.Series(pd.NA, index=series.index, dtype="boolean")
+
+    is_bool = values.map(lambda value: isinstance(value, (bool, np.bool_)))
+    if is_bool.any():
+        out.loc[is_bool] = values.loc[is_bool].astype(bool)
+
+    text = values.astype(str).str.strip().str.lower()
+    true_tokens = {
+        "true", "1", "yes", "y", "positive", "target", "peanut",
+        str(target_class).lower(),
+    }
+    false_tokens = {
+        "false", "0", "no", "n", "negative", "non_target", "non-target",
+        "almond", "non_peanut", str(non_target_class).lower(),
+    }
+    out.loc[text.isin(true_tokens)] = True
+    out.loc[text.isin(false_tokens)] = False
+    return out
+
+
+def binary_confusion_table(
+    df: pd.DataFrame,
+    true_col: str,
+    pred_col: str,
+    group_cols=(),
+    target_class: str = DEFAULT_TARGET_CLASS,
+    non_target_label: str = DEFAULT_NON_TARGET_LABEL,
+    confidence_col: str | None = "binary_confidence",
+) -> pd.DataFrame:
+    """Build a complete long-format binary confusion table."""
+    if df is None or len(df) == 0:
+        return pd.DataFrame()
+    group_cols = [column for column in list(group_cols) if column in df.columns]
+    missing = [column for column in (true_col, pred_col) if column not in df.columns]
+    if missing:
+        raise KeyError(f"Missing columns for binary confusion table: {missing}")
+
+    d = df[df[true_col].notna() & df[pred_col].notna()].copy()
+    true_bool = coerce_binary_series(
+        d[true_col], target_class=target_class, non_target_class=non_target_label
+    )
+    pred_bool = coerce_binary_series(
+        d[pred_col], target_class=target_class, non_target_class=non_target_label
+    )
+    valid = true_bool.notna() & pred_bool.notna()
+    d = d.loc[valid].copy()
+    true_bool = true_bool.loc[valid].astype(bool)
+    pred_bool = pred_bool.loc[valid].astype(bool)
+
+    d["true_label_2way"] = np.where(true_bool, target_class, non_target_label)
+    d["predicted_label_2way"] = np.where(pred_bool, target_class, non_target_label)
+
+    rows = []
+    grouped = d.groupby(group_cols, dropna=False) if group_cols else [((), d)]
+    for key, group in grouped:
+        if not isinstance(key, tuple):
+            key = (key,)
+        base = dict(zip(group_cols, key))
+        n_group = len(group)
+        for true_label in (non_target_label, target_class):
+            true_group = group[group["true_label_2way"].eq(true_label)]
+            n_true = len(true_group)
+            for decision in (non_target_label, target_class):
+                cell = true_group[true_group["predicted_label_2way"].eq(decision)]
+                row = dict(base)
+                row.update(
+                    true_label_2way=true_label,
+                    predicted_label_2way=decision,
+                    n=int(len(cell)),
+                    n_true_label=int(n_true),
+                    n_group=int(n_group),
+                    row_rate=len(cell) / n_true if n_true else np.nan,
+                    global_rate=len(cell) / n_group if n_group else np.nan,
+                )
+                if confidence_col is not None and confidence_col in cell.columns:
+                    confidence = pd.to_numeric(
+                        cell[confidence_col],
+                        errors="coerce",
+                    )
+                    row["mean_confidence"] = (
+                        float(confidence.mean())
+                        if confidence.notna().any()
+                        else np.nan
+                    )
+                    row["median_confidence"] = (
+                        float(confidence.median())
+                        if confidence.notna().any()
+                        else np.nan
+                    )
+                else:
+                    row["mean_confidence"] = np.nan
+                    row["median_confidence"] = np.nan
+                rows.append(row)
+    return pd.DataFrame(rows)

@@ -13,6 +13,7 @@ from src.decision.labels import (
     true_col as make_true_col,
 )
 from src.workflows.simca_selection_utils import pareto_front_by_group
+from src.decision.metrics import coerce_binary_series
 
 def add_three_way_object_decision(
     object_df: pd.DataFrame,
@@ -127,7 +128,11 @@ def evaluate_three_way_object_decision(
             "three_way_score": np.nan,
         }
 
-    true_target = d[true_col].astype(bool).to_numpy()
+    true_target_s = coerce_binary_series(
+        d[true_col], target_class=target_class, non_target_class=non_target_label
+    )
+    d = d.loc[true_target_s.notna()].copy()
+    true_target = true_target_s.loc[d.index].astype(bool).to_numpy()
     decision = d[decision_col].astype(str).to_numpy()
 
     target_label = str(target_class)
@@ -761,7 +766,9 @@ def three_way_confusion_table(
         return pd.DataFrame()
 
     d["true_label_3way"] = np.where(
-        d[true_col].astype(bool),
+        coerce_binary_series(
+            d[true_col], target_class=target_class, non_target_class=non_target_label
+        ).fillna(False).astype(bool),
         target_class,
         non_target_label,
     )

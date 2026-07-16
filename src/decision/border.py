@@ -5,7 +5,7 @@ import pandas as pd
 from scipy import ndimage as ndi
 
 from src.decision.aggregation import add_object_metadata
-from src.decision.metrics import binary_detection_metrics
+from src.decision.metrics import binary_detection_metrics, coerce_binary_series
 from src.decision.labels import (
     DEFAULT_TARGET_CLASS,
     DEFAULT_NON_TARGET_LABEL,
@@ -122,7 +122,7 @@ def aggregate_pixel_predictions_to_objects_core(
         object_id_col=object_id_col,
     )
 
-    df[pred_col] = df[pred_col].astype(bool)
+    df[pred_col] = coerce_binary_series(df[pred_col], target_class=target_class).fillna(False).astype(bool)
 
     parts = []
 
@@ -175,12 +175,14 @@ def aggregate_pixel_predictions_to_objects_core(
 
         if true_pixel_col in group.columns:
             if truth_available_col in group.columns:
-                truth_group = group[group[truth_available_col].astype(bool)].copy()
+                available = coerce_binary_series(group[truth_available_col]).fillna(False).astype(bool)
+                truth_group = group[available].copy()
             else:
                 truth_group = group
 
             if len(truth_group) > 0:
-                true_ratio_total = float(truth_group[true_pixel_col].astype(bool).mean())
+                true_values = coerce_binary_series(truth_group[true_pixel_col], target_class=target_class)
+                true_ratio_total = float(true_values.dropna().astype(bool).mean()) if true_values.notna().any() else np.nan
                 true_object = bool(true_ratio_total >= truth_threshold)
             else:
                 true_ratio_total = np.nan
@@ -307,13 +309,18 @@ def summarize_pixel_errors_by_border_zone(
         g = df[zone_mask].copy()
 
         if "truth_available" in g.columns:
-            g = g[g["truth_available"].astype(bool)]
+            available = coerce_binary_series(g["truth_available"]).fillna(False).astype(bool)
+            g = g[available]
 
         if len(g) == 0:
             continue
 
-        y_true = g[true_col].astype(bool).to_numpy()
-        y_pred = g[pred_col].astype(bool).to_numpy()
+        true_values = coerce_binary_series(g[true_col], target_class=target_class)
+        pred_values = coerce_binary_series(g[pred_col], target_class=target_class)
+        valid = true_values.notna() & pred_values.notna()
+        g = g.loc[valid].copy()
+        y_true = true_values.loc[valid].astype(bool).to_numpy()
+        y_pred = pred_values.loc[valid].astype(bool).to_numpy()
 
         tp = int(np.sum(y_true & y_pred))
         tn = int(np.sum((~y_true) & (~y_pred)))

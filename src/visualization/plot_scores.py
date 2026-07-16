@@ -9,15 +9,27 @@ import plotly.express as px
 
 from src.utils import as_1d_array
 from src.visualization.common import (
+    apply_project_theme,
     make_customdata,
     make_dynamic_color_map,
+    ordered_unique,
     show_or_return,
-    validate_columns,
 )
+
+
+def _component_label(component: int, component_variance=None, prefix: str = "C") -> str:
+    label = f"{prefix}{component}"
+    if component_variance is None:
+        return label
+    values = np.asarray(component_variance, dtype=float)
+    index = component - 1
+    if 0 <= index < len(values) and np.isfinite(values[index]):
+        return f"{label} ({values[index]:.1%})"
+    return label
+
 
 def plot_scores(
     scores,
-    #pca_res=None,
     dims: Sequence[int] | None = None,
     pcx: int = 1,
     pcy: int = 2,
@@ -31,7 +43,7 @@ def plot_scores(
     source_images=None,
     batches=None,
     areas=None,
-    subset = None,
+    subset=None,
     title: str | None = None,
     width: int = 850,
     height: int = 650,
@@ -43,55 +55,71 @@ def plot_scores(
     use_open_symbol_for_contour: bool = True,
     marker_size: int = 9,
     marker_opacity: float = 0.85,
+    color_map: dict[str, str] | None = None,
+    category_order: Sequence[str] | None = None,
+    component_variance=None,
+    component_prefix: str = "C",
+    legend_mode: str = "compact",
     **metadata,
 ):
+    """Plot 2D or 3D PCA/SIMCA scores with stable class colours.
+
+    ``legend_mode='compact'`` omits unused grouping dimensions from trace names.
+    ``component_variance`` adds explained-variance percentages to axis labels.
+    """
+    scores = np.asarray(scores, dtype=float)
+    if scores.ndim != 2:
+        raise ValueError("scores must be a 2D array.")
     if dims is None:
         dims = (pcx, pcy) if pcz is None else (pcx, pcy, pcz)
-    dims = tuple(dims)
-    idx = [d - 1 for d in dims]
+    dims = tuple(int(value) for value in dims)
+    if len(dims) not in {2, 3}:
+        raise ValueError("dims must contain 2 or 3 components.")
+    idx = [value - 1 for value in dims]
+    if min(idx) < 0 or max(idx) >= scores.shape[1]:
+        raise ValueError("Requested component is outside the score matrix.")
     n = scores.shape[0]
 
     if color_values is None:
-        if color_by == "source_image":
-            color_values = source_images
-        elif color_by == "batch":
-            color_values = batches
-        elif color_by == "subset":
-            color_values = subset
-        else:
-            color_values = labels
+        color_values = {
+            "source_image": source_images,
+            "batch": batches,
+            "subset": subset,
+        }.get(color_by, labels)
     color_groups = as_1d_array(color_values, n, "all").astype(str)
 
-    color_map = make_dynamic_color_map(
-        color_groups,
-        color_sequence=color_sequence,
-        continuous_colorscale=continuous_colorscale,
-    )
+    if category_order is None:
+        color_order = ordered_unique(color_groups)
+    else:
+        color_order = [str(value) for value in category_order]
+        color_order += [value for value in ordered_unique(color_groups) if value not in color_order]
+    if color_map is None:
+        color_map = make_dynamic_color_map(
+            color_order,
+            color_sequence=color_sequence,
+            continuous_colorscale=continuous_colorscale,
+        )
+    else:
+        generated = make_dynamic_color_map(color_order)
+        generated.update({str(key): value for key, value in color_map.items()})
+        color_map = generated
 
     if symbol_values is None:
-        if symbol_by == "batch":
-            symbol_values = batches
-        elif symbol_by == "source_image":
-            symbol_values = source_images
-        elif symbol_by == "subset":
-            symbol_values = subset
-        elif symbol_by == "label":
-            symbol_values = labels
-        else:
-            symbol_values = np.array(["all"] * n)
+        symbol_values = {
+            "batch": batches,
+            "source_image": source_images,
+            "subset": subset,
+            "label": labels,
+        }.get(symbol_by, np.array(["all"] * n))
     symbol_groups = as_1d_array(symbol_values, n, "all").astype(str)
 
     if contour_values is None:
-        if contour_by == "subset":
-            contour_values = subset
-        elif contour_by == "batch":
-            contour_values = batches
-        elif contour_by == "source_image":
-            contour_values = source_images
-        elif contour_by == "label":
-            contour_values = labels
-        else:
-            contour_values = np.array(["filled"] * n)
+        contour_values = {
+            "subset": subset,
+            "batch": batches,
+            "source_image": source_images,
+            "label": labels,
+        }.get(contour_by, np.array(["filled"] * n))
     contour_groups = as_1d_array(contour_values, n, "filled").astype(str)
 
     meta = dict(
@@ -105,152 +133,126 @@ def plot_scores(
     meta.update(metadata)
     custom, hover_meta = make_customdata(n, **meta)
 
-    base_symbols = [
-        "circle",
-        "square",
-        "diamond",
-        "triangle-up",
-        "triangle-down",
-        "triangle-left",
-        "triangle-right",
-        "pentagon",
-        "hexagon",
-        "star",
+    symbols_2d = [
+        "circle", "square", "diamond", "triangle-up", "triangle-down",
+        "triangle-left", "triangle-right", "pentagon", "hexagon", "star",
     ]
-    unique_symbol_groups = np.unique(symbol_groups)
+    symbol_order = ordered_unique(symbol_groups)
     symbol_map = {
-        group: base_symbols[i % len(base_symbols)]
-        for i, group in enumerate(unique_symbol_groups)
+        group: symbols_2d[index % len(symbols_2d)]
+        for index, group in enumerate(symbol_order)
     }
 
-    def is_open_contour(contour_group):
-        contour_group_lower = str(contour_group).lower()
-        open_keywords = [
-            "projection",
-            "test",
-            "validation",
-            "val",
-            "external",
-            "projected",
-        ]
-        return any(key in contour_group_lower for key in open_keywords)
+    def is_open(group: str) -> bool:
+        keywords = ("projection", "test", "validation", "val", "external", "projected")
+        return any(keyword in str(group).lower() for keyword in keywords)
 
-    def symbol_with_contour(base_symbol, contour_group):
-        if not use_open_symbol_for_contour:
-            return base_symbol
-        if is_open_contour(contour_group):
-            return f"{base_symbol}-open"
-        return base_symbol
+    def trace_name(color_group: str, symbol_group: str, contour_group: str) -> str:
+        if legend_mode == "full":
+            return f"{color_group} | {symbol_by or 'symbol'}={symbol_group} | {contour_by or 'set'}={contour_group}"
+        parts = [color_group]
+        if symbol_by is not None and len(set(symbol_groups)) > 1:
+            parts.append(f"{symbol_by}={symbol_group}")
+        if contour_by is not None and len(set(contour_groups)) > 1:
+            parts.append(f"{contour_by}={contour_group}")
+        return " | ".join(parts)
 
-    def contour_line_width(contour_group):
-        return 2.0 if is_open_contour(contour_group) else 0.8
-
-    def contour_line_color(contour_group, color_group):
-        # Open markers: outline keeps the class color.
-        # Filled markers: black outline improves readability.
-        if is_open_contour(contour_group):
-            return color_map[color_group]
-        return "black"
-
-    fig = go.Figure()
-    combined_groups = np.array([
-        f"{c}|||{s}|||{k}"
-        for c, s, k in zip(color_groups, symbol_groups, contour_groups)
+    combined = np.array([
+        f"{color}|||{symbol}|||{contour}"
+        for color, symbol, contour in zip(color_groups, symbol_groups, contour_groups)
     ])
-    unique_combined = np.unique(combined_groups)
-    if len(dims) == 2:
-        if title is None:
-            title = f"Scores: C{dims[0]} vs C{dims[1]}"
-        for combined in unique_combined:
-            color_group, symbol_group, contour_group = combined.split("|||")
-            mask = combined_groups == combined
-            base_symbol = symbol_map[symbol_group]
-            marker_symbol = symbol_with_contour(base_symbol, contour_group)
-            trace_name = f"{color_group} | batch={symbol_group} | set={contour_group}"
+    combinations = []
+    for color in color_order:
+        combinations.extend([
+            value for value in ordered_unique(combined)
+            if value.split("|||", 1)[0] == color
+        ])
+
+    axis_labels = [_component_label(value, component_variance, component_prefix) for value in dims]
+    fig = go.Figure()
+
+    for value in combinations:
+        color_group, symbol_group, contour_group = value.split("|||")
+        mask = combined == value
+        if not mask.any():
+            continue
+        base_symbol = symbol_map[symbol_group]
+        open_marker = use_open_symbol_for_contour and is_open(contour_group)
+        line_color = color_map[color_group] if open_marker else "black"
+        line_width = 2.0 if open_marker else 0.8
+
+        if len(dims) == 2:
+            symbol = f"{base_symbol}-open" if open_marker else base_symbol
             fig.add_trace(
                 go.Scatter(
                     x=scores[mask, idx[0]],
                     y=scores[mask, idx[1]],
                     mode="markers",
-                    name=trace_name,
+                    name=trace_name(color_group, symbol_group, contour_group),
                     customdata=custom[mask],
                     marker=dict(
                         size=marker_size,
                         opacity=marker_opacity,
-                        symbol=marker_symbol,
+                        symbol=symbol,
                         color=color_map[color_group],
-                        line=dict(
-                            width=contour_line_width(contour_group),
-                            color=contour_line_color(contour_group, color_group),
-                        ),
+                        line=dict(width=line_width, color=line_color),
                     ),
                     hovertemplate=(
-                        f"C{dims[0]}: %{{x:.4f}}<br>"
-                        f"C{dims[1]}: %{{y:.4f}}<br>"
-                        + hover_meta
-                        + "<extra></extra>"
+                        f"{axis_labels[0]}: %{{x:.4f}}<br>"
+                        f"{axis_labels[1]}: %{{y:.4f}}<br>"
+                        + hover_meta + "<extra></extra>"
                     ),
                 )
             )
-        fig.update_layout(
-            title=title,
-            xaxis_title=f"C{dims[0]}",
-            yaxis_title=f"C{dims[1]}",
-            width=width,
-            height=height,
-            legend_title_text="Color | Batch | Set",
-        )
-    elif len(dims) == 3:
-        if title is None:
-            title = f"Scores: C{dims[0]} vs C{dims[1]} vs C{dims[2]}"
-        for combined in unique_combined:
-            color_group, symbol_group, contour_group = combined.split("|||")
-            mask = combined_groups == combined
-            # Scatter3d supports fewer marker symbols than Scatter.
-            # We keep the batch symbol, but open-symbol rendering is less reliable in 3D.
-            base_symbol = symbol_map[symbol_group]
-            marker_symbol = base_symbol
-            trace_name = f"{color_group} | batch={symbol_group} | set={contour_group}"
+        else:
+            # Scatter3d has a smaller supported symbol set.
+            symbol_3d = {"circle": "circle", "square": "square", "diamond": "diamond"}.get(base_symbol, "circle")
             fig.add_trace(
                 go.Scatter3d(
                     x=scores[mask, idx[0]],
                     y=scores[mask, idx[1]],
                     z=scores[mask, idx[2]],
                     mode="markers",
-                    name=trace_name,
+                    name=trace_name(color_group, symbol_group, contour_group),
                     customdata=custom[mask],
                     marker=dict(
                         size=max(marker_size - 3, 4),
                         opacity=marker_opacity,
-                        symbol=marker_symbol,
+                        symbol=symbol_3d,
                         color=color_map[color_group],
-                        line=dict(
-                            width=contour_line_width(contour_group),
-                            color=contour_line_color(contour_group, color_group),
-                        ),
+                        line=dict(width=line_width, color=line_color),
                     ),
                     hovertemplate=(
-                        f"C{dims[0]}: %{{x:.4f}}<br>"
-                        f"C{dims[1]}: %{{y:.4f}}<br>"
-                        f"C{dims[2]}: %{{z:.4f}}<br>"
-                        + hover_meta
-                        + "<extra></extra>"
+                        f"{axis_labels[0]}: %{{x:.4f}}<br>"
+                        f"{axis_labels[1]}: %{{y:.4f}}<br>"
+                        f"{axis_labels[2]}: %{{z:.4f}}<br>"
+                        + hover_meta + "<extra></extra>"
                     ),
                 )
             )
+
+    if len(dims) == 2:
         fig.update_layout(
-            title=title,
+            title=title or f"Scores: {axis_labels[0]} vs {axis_labels[1]}",
+            xaxis_title=axis_labels[0],
+            yaxis_title=axis_labels[1],
             width=width,
             height=height,
-            legend_title_text="Color | Batch | Set",
-            scene=dict(
-                xaxis_title=f"C{dims[0]}",
-                yaxis_title=f"C{dims[1]}",
-                zaxis_title=f"C{dims[2]}",
-            ),
+            legend_title_text=color_by,
         )
     else:
-        raise ValueError("dims must contain 2 or 3 components.")
+        fig.update_layout(
+            title=title or f"Scores: {axis_labels[0]} vs {axis_labels[1]} vs {axis_labels[2]}",
+            width=width,
+            height=height,
+            legend_title_text=color_by,
+            scene=dict(
+                xaxis_title=axis_labels[0],
+                yaxis_title=axis_labels[1],
+                zaxis_title=axis_labels[2],
+            ),
+        )
+    apply_project_theme(fig)
     return show_or_return(fig, show)
 
 
@@ -419,6 +421,7 @@ def plot_scores_density(
             color=color_by if color_by in df.columns else None,
             facet_col=facet_col if facet_col in df.columns else None,
             facet_row=facet_row if facet_row in df.columns else None,
+            color_discrete_map=make_dynamic_color_map(df[color_by].astype(str)) if color_by in df.columns else None,
             title=title,
         )
         fig.update_traces(contours_coloring="none")
@@ -436,9 +439,8 @@ def plot_scores_density(
     else:
         raise ValueError("mode must be either 'contour' or 'heatmap'.")
     fig.update_layout(width=width, height=height)
-    if show:
-        fig.show()
-    return fig
+    apply_project_theme(fig)
+    return show_or_return(fig, show)
 
 
 def plot_scores_distribution(
@@ -489,6 +491,7 @@ def plot_scores_distribution(
             facet_row=facet_row_arg,
             box=box,
             points="all" if points else False,
+            color_discrete_map=make_dynamic_color_map(df[color_by].astype(str)) if color_by in df.columns else None,
             title=title,
         )
     elif kind == "box":
@@ -500,6 +503,7 @@ def plot_scores_distribution(
             facet_col=facet_col_arg,
             facet_row=facet_row_arg,
             points="all" if points else False,
+            color_discrete_map=make_dynamic_color_map(df[color_by].astype(str)) if color_by in df.columns else None,
             title=title,
         )
     elif kind == "histogram":
@@ -512,14 +516,14 @@ def plot_scores_distribution(
             marginal="box",
             histnorm="probability density",
             opacity=0.65,
+            color_discrete_map=make_dynamic_color_map(df[color_by].astype(str)) if color_by in df.columns else None,
             title=title,
         )
     else:
         raise ValueError("kind must be 'violin', 'box', or 'histogram'.")
     fig.update_layout(width=width, height=height)
-    if show:
-        fig.show()
-    return fig
+    apply_project_theme(fig)
+    return show_or_return(fig, show)
 
 
 def summarize_scores_by_object(
@@ -636,6 +640,7 @@ def plot_object_score_summary(
         error_x=error_x if error_x in df_object.columns else None,
         error_y=error_y if error_y in df_object.columns else None,
         hover_data=hover_cols,
+        color_discrete_map=make_dynamic_color_map(df_object[color_by].astype(str)) if color_by in df_object.columns else None,
         title=title,
     )
     fig.update_traces(
@@ -645,6 +650,5 @@ def plot_object_score_summary(
         )
     )
     fig.update_layout(width=width, height=height)
-    if show:
-        fig.show()
-    return fig
+    apply_project_theme(fig)
+    return show_or_return(fig, show)

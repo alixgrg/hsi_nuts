@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from src.decision.metrics import coerce_binary_series
 from src.decision.labels import (
     DEFAULT_TARGET_CLASS,
     predicted_col as make_predicted_col,
@@ -51,8 +52,11 @@ def make_pixel_error_map(
     rows = sub[row_col].astype(int).to_numpy()
     cols = sub[col_col].astype(int).to_numpy()
 
-    pred = sub[pred_col].astype(bool).to_numpy()
-    truth = sub[true_col].astype(bool).to_numpy()
+    pred_s = coerce_binary_series(sub[pred_col], target_class=target_class)
+    truth_s = coerce_binary_series(sub[true_col], target_class=target_class)
+    valid_binary = pred_s.notna() & truth_s.notna()
+    pred = pred_s.fillna(False).astype(bool).to_numpy()
+    truth = truth_s.fillna(False).astype(bool).to_numpy()
 
     if truth_available_col in sub.columns:
         available = sub[truth_available_col].astype(bool).to_numpy()
@@ -60,6 +64,8 @@ def make_pixel_error_map(
         available = np.ones(len(sub), dtype=bool)
 
     codes = np.zeros(len(sub), dtype=np.uint8)
+
+    available = available & valid_binary.to_numpy()
 
     codes[available & truth & pred] = 1
     codes[available & (~truth) & (~pred)] = 2
@@ -195,8 +201,12 @@ def make_object_error_map(
                 if float(value) < float(min_truth_available_ratio):
                     continue
 
-        truth = bool(row[true_col])
-        pred = bool(row[pred_col])
+        truth_s = coerce_binary_series(pd.Series([row[true_col]]), target_class=target_class)
+        pred_s = coerce_binary_series(pd.Series([row[pred_col]]), target_class=target_class)
+        if truth_s.isna().iloc[0] or pred_s.isna().iloc[0]:
+            continue
+        truth = bool(truth_s.iloc[0])
+        pred = bool(pred_s.iloc[0])
 
         if truth and pred:
             code = 1  # TP
@@ -294,8 +304,84 @@ def make_pixel_prediction_map(
 
     rows = sub[row_col].astype(int).to_numpy()
     cols = sub[col_col].astype(int).to_numpy()
-    pred = sub[pred_col].astype(bool).to_numpy()
+    pred_s = coerce_binary_series(sub[pred_col], target_class=target_class)
+    pred = pred_s.fillna(False).astype(bool).to_numpy()
 
     pred_map[rows[pred], cols[pred]] = 1
 
     return pred_map
+
+def assign_object_decisions_to_pixels(
+    pixel_df: pd.DataFrame,
+    object_df: pd.DataFrame,
+    decision_col: str = "decision_3way",
+    object_id_col: str = "object_id",
+    source_col: str = "source_image",
+    output_col: str | None = None,
+    validate: str = "many_to_one",
+) -> pd.DataFrame:
+    """Attach object-level decisions to every corresponding pixel row.
+
+    This replaces notebook-local helpers such as
+    ``assign_object_three_way_decision_to_pixels``.
+    """
+    output_col = decision_col if output_col is None else output_col
+    required_pixel = [object_id_col]
+    required_object = [object_id_col, decision_col]
+    if source_col in pixel_df.columns and source_col in object_df.columns:
+        required_pixel.append(source_col)
+        required_object.append(source_col)
+    missing_pixel = [column for column in required_pixel if column not in pixel_df.columns]
+    missing_object = [column for column in required_object if column not in object_df.columns]
+    if missing_pixel:
+        raise KeyError(f"Missing columns in pixel_df: {missing_pixel}")
+    if missing_object:
+        raise KeyError(f"Missing columns in object_df: {missing_object}")
+
+    keys = [object_id_col]
+    if source_col in required_pixel:
+        keys.append(source_col)
+    lookup = object_df[keys + [decision_col]].drop_duplicates(keys).rename(
+        columns={decision_col: output_col}
+    )
+    out = pixel_df.copy()
+    if output_col in out.columns:
+        out = out.drop(columns=[output_col])
+    return out.merge(lookup, on=keys, how="left", validate=validate)
+
+
+def make_pixel_categorical_map(
+    image_key: str,
+    image_db: dict,
+    pixel_df: pd.DataFrame,
+    value_col: str,
+    value_to_code: dict,
+    source_col: str = "source_image",
+    row_col: str = "row",
+    col_col: str = "col",
+    default_code: int = 0,
+) -> np.ndarray:
+    """Create a categorical pixel map from any dataframe column."""
+    if image_key not in image_db:
+        raise KeyError(f"Image not found in image_db: {image_key}")
+    required = [source_col, row_col, col_col, value_col]
+    missing = [column for column in required if column not in pixel_df.columns]
+    if missing:
+        raise KeyError(f"Missing columns in pixel_df: {missing}")
+
+    shape = np.asarray(image_db[image_key]["image_ref"]).shape
+    out = np.full(shape, int(default_code), dtype=int)
+    sub = pixel_df[pixel_df[source_col].astype(str).eq(str(image_key))]
+    if sub.empty:
+        return out
+    rows = sub[row_col].astype(int).to_numpy()
+    cols = sub[col_col].astype(int).to_numpy()
+    valid = (
+        (rows >= 0)
+        & (rows < shape[0])
+        & (cols >= 0)
+        & (cols < shape[1])
+    )
+    codes = sub[value_col].map(value_to_code).fillna(default_code).astype(int).to_numpy()
+    out[rows[valid], cols[valid]] = codes[valid]
+    return out

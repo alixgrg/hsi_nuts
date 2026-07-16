@@ -13,7 +13,7 @@ from importlib import import_module
 from typing import Any
 
 
-__version__ = "0.1.0"
+__version__ = "0.2.1"
 
 
 _PUBLIC_API: dict[str, tuple[str, str]] = {
@@ -728,6 +728,367 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
     "first_available_value": ("src.utils", "first_available_value"),
     "list_result_files": ("src.utils", "list_result_files"),
 }
+
+
+# ---------------------------------------------------------------------------
+# API additions introduced by the decision/reporting/visualization refactor.
+#
+# Keep these imports lazy: importing ``src`` must not import pandas, scipy,
+# scikit-image or Plotly until one of the corresponding attributes is used.
+# ---------------------------------------------------------------------------
+_PUBLIC_API.update(
+    {
+        # Utilities
+        "to_numeric_metrics": ("src.utils", "to_numeric_metrics"),
+        "parse_preprocessing_steps": (
+            "src.utils",
+            "parse_preprocessing_steps",
+        ),
+        "merge_config_metadata": (
+            "src.utils",
+            "merge_config_metadata",
+        ),
+
+        # Decision metrics
+        "coerce_binary_series": (
+            "src.decision.metrics",
+            "coerce_binary_series",
+        ),
+        "binary_confusion_table": (
+            "src.decision.metrics",
+            "binary_confusion_table",
+        ),
+
+        # Binary confidence
+        "add_binary_confidence": (
+            "src.decision.confidence",
+            "add_binary_confidence",
+        ),
+        "add_binary_object_confidence": (
+            "src.decision.confidence",
+            "add_binary_object_confidence",
+        ),
+        "add_binary_pixel_confidence": (
+            "src.decision.confidence",
+            "add_binary_pixel_confidence",
+        ),
+
+        # Border diagnostics
+        "summarize_border_diagnostics_by_config": (
+            "src.decision.border",
+            "summarize_border_diagnostics_by_config",
+        ),
+
+        # Decision maps
+        "assign_object_decisions_to_pixels": (
+            "src.decision.maps",
+            "assign_object_decisions_to_pixels",
+        ),
+        "make_pixel_categorical_map": (
+            "src.decision.maps",
+            "make_pixel_categorical_map",
+        ),
+
+        # Three-way decision / uncertainty
+        "select_three_way_threshold_one_config": (
+            "src.decision.uncertainty",
+            "select_three_way_threshold_one_config",
+        ),
+        "select_three_way_threshold_pareto": (
+            "src.decision.uncertainty",
+            "select_three_way_threshold_pareto",
+        ),
+        "calibrate_three_way_thresholds_by_config": (
+            "src.decision.uncertainty",
+            "calibrate_three_way_thresholds_by_config",
+        ),
+        "apply_three_way_thresholds_by_config": (
+            "src.decision.uncertainty",
+            "apply_three_way_thresholds_by_config",
+        ),
+        "evaluate_three_way_by_config": (
+            "src.decision.uncertainty",
+            "evaluate_three_way_by_config",
+        ),
+        "add_three_way_confidence": (
+            "src.decision.uncertainty",
+            "add_three_way_confidence",
+        ),
+        # Canonical calculation function. Do not re-export the duplicate
+        # implementation from src.visualization.plot_decision.
+        "three_way_confusion_table": (
+            "src.decision.uncertainty",
+            "three_way_confusion_table",
+        ),
+
+        # Reporting selection
+        "choose_diagnostic_configs": (
+            "src.reporting.selection",
+            "choose_diagnostic_configs",
+        ),
+        "choose_images_for_config": (
+            "src.reporting.selection",
+            "choose_images_for_config",
+        ),
+        "choose_images_for_config_3way": (
+            "src.reporting.selection",
+            "choose_images_for_config_3way",
+        ),
+        "sample_for_qt2_plot": (
+            "src.reporting.selection",
+            "sample_for_qt2_plot",
+        ),
+
+        # Visualization common
+        "CLASS_COLOR_MAP": (
+            "src.visualization.common",
+            "CLASS_COLOR_MAP",
+        ),
+        "ERROR_COLOR_MAP": (
+            "src.visualization.common",
+            "ERROR_COLOR_MAP",
+        ),
+        "BINARY_CLASS_ORDER": (
+            "src.visualization.common",
+            "BINARY_CLASS_ORDER",
+        ),
+        "THREE_WAY_CLASS_ORDER": (
+            "src.visualization.common",
+            "THREE_WAY_CLASS_ORDER",
+        ),
+        "ERROR_ORDER": (
+            "src.visualization.common",
+            "ERROR_ORDER",
+        ),
+        "normalize_class_label": (
+            "src.visualization.common",
+            "normalize_class_label",
+        ),
+        "normalize_class_array": (
+            "src.visualization.common",
+            "normalize_class_array",
+        ),
+        "class_color": (
+            "src.visualization.common",
+            "class_color",
+        ),
+        "class_color_map": (
+            "src.visualization.common",
+            "class_color_map",
+        ),
+        "color_with_alpha": (
+            "src.visualization.common",
+            "color_with_alpha",
+        ),
+        "discrete_colorscale": (
+            "src.visualization.common",
+            "discrete_colorscale",
+        ),
+        "apply_project_theme": (
+            "src.visualization.common",
+            "apply_project_theme",
+        ),
+        "foreground_bbox": (
+            "src.visualization.common",
+            "foreground_bbox",
+        ),
+        "crop_to_foreground": (
+            "src.visualization.common",
+            "crop_to_foreground",
+        ),
+        "crop_arrays_to_foreground": (
+            "src.visualization.common",
+            "crop_arrays_to_foreground",
+        ),
+        "sanitize_filename": (
+            "src.visualization.common",
+            "sanitize_filename",
+        ),
+        "make_config_display_name": (
+            "src.visualization.common",
+            "make_config_display_name",
+        ),
+        "save_figure_bundle": (
+            "src.visualization.common",
+            "save_figure_bundle",
+        ),
+
+        # Visualization objects
+        "plot_object_area_distribution": (
+            "src.visualization.plot_objects",
+            "plot_object_area_distribution",
+        ),
+
+        # Visualization decisions
+        "plot_pixel_three_way_decision_overlay": (
+            "src.visualization.plot_decision",
+            "plot_pixel_three_way_decision_overlay",
+        ),
+        "plot_confusion_heatmap_from_long": (
+            "src.visualization.plot_decision",
+            "plot_confusion_heatmap_from_long",
+        ),
+        "plot_three_way_confusion_heatmap": (
+            "src.visualization.plot_decision",
+            "plot_three_way_confusion_heatmap",
+        ),
+        "plot_binary_confusion_heatmap": (
+            "src.visualization.plot_decision",
+            "plot_binary_confusion_heatmap",
+        ),
+
+        # Model-selection plots
+        "plot_detection_pareto": (
+            "src.visualization.plot_model_selection",
+            "plot_detection_pareto",
+        ),
+        "plot_three_way_tradeoff": (
+            "src.visualization.plot_model_selection",
+            "plot_three_way_tradeoff",
+        ),
+        "plot_parameter_tendencies": (
+            "src.visualization.plot_model_selection",
+            "plot_parameter_tendencies",
+        ),
+        "plot_validation_test_shift": (
+            "src.visualization.plot_model_selection",
+            "plot_validation_test_shift",
+        ),
+        "plot_model_metric_ranking": (
+            "src.visualization.plot_model_selection",
+            "plot_model_metric_ranking",
+        ),
+
+        # Reporting plots
+        "plot_per_image_performance": (
+            "src.visualization.plot_reporting",
+            "plot_per_image_performance",
+        ),
+        "plot_true_vs_predicted_object_counts": (
+            "src.visualization.plot_reporting",
+            "plot_true_vs_predicted_object_counts",
+        ),
+        "plot_stage_metric_comparison": (
+            "src.visualization.plot_reporting",
+            "plot_stage_metric_comparison",
+        ),
+        "plot_mixture_diagnostic_panel": (
+            "src.visualization.plot_reporting",
+            "plot_mixture_diagnostic_panel",
+        ),
+
+        # Robustness plots
+        "plot_ablation_deltas": (
+            "src.visualization.plot_robustness",
+            "plot_ablation_deltas",
+        ),
+        "plot_ablation_heatmap": (
+            "src.visualization.plot_robustness",
+            "plot_ablation_heatmap",
+        ),
+        "plot_stability_intervals": (
+            "src.visualization.plot_robustness",
+            "plot_stability_intervals",
+        ),
+        "plot_border_core_metrics": (
+            "src.visualization.plot_robustness",
+            "plot_border_core_metrics",
+        ),
+        "plot_truth_dilation_sensitivity": (
+            "src.visualization.plot_robustness",
+            "plot_truth_dilation_sensitivity",
+        ),
+    }
+)
+
+# This symbol no longer exists in plot_objects; use
+# ``plot_object_area_distribution`` instead.
+_PUBLIC_API.pop("plot_object_areas", None)
+
+
+# ---------------------------------------------------------------------------
+# API additions from plot_scores / plot_simca / plot_spectra / tables.
+# ---------------------------------------------------------------------------
+_PUBLIC_API.update(
+    {
+        # Score plots and pixel-score summaries
+        "build_scores_dataframe": (
+            "src.visualization.plot_scores",
+            "build_scores_dataframe",
+        ),
+        "sample_scores_dataframe": (
+            "src.visualization.plot_scores",
+            "sample_scores_dataframe",
+        ),
+        "plot_scores_density": (
+            "src.visualization.plot_scores",
+            "plot_scores_density",
+        ),
+        "plot_scores_distribution": (
+            "src.visualization.plot_scores",
+            "plot_scores_distribution",
+        ),
+        "summarize_scores_by_object": (
+            "src.visualization.plot_scores",
+            "summarize_scores_by_object",
+        ),
+        "plot_object_score_summary": (
+            "src.visualization.plot_scores",
+            "plot_object_score_summary",
+        ),
+
+        # SIMCA diagnostics
+        "plot_simca_q_t2_dataframe": (
+            "src.visualization.plot_simca",
+            "plot_simca_q_t2_dataframe",
+        ),
+
+        # Spectral reporting
+        "plot_spectra_by_batch": (
+            "src.visualization.plot_spectra",
+            "plot_spectra_by_batch",
+        ),
+
+        # Compact reporting tables
+        "build_database_inventory_table": (
+            "src.visualization.tables",
+            "build_database_inventory_table",
+        ),
+        "build_preprocessing_shortlist_table": (
+            "src.visualization.tables",
+            "build_preprocessing_shortlist_table",
+        ),
+        "build_candidate_model_table": (
+            "src.visualization.tables",
+            "build_candidate_model_table",
+        ),
+        "build_frozen_reference_table": (
+            "src.visualization.tables",
+            "build_frozen_reference_table",
+        ),
+        "build_per_image_error_table": (
+            "src.visualization.tables",
+            "build_per_image_error_table",
+        ),
+        "build_presentation_summary_table": (
+            "src.visualization.tables",
+            "build_presentation_summary_table",
+        ),
+    }
+)
+
+
+# Deprecated compatibility wrappers are intentionally not part of the root API.
+# They remain importable from their original modules during the transition.
+for _deprecated_name in (
+    "plot_object_areas",
+    "plot_object_fp_fn_overlay",
+    "plot_pixel_fp_fn_overlay",
+    "plot_decision_counts",
+    "choose_images_for_config_2way",
+):
+    _PUBLIC_API.pop(_deprecated_name, None)
+del _deprecated_name
 
 
 def __getattr__(name: str) -> Any:
