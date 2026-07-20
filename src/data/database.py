@@ -1,13 +1,14 @@
+from copy import deepcopy
 import re
+
 import numpy as np
 from skimage import measure
-from copy import deepcopy
 
 from src.data.segmentation import segment_objects
 
 NIR_UCO_NAME_CONFIG = {
     "suffixes_to_ignore": ["_sb"],
-    #ADD NUTS HERE IF NEEDED IN THE FUTURE
+    # Add nuts here if needed in the future.
     "nut_aliases": {
         "almond": "almond",
         "alm": "almond",
@@ -16,11 +17,11 @@ NIR_UCO_NAME_CONFIG = {
         "walnut": "walnut",
         "wal": "walnut",
     },
-    #ADD NUTS HERE IF NEEDED IN THE FUTURE
+    # Kept for compatibility; parsing is driven by nut_aliases below.
     "patterns": {
-        "pure": r"^(?P<nut_token>almond|peanut|walnut)(?P<batch>\d+)$",
-        "mixture": r"^(?P<components>(?:alm|pea|wal)\d+){2,}$",
-        "position_reference": r"^(?P<nut_token>pea|wal|alm)(?P<batch>\d+)_pos(?P<position_set>\d+)$",
+        "pure": r"^(?P<nut_token>[a-zA-Z]+)(?P<batch>\d+)$",
+        "mixture": r"^(?P<components>(?:[a-zA-Z]+\d+){2,})$",
+        "position_reference": r"^(?P<nut_token>[a-zA-Z]+)(?P<batch>\d+)_pos(?P<position_set>\d+)$",
     },
 }
 
@@ -29,7 +30,8 @@ NIR_UCO_NAME_CONFIG = {
 def _remove_known_suffixes(name, suffixes):
     clean = name
     for suffix in suffixes:
-        if clean.endswith(suffix):
+        suffix = str(suffix).lower()
+        if suffix and clean.endswith(suffix):
             clean = clean[: -len(suffix)]
     return clean
     
@@ -58,7 +60,37 @@ def _empty_metadata(original_key, clean_key):
     }
 
 
-def _parse_components(component_string, nut_aliases):
+def _normalise_nut_token(token, nut_aliases):
+    token = str(token).strip().lower()
+    return nut_aliases.get(token)
+
+
+def _token_batch_pairs(component_string, nut_aliases):
+    component_string = str(component_string).strip().lower()
+    pairs = re.findall(r"([a-zA-Z]+)(\d+)", component_string)
+    if not pairs:
+        return []
+
+    reconstructed = "".join(f"{token}{batch}" for token, batch in pairs).lower()
+    if reconstructed != component_string:
+        return []
+
+    out = []
+    for token, batch in pairs:
+        nut_type = _normalise_nut_token(token, nut_aliases)
+        if nut_type is None:
+            return []
+        out.append(
+            {
+                "nut_type": nut_type,
+                "batch": int(batch),
+                "token": token.lower(),
+            }
+        )
+    return out
+
+
+def _parse_components(component_string, nut_aliases, min_components=2):
     """
     Parse mixture component string for instance:
         alm1pea2
@@ -72,21 +104,23 @@ def _parse_components(component_string, nut_aliases):
             "walnut": {"batch": 3, "token": "wal"},
         }
     """
-    # catch all occurrences of nut token followed by batch number
-    pairs = re.findall(r"([a-zA-Z]+)(\d+)", component_string)
+    pairs = _token_batch_pairs(component_string, nut_aliases)
+    if len(pairs) < int(min_components):
+        raise ValueError(f"Expected at least {min_components} components in: {component_string}")
+
     components = {}
-    for token, batch in pairs:
-        token = token.lower()
-        nut_type = nut_aliases.get(token)
-        if nut_type is None:
-            raise ValueError(f"Unknown nut token: {token}")
+    for item in pairs:
+        nut_type = item["nut_type"]
+        if nut_type in components:
+            raise ValueError(f"Duplicate nut component in image key: {nut_type}")
         components[nut_type] = {
-            "batch": int(batch),
-            "token": token,
+            "batch": item["batch"],
+            "token": item["token"],
         }
     return components
 
-def _infer_split_from_metadata(meta):
+
+def infer_split_from_metadata(meta):
     """
     Define default split role of the image in the pipeline
     """
@@ -98,7 +132,7 @@ def _infer_split_from_metadata(meta):
         return "position_reference"
     return "unknown"
 
-def _infer_object_nut_type_from_metadata(meta):
+def infer_object_nut_type_from_metadata(meta):
     """
     Deduce the nut type label of the objects in the image when it is known
 
@@ -115,6 +149,10 @@ def _infer_object_nut_type_from_metadata(meta):
         return "unknown"
     return "unknown"
 
+
+_infer_split_from_metadata = infer_split_from_metadata
+_infer_object_nut_type_from_metadata = infer_object_nut_type_from_metadata
+
 def _unpack_segmentation_result(seg_result):
     """
     Allow handling of multiple styles of return from segment_objects.
@@ -130,6 +168,9 @@ def _unpack_segmentation_result(seg_result):
         }
     """
     if isinstance(seg_result, dict):
+        missing = [key for key in ("image_ref", "mask", "labels") if key not in seg_result]
+        if missing:
+            raise ValueError(f"segmentation result is missing required keys: {missing}")
         return (
             seg_result["image_ref"],
             seg_result["mask"],
@@ -146,6 +187,46 @@ def _unpack_segmentation_result(seg_result):
     )
 
 
+def _validate_cube_and_segmentation(cube, labels, image_ref, mask=None):
+    cube = np.asarray(cube)
+    labels = np.asarray(labels)
+    image_ref = np.asarray(image_ref)
+
+    if cube.ndim != 3:
+        raise ValueError(f"cube must be a 3D array, got shape={cube.shape}")
+    if labels.ndim != 2:
+        raise ValueError(f"labels must be a 2D array, got shape={labels.shape}")
+    if image_ref.ndim != 2:
+        raise ValueError(f"image_ref must be a 2D array, got shape={image_ref.shape}")
+    if labels.shape != cube.shape[:2]:
+        raise ValueError(
+            f"labels shape {labels.shape} does not match cube spatial shape {cube.shape[:2]}"
+        )
+    if image_ref.shape != cube.shape[:2]:
+        raise ValueError(
+            f"image_ref shape {image_ref.shape} does not match cube spatial shape {cube.shape[:2]}"
+        )
+    if mask is not None and np.asarray(mask).shape != cube.shape[:2]:
+        raise ValueError(
+            f"mask shape {np.asarray(mask).shape} does not match cube spatial shape {cube.shape[:2]}"
+        )
+    return cube, labels, image_ref
+
+
+def segmentation_metadata(mask, labels, threshold=None):
+    """Return stable image-level segmentation metadata."""
+    mask = np.asarray(mask, dtype=bool)
+    labels = np.asarray(labels)
+    return {
+        "threshold": threshold,
+        "n_labels_positive": int(len(np.unique(labels[labels > 0]))),
+        "max_label": int(labels.max()) if labels.size else 0,
+        "mask_area_pixels": int(mask.sum()),
+        "mask_area_ratio": float(mask.sum() / mask.size) if mask.size else np.nan,
+        "segmentation_shape": tuple(int(v) for v in labels.shape),
+    }
+
+
 def preprocess_nir_uco_cube(
     raw_cube,
     n_remove_start:int,
@@ -156,9 +237,16 @@ def preprocess_nir_uco_cube(
 
     Remove first noisy bands:
         X_clean = X_raw[:, :, 6:]
-    Expend Later
+    Extend later.
     """
+    raw_cube = np.asarray(raw_cube)
+    if raw_cube.ndim != 3:
+        raise ValueError(f"raw_cube must be a 3D array, got shape={raw_cube.shape}")
+    if int(n_remove_start) < 0:
+        raise ValueError("n_remove_start must be non-negative")
     cube = raw_cube[:, :, n_remove_start:n_stop_end] if n_stop_end is not None else raw_cube[:, :, n_remove_start:]
+    if cube.shape[2] == 0:
+        raise ValueError("band trimming produced a cube with zero spectral bands")
     return cube
 
 
@@ -166,23 +254,11 @@ def parse_image_key(key, config=None):
     """
     Parse image name and return standardised metadata.
 
-    Handle with configurable patterns :
-    - pure images : almond1, peanut2
-    - mixtures : alm1pea2
-    - position references : pea1_pos3
-    - suffixes to ignore : _sb
-
-    Parameters
-    ----------
-    key : str
-        Name of the image in the .mat file.
-    config : dict or None
-        Parsing configuration. If None, uses NIR_UCO_NAME_CONFIG.
-
-    Returns
-    -------
-    dict
-        Standardised metadata.
+    Supported patterns are driven by ``nut_aliases`` in the configuration:
+    - pure images: almond1, alm1, peanut2
+    - mixtures: alm1pea2, almond1peanut2
+    - position references: pea1_pos3, peanut1_pos3
+    - suffixes to ignore: _sb
     """
     if config is None:
         config = NIR_UCO_NAME_CONFIG
@@ -198,34 +274,66 @@ def parse_image_key(key, config=None):
         clean_key=clean_key,
     )
     nut_aliases = config["nut_aliases"]
-    patterns = config["patterns"]
+    patterns = config.get("patterns", NIR_UCO_NAME_CONFIG["patterns"])
+
+    # Position references must be parsed before pure samples because both
+    # start with a single token/batch pair.
+    pos_match = re.fullmatch(patterns["position_reference"], clean_key)
+    if pos_match:
+        nut_token = pos_match.group("nut_token")
+        nut_type = _normalise_nut_token(nut_token, nut_aliases)
+        if nut_type is not None:
+            batch = int(pos_match.group("batch"))
+            position_set = int(pos_match.group("position_set"))
+            meta.update({
+                "sample_kind": "position_reference",
+                "nut_type": nut_type,
+                "batch": batch,
+                "components": {
+                    nut_type: {
+                        "batch": batch,
+                        "token": nut_token.lower(),
+                    }
+                },
+                "position_set": position_set,
+                "is_position_reference": True,
+                "is_unknown": False,
+                "description": (
+                    f"{nut_type} batch {batch} in position set {position_set}"
+                ),
+            })
+            return meta
 
     # Pure images
     pure_match = re.fullmatch(patterns["pure"], clean_key)
     if pure_match:
         nut_token = pure_match.group("nut_token")
-        batch = int(pure_match.group("batch"))
-        nut_type = nut_aliases.get(nut_token, nut_token)
-        meta.update({
-            "sample_kind": "pure",
-            "nut_type": nut_type,
-            "batch": batch,
-            "components": {
-                nut_type: {
-                    "batch": batch,
-                    "token": nut_token,
-                }
-            },
-            "is_pure": True,
-            "is_unknown": False,
-            "description": f"pure {nut_type}, batch {batch}",
-        })
-        return meta
+        nut_type = _normalise_nut_token(nut_token, nut_aliases)
+        if nut_type is not None:
+            batch = int(pure_match.group("batch"))
+            meta.update({
+                "sample_kind": "pure",
+                "nut_type": nut_type,
+                "batch": batch,
+                "components": {
+                    nut_type: {
+                        "batch": batch,
+                        "token": nut_token.lower(),
+                    }
+                },
+                "is_pure": True,
+                "is_unknown": False,
+                "description": f"pure {nut_type}, batch {batch}",
+            })
+            return meta
     
     # Mixtures
     mixture_match = re.fullmatch(patterns["mixture"], clean_key)
     if mixture_match:
-        components = _parse_components(clean_key, nut_aliases)
+        try:
+            components = _parse_components(clean_key, nut_aliases, min_components=2)
+        except ValueError:
+            return meta
         component_desc = " + ".join(
             f"{nut} batch {info['batch']}"
             for nut, info in components.items()
@@ -238,32 +346,6 @@ def parse_image_key(key, config=None):
             "is_mixture": True,
             "is_unknown": False,
             "description": f"mixture: {component_desc}",
-        })
-        return meta
-
-    # Reference positions
-    pos_match = re.fullmatch(patterns["position_reference"], clean_key)
-    if pos_match:
-        nut_token = pos_match.group("nut_token")
-        batch = int(pos_match.group("batch"))
-        position_set = int(pos_match.group("position_set"))
-        nut_type = nut_aliases.get(nut_token, nut_token)
-        meta.update({
-            "sample_kind": "position_reference",
-            "nut_type": nut_type,
-            "batch": batch,
-            "components": {
-                nut_type: {
-                    "batch": batch,
-                    "token": nut_token,
-                }
-            },
-            "position_set": position_set,
-            "is_position_reference": True,
-            "is_unknown": False,
-            "description": (
-                f"{nut_type} batch {batch} in position set {position_set}"
-            ),
         })
         return meta
 
@@ -309,9 +391,10 @@ def extract_objects_from_labeled_image(
     objects : dict
         Dictionary of extracted objects.
     """
+    cube, labels, image_ref = _validate_cube_and_segmentation(cube, labels, image_ref)
     if split is None:
-        split = _infer_split_from_metadata(image_meta)
-    object_nut_type = _infer_object_nut_type_from_metadata(image_meta)
+        split = infer_split_from_metadata(image_meta)
+    object_nut_type = infer_object_nut_type_from_metadata(image_meta)
     objects = {}
     regions = measure.regionprops(labels, intensity_image=image_ref)
     obj_counter = 1
@@ -338,7 +421,7 @@ def extract_objects_from_labeled_image(
         # OMEGA_k = pixels positions of the object k
         positions_global = np.argwhere(object_mask_global)
         positions_local = positions_global - np.array([min_row, min_col])
-        # X_k ∈ R^{N_k x B}
+        # Object spectral matrix, shape: n_object_pixels x n_bands.
         spectra = cube[object_mask_global]
         # spectral statistics
         mean_spectrum = np.nanmean(spectra, axis=0)
@@ -413,7 +496,7 @@ def build_minimal_nir_uco_object_database(
     n_stop_end=None,
     wavelengths=None,
     data_mode="reflectance",
-    min_area=100,
+    min_area=None,
     split=None,
     skip_unknown=True,
     segmentation_kwargs=None,
@@ -442,8 +525,10 @@ def build_minimal_nir_uco_object_database(
         Wavelength axis after preprocessing.
     data_mode : str
         "reflectance" or "absorbance".
-    min_area : int
-        Minimum area for extracted objects.
+    min_area : int or None
+        Minimum area for extracted objects. If None, the value is resolved
+        from ``segmentation_kwargs["min_area"]`` when available, otherwise
+        the legacy default of 100 pixels is used.
     split : str or None
         Optional split label for all objects. If None, inferred from image metadata.
     skip_unknown : bool
@@ -462,6 +547,16 @@ def build_minimal_nir_uco_object_database(
         selected_keys = list(data.keys())
     if segmentation_kwargs is None:
         segmentation_kwargs = {}
+    else:
+        segmentation_kwargs = dict(segmentation_kwargs)
+    object_min_area = (
+        min_area
+        if min_area is not None
+        else segmentation_kwargs.get("min_area", 100)
+    )
+    object_min_area = int(object_min_area)
+    if object_min_area < 0:
+        raise ValueError("min_area must be non-negative")
 
     object_database = {}
     image_database = {}
@@ -482,6 +577,10 @@ def build_minimal_nir_uco_object_database(
         )
 
         raw_cube = data[key]
+        if not is_hyperspectral_cube(raw_cube):
+            print(f"[WARNING] Skipping non-hyperspectral entry: {key}")
+            continue
+
         if preprocess_func is not None:
             cube = preprocess_func(raw_cube, n_remove_start=n_remove_start, n_stop_end=n_stop_end)
         else:
@@ -492,6 +591,8 @@ def build_minimal_nir_uco_object_database(
         )
 
         image_ref, mask, labels, tau = _unpack_segmentation_result(seg_result)
+        _validate_cube_and_segmentation(cube, labels, image_ref, mask=mask)
+        seg_meta = segmentation_metadata(mask=mask, labels=labels, threshold=tau)
         objects = extract_objects_from_labeled_image(
             cube=cube,
             labels=labels,
@@ -499,7 +600,7 @@ def build_minimal_nir_uco_object_database(
             image_meta=image_meta,
             wavelengths=wavelengths,
             data_mode=data_mode,
-            min_area=min_area,
+            min_area=object_min_area,
             split=split,
         )
         object_database.update(objects)
@@ -515,6 +616,10 @@ def build_minimal_nir_uco_object_database(
             "mask": mask,
             "labels": labels,
             "threshold": tau,
+            "segmentation": seg_meta,
+            "segmentation_n_labels_positive": seg_meta["n_labels_positive"],
+            "segmentation_mask_area_pixels": seg_meta["mask_area_pixels"],
+            "segmentation_mask_area_ratio": seg_meta["mask_area_ratio"],
             # Spectral metadata
             "wavelengths": wavelengths,
             "data_mode": data_mode,

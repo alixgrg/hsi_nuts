@@ -23,6 +23,7 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
     "load_mat_file": ("src.io.dataload", "load_mat_file"),
     "load_nir_uco_h5": ("src.io.database_h5", "load_nir_uco_h5"),
     "save_nir_uco_h5": ("src.io.database_h5", "save_nir_uco_h5"),
+    "validate_nir_uco_h5": ("src.io.database_h5", "validate_nir_uco_h5"),
 
     # ------------------------------------------------------------------
     # Data / database / segmentation
@@ -37,6 +38,18 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
     ),
     "segment_objects": ("src.data.segmentation", "segment_objects"),
     "parse_image_key": ("src.data.database", "parse_image_key"),
+    "infer_split_from_metadata": (
+        "src.data.database",
+        "infer_split_from_metadata",
+    ),
+    "infer_object_nut_type_from_metadata": (
+        "src.data.database",
+        "infer_object_nut_type_from_metadata",
+    ),
+    "segmentation_metadata": (
+        "src.data.database",
+        "segmentation_metadata",
+    ),
     "preprocess_nir_uco_cube": ("src.data.database", "preprocess_nir_uco_cube"),
     "extract_objects_from_labeled_image": (
         "src.data.database",
@@ -187,7 +200,12 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
     # Matrices
     # ------------------------------------------------------------------
     "MatrixSpec": ("src.matrices.matrix_registry", "MatrixSpec"),
+    "MatrixOutput": ("src.matrices.matrix_registry", "MatrixOutput"),
     "build_matrix": ("src.matrices.matrix_registry", "build_matrix"),
+    "build_matrix_output": (
+        "src.matrices.matrix_registry",
+        "build_matrix_output",
+    ),
     "get_matrix_spec": ("src.matrices.matrix_registry", "get_matrix_spec"),
     "matrix_method_to_args": (
         "src.matrices.matrix_registry",
@@ -328,6 +346,86 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
     "add_pca_selection_score": (
         "src.workflows.pca",
         "add_pca_selection_score",
+    ),
+    "DEFAULT_PCA_SELECTION_CONFIG": (
+        "src.workflows.pca_selection",
+        "DEFAULT_PCA_SELECTION_CONFIG",
+    ),
+    "PCASelectionConfig": (
+        "src.workflows.pca_selection",
+        "PCASelectionConfig",
+    ),
+    "PCASelectionProfile": (
+        "src.workflows.pca_selection",
+        "PCASelectionProfile",
+    ),
+    "make_pca_selection_config": (
+        "src.workflows.pca_selection",
+        "make_pca_selection_config",
+    ),
+    "add_pca_selection_scores": (
+        "src.workflows.pca_selection",
+        "add_pca_selection_scores",
+    ),
+    "build_pca_scoring_diagnostics": (
+        "src.workflows.pca_selection",
+        "build_pca_scoring_diagnostics",
+    ),
+    "add_pca_relative_quality_flags": (
+        "src.workflows.pca_selection",
+        "add_pca_relative_quality_flags",
+    ),
+    "format_pca_selection_reason": (
+        "src.workflows.pca_selection",
+        "format_pca_selection_reason",
+    ),
+    "select_pca_preprocessing_shortlist": (
+        "src.workflows.pca_selection",
+        "select_pca_preprocessing_shortlist",
+    ),
+    "validate_pca_preprocessing_shortlist": (
+        "src.workflows.pca_selection",
+        "validate_pca_preprocessing_shortlist",
+    ),
+    "build_image_qc_table": (
+        "src.workflows.quality_check",
+        "build_image_qc_table",
+    ),
+    "build_image_qc_warnings": (
+        "src.workflows.quality_check",
+        "build_image_qc_warnings",
+    ),
+    "build_object_qc_table": (
+        "src.workflows.quality_check",
+        "build_object_qc_table",
+    ),
+    "build_object_qc_warnings": (
+        "src.workflows.quality_check",
+        "build_object_qc_warnings",
+    ),
+    "build_object_shape_check_tables": (
+        "src.workflows.quality_check",
+        "build_object_shape_check_tables",
+    ),
+    "build_qc_flags_table": (
+        "src.workflows.quality_check",
+        "build_qc_flags_table",
+    ),
+    "check_missing_required_fields": (
+        "src.workflows.quality_check",
+        "check_missing_required_fields",
+    ),
+    "summarize_matrix_output": (
+        "src.workflows.matrix_preprocessing",
+        "summarize_matrix_output",
+    ),
+    "summarize_preprocessing_output": (
+        "src.workflows.matrix_preprocessing",
+        "summarize_preprocessing_output",
+    ),
+    "validate_required_columns": (
+        "src.workflows.matrix_preprocessing",
+        "validate_required_columns",
     ),
 
     # ------------------------------------------------------------------

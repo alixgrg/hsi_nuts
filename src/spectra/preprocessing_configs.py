@@ -82,7 +82,7 @@ SIMCA_SEARCH_PREPROCESSING_CONFIGS: dict[str, tuple[str, ...]] = {
 
 def preprocessing_name_from_steps(steps: Sequence[str]) -> str:
     """Return a readable name from a sequence of preprocessing steps."""
-    steps = tuple(steps)
+    steps = validate_preprocessing_steps(steps)
     if steps == ("raw",) or len(steps) == 0:
         return "raw"
     return "_".join(str(step) for step in steps)
@@ -165,6 +165,10 @@ def normalize_preprocessing_configs(
     for item in configs:
         steps = resolve_preprocessing_steps(item)
         name = item if isinstance(item, str) else preprocessing_name_from_steps(steps)
+        if str(name) in out and out[str(name)] != steps:
+            raise ValueError(
+                f"Duplicate preprocessing name with different steps: {name!r}"
+            )
         out[str(name)] = steps
 
     return out

@@ -82,6 +82,8 @@ def _common_object_metadata(obj_id, obj):
         "object_id": obj_id,
         "label": obj.get("object_nut_type"),
         "source_image": obj.get("source_clean_key"),
+        "source_clean_key": obj.get("source_clean_key"),
+        "source_image_id": obj.get("source_image"),
         "batch": obj.get("batch"),
         "area": obj.get("area_pixels"),
         "sample_kind": obj.get("sample_kind"),
@@ -200,8 +202,8 @@ def _select_balanced_pixel_indices(
     if n_pixels == 0:
         return np.array([], dtype=int)
 
-    rng = np.random.default_rng(random_state)
     if balanced_pixel_strategy == "random":
+        rng = np.random.default_rng(random_state)
         if n_pixels >= m:
             return rng.choice(n_pixels, size=m, replace=False)
         if replace:
@@ -214,6 +216,7 @@ def _select_balanced_pixel_indices(
         if n_pixels >= m:
             return order[:m]
         if replace:
+            rng = np.random.default_rng(random_state)
             extra = rng.choice(order, size=m - n_pixels, replace=True)
             return np.concatenate([order, extra])
 

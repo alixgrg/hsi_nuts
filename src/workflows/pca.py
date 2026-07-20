@@ -168,7 +168,7 @@ def trace_ratio_by_group(T, groups, n_components: int = 3, eps: float = 1e-12) -
 
 
 def pca_distance_summary(pca_model, X, n_components=None, prefix: str = "train") -> dict:
-    """Compute summary statistics for PCA Q-residuals and Hotelling T²."""
+    """Compute summary statistics for PCA Q-residuals and Hotelling T2."""
     if n_components is None:
         n_components = pca_model.loadings_.shape[1]
 
@@ -525,151 +525,23 @@ def add_pca_selection_score(
     clip_quantiles=(0.05, 0.95),
     eps: float = 1e-12,
 ) -> pd.DataFrame:
-    """Add a generic PCA representation selection score.
+    """Backward-compatible wrapper for the official PCA selection module."""
+    if profile not in {"auto", "object", "pixel"}:
+        raise ValueError("profile must be auto, object, or pixel.")
 
-    Object matrices prioritize class separation, low batch structure, and stability.
-    Pixel matrices prioritize object-level separation and controlled intra-object spread.
-    """
-    df = summary_df.copy()
-    # Ensure stable metadata columns for downstream notebooks.
-    if "matrix_family" not in df.columns and matrix_method_col in df.columns:
-        df["matrix_family"] = df[matrix_method_col].apply(pca_matrix_family_from_method)
-    if "balanced_pixel_strategy" not in df.columns:
-        df["balanced_pixel_strategy"] = np.where(
-            df[matrix_method_col].astype(str).eq("balanced_pixels"),
-            "random",
-            "not_applicable",
-        )
-    if "balanced_pixel_strategy_effective" not in df.columns:
-        df["balanced_pixel_strategy_effective"] = np.where(
-            df[matrix_method_col].astype(str).eq("balanced_pixels"),
-            df["balanced_pixel_strategy"].astype(str),
-            "random",
-        )
-    if "matrix_variant" not in df.columns and matrix_method_col in df.columns:
-        df["matrix_variant"] = df.apply(
-            lambda row: pca_matrix_variant_from_method(
-                matrix_method=row[matrix_method_col],
-                balanced_pixel_strategy=row.get("balanced_pixel_strategy_effective", row.get("balanced_pixel_strategy", "random")),
-            ),
-            axis=1,
-        )
+    from src.workflows.pca_selection import (
+        add_pca_selection_scores,
+        make_pca_selection_config,
+    )
 
-    object_positive = {"class_trace_ratio": 3.0, "mahalanobis_pc1_pc2_pc3": 1.0}
-    object_negative = {"batch_trace_ratio": 2.0, "mean_train_projection_shift_norm": 1.5, "projection_q_deviation": 1.5, "ncomp_95": 0.3}
-    pixel_positive = {"object_class_trace_ratio": 3.0, "object_over_intra_ratio": 1.0}
-    pixel_negative = {"object_batch_trace_ratio": 2.0, "mean_intra_object_trace": 1.0, "mean_train_projection_shift_norm": 1.2, "projection_q_deviation": 1.2, "ncomp_95": 0.3}
-
-    def profile_for_matrix(matrix_method):
-        matrix_method = str(matrix_method)
-        if profile == "object":
-            return object_positive, object_negative
-        if profile == "pixel":
-            return pixel_positive, pixel_negative
-        if profile != "auto":
-            raise ValueError("profile must be 'auto', 'object', or 'pixel'.")
-        if matrix_method in {"object_mean", "object_median"}:
-            return object_positive, object_negative
-        if matrix_method in {"all_pixels", "balanced_pixels", "pixel"}:
-            return pixel_positive, pixel_negative
-        return object_positive, object_negative
-
-    def scale_metric(values):
-        values = pd.Series(values, dtype="float64")
-        if values.notna().sum() <= 1:
-            return pd.Series(np.zeros(len(values)), index=values.index)
-        lo, hi = values.quantile(clip_quantiles[0]), values.quantile(clip_quantiles[1])
-        values_clip = values.clip(lo, hi)
-        if robust:
-            center = values_clip.median()
-            scale = values_clip.quantile(0.75) - values_clip.quantile(0.25)
-        else:
-            center = values_clip.mean()
-            scale = values_clip.std(ddof=0)
-        if not np.isfinite(scale) or scale < eps:
-            return pd.Series(np.zeros(len(values)), index=values.index)
-        return (values_clip - center) / (scale + eps)
-
-    def compute_scores_for_group(group):
-        group = group.copy()
-        matrix_values = group[matrix_method_col].unique() if matrix_method_col in group.columns else ["object_mean"]
-        all_pos_metrics = set()
-        all_neg_metrics = set()
-        for matrix_value in matrix_values:
-            pos, neg = profile_for_matrix(matrix_value)
-            all_pos_metrics.update(pos)
-            all_neg_metrics.update(neg)
-
-        scaled = {
-            metric: scale_metric(group[metric]) if metric in group.columns else pd.Series(np.zeros(len(group)), index=group.index)
-            for metric in sorted(all_pos_metrics | all_neg_metrics)
-        }
-
-        for idx in group.index:
-            matrix_value = group.loc[idx, matrix_method_col] if matrix_method_col in group.columns else "object_mean"
-            pos, neg = profile_for_matrix(matrix_value)
-            score = 0.0
-            for metric, weight in pos.items():
-                contrib = float(weight) * scaled[metric].loc[idx]
-                group.loc[idx, f"contrib_plus_{metric}"] = contrib
-                score += contrib
-            for metric, weight in neg.items():
-                contrib = -float(weight) * scaled[metric].loc[idx]
-                group.loc[idx, f"contrib_minus_{metric}"] = contrib
-                score += contrib
-            group.loc[idx, score_col] = score
-        return group
-
-    if group_col is None:
-        out = compute_scores_for_group(df)
-    else:
-        group_cols = [group_col] if isinstance(group_col, str) else list(group_col)
-        missing_group_cols = [
-            col for col in group_cols
-            if col not in df.columns
-        ]
-        if missing_group_cols:
-            raise KeyError(
-                f"Missing group column(s) in PCA summary: {missing_group_cols}"
-            )
-        parts = []
-        for key, group in df.groupby(
-            group_cols,
-            group_keys=False,
-            dropna=False,
-            sort=False,
-        ):
-            scored_group = compute_scores_for_group(group)
-            key_tuple = key if isinstance(key, tuple) else (key,)
-            for col, value in zip(group_cols, key_tuple):
-                if col not in scored_group.columns:
-                    scored_group[col] = value
-            parts.append(scored_group)
-        out = (
-            pd.concat(parts, ignore_index=False, sort=False)
-            .sort_index()
-            .reset_index(drop=True)
-        )
-
-    def quality_flag(row):
-        matrix_method = str(row.get(matrix_method_col, "object_mean"))
-        if matrix_method in {"object_mean", "object_median"}:
-            if pd.notna(row.get("class_trace_ratio", np.nan)) and row.get("class_trace_ratio", np.nan) < 0.10:
-                return "weak_class_separation"
-            if pd.notna(row.get("projection_q_deviation", np.nan)) and row.get("projection_q_deviation", np.nan) > 1.0:
-                return "unstable_projection"
-            if pd.notna(row.get("batch_trace_ratio", np.nan)) and row.get("batch_trace_ratio", np.nan) > 0.01:
-                return "batch_sensitive"
-            return "candidate"
-        if matrix_method in {"all_pixels", "balanced_pixels", "pixel"}:
-            if pd.notna(row.get("object_class_trace_ratio", np.nan)) and row.get("object_class_trace_ratio", np.nan) < 0.05:
-                return "weak_object_separation"
-            if pd.notna(row.get("projection_q_deviation", np.nan)) and row.get("projection_q_deviation", np.nan) > 1.0:
-                return "unstable_projection"
-            if pd.notna(row.get("object_batch_trace_ratio", np.nan)) and row.get("object_batch_trace_ratio", np.nan) > 0.005:
-                return "batch_sensitive"
-            return "candidate"
-        return "unknown"
-
-    out["selection_flag"] = out.apply(quality_flag, axis=1)
-    return out
+    config = make_pca_selection_config(
+        matrix_method_col=matrix_method_col,
+        score_col=score_col,
+        group_cols=() if group_col is None else (group_col,) if isinstance(group_col, str) else tuple(group_col),
+        robust=robust,
+        clip_quantiles=clip_quantiles,
+        eps=eps,
+        stability_bootstrap_iterations=0,
+        stability_penalty_weight=0.0,
+    )
+    return add_pca_selection_scores(summary_df, config=config)

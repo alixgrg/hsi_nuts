@@ -1,6 +1,14 @@
 import numpy as np
 from scipy.signal import savgol_filter
 
+
+_SAVGOL_DERIV_BY_STEP = {
+    "sg_smooth": 0,
+    "sg_d1": 1,
+    "sg_d2": 2,
+}
+
+
 def center_X(X):
     """
     Center the data matrix X by subtracting the mean spectrum.
@@ -143,6 +151,24 @@ class SpectralPreprocessor:
         self.wavelengths_ = None
         self.is_fitted_ = False
 
+    def _resolve_savgol_params(self, step):
+        if step not in _SAVGOL_DERIV_BY_STEP:
+            raise ValueError(f"Unknown Savitzky-Golay preprocessing step: {step}")
+
+        deriv = _SAVGOL_DERIV_BY_STEP[step]
+        if deriv == 2:
+            window_length = max(self.sg_window_length, 11)
+            polyorder = max(self.sg_polyorder, 3)
+        else:
+            window_length = self.sg_window_length
+            polyorder = self.sg_polyorder
+
+        return {
+            "window_length": int(window_length),
+            "polyorder": int(polyorder),
+            "deriv": int(deriv),
+        }
+
     def fit(self, X, wavelengths=None):
         X_work = np.asarray(X, dtype=float)
         self.wavelengths_ = None if wavelengths is None else np.asarray(wavelengths)
@@ -155,23 +181,13 @@ class SpectralPreprocessor:
                 self.fitted_params_["msc_reference"] = ref
                 X_work = msc_transform(X_work, ref, eps=self.eps)
             elif step in {"sg_smooth", "sg_d1", "sg_d2"}:
-                deriv_map = {
-                    "sg_smooth": 0,
-                    "sg_d1": 1,
-                    "sg_d2": 2,
-                }
-                deriv = deriv_map[step]
+                params = self._resolve_savgol_params(step)
                 delta = 1.0 if self.wavelengths_ is None else float(np.mean(np.diff(self.wavelengths_)))
-                self.fitted_params_[step] = {
-                    "deriv": deriv,
-                    "delta": delta,
-                }
+                params["delta"] = delta
+                self.fitted_params_[step] = params
                 X_work = savgol_derivative(
                     X_work,
-                    window_length=self.sg_window_length if deriv in {0, 1} else max(self.sg_window_length, 11),
-                    polyorder=self.sg_polyorder if deriv in {0, 1} else max(self.sg_polyorder, 3),
-                    deriv=deriv,
-                    delta=delta,
+                    **params,
                 )
             else:
                 X_work = self._apply_stateless_step(X_work, step)
@@ -192,14 +208,11 @@ class SpectralPreprocessor:
                     eps=self.eps,
                 )
             elif step in {"sg_smooth", "sg_d1", "sg_d2"}:
-                params = self.fitted_params_[step]
-                deriv = params["deriv"]
+                params = self._resolve_savgol_params(step)
+                params.update(self.fitted_params_[step])
                 X_work = savgol_derivative(
                     X_work,
-                    window_length=self.sg_window_length if deriv == 1 else max(self.sg_window_length, 11),
-                    polyorder=self.sg_polyorder if deriv == 1 else max(self.sg_polyorder, 3),
-                    deriv=deriv,
-                    delta=params["delta"],
+                    **params,
                 )
             else:
                 X_work = self._apply_stateless_step(X_work, step)

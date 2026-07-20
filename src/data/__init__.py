@@ -10,10 +10,13 @@ from src.data.database import (
     build_minimal_nir_uco_object_database,
     detect_known_image_keys,
     extract_objects_from_labeled_image,
+    infer_object_nut_type_from_metadata,
+    infer_split_from_metadata,
     is_hyperspectral_cube,
     parse_image_key,
     preprocess_nir_uco_cube,
     resolve_selected_keys,
+    segmentation_metadata,
 )
 
 __all__ = [
@@ -22,6 +25,8 @@ __all__ = [
     "clean_mask",
     "detect_known_image_keys",
     "extract_objects_from_labeled_image",
+    "infer_object_nut_type_from_metadata",
+    "infer_split_from_metadata",
     "is_hyperspectral_cube",
     "label_objects_with_watershed",
     "make_binary_mask",
@@ -29,5 +34,6 @@ __all__ = [
     "parse_image_key",
     "preprocess_nir_uco_cube",
     "resolve_selected_keys",
+    "segmentation_metadata",
     "segment_objects",
 ]

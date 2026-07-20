@@ -8,6 +8,8 @@ import h5py
 
 ATTR_NONE = "__H5DB_NONE__"
 ATTR_JSON_PREFIX = "__H5DB_JSON__:"
+H5_FORMAT = "nir_uco_object_database"
+H5_VERSION = "1.0"
 
 IMAGE_ARRAY_KEYS = {
     "cube",
@@ -47,6 +49,8 @@ def _json_default(value):
         return value.tolist()
     if isinstance(value, tuple):
         return list(value)
+    if isinstance(value, set):
+        return sorted(value)
     raise TypeError(f"Object of type {type(value)} is not JSON serializable")
 
 
@@ -54,8 +58,8 @@ def _to_h5_attr(value):
     """Convert Python value to a safe HDF5 attribute."""
     if value is None:
         return ATTR_NONE
-    if isinstance(value, (dict, list, tuple)):
-        return ATTR_JSON_PREFIX + json.dumps(value, default=_json_default)
+    if isinstance(value, (dict, list, tuple, set)):
+        return ATTR_JSON_PREFIX + json.dumps(value, default=_json_default, sort_keys=True)
     if isinstance(value, np.generic):
         return value.item()
     if isinstance(value, (str, int, float, bool)):
@@ -109,7 +113,9 @@ def _write_dataset(group, name, array, compression="gzip", compression_opts=4):
         return
     arr = np.asarray(array)
     if arr.dtype == object:
-        return
+        raise TypeError(
+            f"Cannot write object-dtype array dataset {name!r} to HDF5 without loss."
+        )
     kwargs = {}
     if arr.size > 1000:
         kwargs = {
@@ -152,8 +158,8 @@ def save_nir_uco_h5(
         object_array_keys |= OBJECT_HEAVY_KEYS
 
     with h5py.File(path, "w") as h5:
-        h5.attrs["format"] = "nir_uco_object_database"
-        h5.attrs["version"] = "1.0"
+        h5.attrs["format"] = H5_FORMAT
+        h5.attrs["version"] = H5_VERSION
         h5.attrs["n_images"] = len(image_database)
         h5.attrs["n_objects"] = len(object_database)
         h5.attrs["include_heavy_object_arrays"] = bool(include_heavy_object_arrays)
@@ -188,7 +194,31 @@ def save_nir_uco_h5(
                     )
             _write_attrs(g, object_record, skip_keys=object_array_keys)
 
+    validate_nir_uco_h5(path)
     return path
+
+
+def _validate_open_h5(h5):
+    file_format = _from_h5_attr(h5.attrs.get("format"))
+    if file_format != H5_FORMAT:
+        raise ValueError(f"Unsupported HDF5 format: {file_format!r}")
+    missing_groups = [name for name in ("images", "objects") if name not in h5]
+    if missing_groups:
+        raise ValueError(f"NIR UCO HDF5 file is missing group(s): {missing_groups}")
+    n_images = int(_from_h5_attr(h5.attrs.get("n_images", 0)))
+    n_objects = int(_from_h5_attr(h5.attrs.get("n_objects", 0)))
+    if n_images != len(h5["images"]):
+        raise ValueError(f"HDF5 image count mismatch: attr={n_images}, group={len(h5['images'])}")
+    if n_objects != len(h5["objects"]):
+        raise ValueError(f"HDF5 object count mismatch: attr={n_objects}, group={len(h5['objects'])}")
+
+
+def validate_nir_uco_h5(path):
+    """Validate the basic structure and count attributes of a NIR UCO HDF5 file."""
+    path = Path(path)
+    with h5py.File(path, "r") as h5:
+        _validate_open_h5(h5)
+    return True
 
 
 def _read_group_record(group):
@@ -242,6 +272,7 @@ def load_nir_uco_h5(path, reconstruct_heavy_object_arrays=True):
     image_database = {}
 
     with h5py.File(path, "r") as h5:
+        _validate_open_h5(h5)
         for image_key, group in h5["images"].items():
             image_database[image_key] = _read_group_record(group)
         for object_id, group in h5["objects"].items():
