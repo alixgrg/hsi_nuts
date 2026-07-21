@@ -554,6 +554,78 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
         "src.workflows.simca_selection_utils",
         "summarize_parameter_tendencies",
     ),
+    "infer_matrix_family": (
+        "src.workflows.simca_candidates",
+        "infer_matrix_family",
+    ),
+    "selection_track_from_parts": (
+        "src.workflows.simca_candidates",
+        "selection_track_from_parts",
+    ),
+    "add_selection_track": (
+        "src.workflows.simca_candidates",
+        "add_selection_track",
+    ),
+    "candidate_identity_payload": (
+        "src.workflows.simca_candidates",
+        "candidate_identity_payload",
+    ),
+    "simca_candidate_key": (
+        "src.workflows.simca_candidates",
+        "simca_candidate_key",
+    ),
+    "add_simca_candidate_ids": (
+        "src.workflows.simca_candidates",
+        "add_simca_candidate_ids",
+    ),
+    "deduplicate_simca_candidates": (
+        "src.workflows.simca_candidates",
+        "deduplicate_simca_candidates",
+    ),
+    "deduplicate_metric_equivalent_simca_candidates": (
+        "src.workflows.simca_candidates",
+        "deduplicate_metric_equivalent_simca_candidates",
+    ),
+    "deduplicate_simca_refit_configs": (
+        "src.workflows.simca_candidates",
+        "deduplicate_simca_refit_configs",
+    ),
+    "normalize_simca_candidate_columns": (
+        "src.workflows.simca_candidates",
+        "normalize_simca_candidate_columns",
+    ),
+    "build_pca_preprocessing_configs_by_matrix_family": (
+        "src.workflows.simca_candidates",
+        "build_pca_preprocessing_configs_by_matrix_family",
+    ),
+    "allowed_pca_preprocessing_pairs": (
+        "src.workflows.simca_candidates",
+        "allowed_pca_preprocessing_pairs",
+    ),
+    "filter_simca_candidates_by_pca_preprocessing": (
+        "src.workflows.simca_candidates",
+        "filter_simca_candidates_by_pca_preprocessing",
+    ),
+    "validate_simca_candidates_match_pca_preprocessing": (
+        "src.workflows.simca_candidates",
+        "validate_simca_candidates_match_pca_preprocessing",
+    ),
+    "validate_simca_candidate_contract": (
+        "src.workflows.simca_candidates",
+        "validate_simca_candidate_contract",
+    ),
+    "validate_simca_evaluation_contract": (
+        "src.workflows.simca_candidates",
+        "validate_simca_evaluation_contract",
+    ),
+    "validate_simca_selection_tracks": (
+        "src.workflows.simca_candidates",
+        "validate_simca_selection_tracks",
+    ),
+    "validate_simca_table_columns": (
+        "src.workflows.simca_candidates",
+        "validate_simca_table_columns",
+    ),
 
     # Backward-compatible aliases for older notebooks.
     # Prefer add_detection_selection_score / sort_detection_selection in new notebooks.
@@ -580,6 +652,10 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
     "optuna_trials_dataframe": (
         "src.workflows.simca_optuna",
         "optuna_trials_dataframe",
+    ),
+    "optuna_trials_to_candidate_configs": (
+        "src.workflows.simca_optuna",
+        "optuna_trials_to_candidate_configs",
     ),
     "best_completed_trial_row": (
         "src.workflows.simca_optuna",

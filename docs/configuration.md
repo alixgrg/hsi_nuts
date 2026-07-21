@@ -31,6 +31,28 @@ Batch 4 must stay out of notebook 03 when it is used as the external pure-test b
 
 These values encode the reduced grid agreed after the audit. Downstream notebooks should import them instead of redefining local grids.
 
+## SIMCA Tracks And Candidate Contracts
+
+The final model workflow is organized into four explicit tracks:
+
+- `object_matrix_2way`
+- `object_matrix_3way`
+- `pixel_matrix_2way`
+- `pixel_matrix_3way`
+
+The track definitions live in `SIMCA_SELECTION_TRACKS` and `SIMCA_SELECTION_TRACK_SPECS`. Each track combines one matrix family (`object_matrix` or `pixel_matrix`) with one decision mode (`2way` or `3way`).
+
+SIMCA candidate identity is defined by `SIMCA_CANDIDATE_ID_COLUMNS`. The stable id is created by `src.workflows.simca_candidates.simca_candidate_key(...)` and added to tables with `add_simca_candidate_ids(...)` or `deduplicate_simca_candidates(...)`.
+
+Candidate and evaluation output schemas are documented by:
+
+- `SIMCA_PCA_SHORTLIST_REQUIRED_COLUMNS`
+- `SIMCA_CANDIDATE_CONFIG_REQUIRED_COLUMNS`
+- `SIMCA_CANDIDATE_EVALUATION_REQUIRED_COLUMNS`
+- `SIMCA_FINAL_MODEL_SELECTION_REQUIRED_COLUMNS`
+
+The PCA shortlist from notebook 03 must remain scoped by matrix family. Use `build_pca_preprocessing_configs_by_matrix_family(...)` before running grid search or Optuna. This prevents preprocessings selected for `object_matrix` from being applied to `pixel_matrix`, and vice versa, unless the preprocessing appears in both PCA shortlist families.
+
 ## Matrix And Pixel Sampling Defaults
 
 - `M_BALANCED_PIXELS`: number of sampled pixels per object for balanced pixel matrices.

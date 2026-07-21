@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -23,7 +23,7 @@ from src.models.simca import SIMCAClassModel
 from src.models.simca_rules import compute_rule_variant_stat_limit, make_simca_rule
 from src.spectra.preprocessing import SpectralPreprocessor
 from src.spectra.preprocessing_configs import normalize_preprocessing_configs
-from src.utils import as_list, row_float, row_int, row_str, row_value
+from src.utils import as_list, parse_preprocessing_steps, row_float, row_int, row_str, row_value
 from src.workflows.simca_selection_utils import add_detection_selection_score, detection_selection_score
 
 
@@ -75,6 +75,53 @@ def matrix_family_from_method(matrix_method: str) -> str:
     if matrix_method in {"balanced_pixels", "all_pixels", "pixel"}:
         return "pixel_matrix"
     return "unknown_matrix_family"
+
+
+def _is_preprocessing_configs_by_family(preprocessing_configs) -> bool:
+    if not isinstance(preprocessing_configs, Mapping):
+        return False
+    known_families = {"object_matrix", "pixel_matrix", "unknown_matrix_family"}
+    return any(str(key) in known_families for key in preprocessing_configs.keys())
+
+
+def _normalize_preprocessing_configs_by_family(preprocessing_configs) -> dict[str, dict[str, tuple[str, ...]]]:
+    """Normalize flat or family-specific preprocessing configs."""
+    if _is_preprocessing_configs_by_family(preprocessing_configs):
+        out: dict[str, dict[str, tuple[str, ...]]] = {}
+        for family, configs in preprocessing_configs.items():
+            out[str(family)] = normalize_preprocessing_configs(configs)
+        return out
+
+    flat = normalize_preprocessing_configs(preprocessing_configs)
+    return {
+        "object_matrix": flat,
+        "pixel_matrix": flat,
+        "unknown_matrix_family": flat,
+    }
+
+
+def _preprocessing_configs_for_family(
+    preprocessing_configs_by_family: Mapping[str, Mapping[str, Sequence[str]]],
+    matrix_family: str,
+) -> Mapping[str, Sequence[str]]:
+    return preprocessing_configs_by_family.get(str(matrix_family), {})
+
+
+def _resolve_preprocessing_steps_for_row(
+    row: pd.Series,
+    preprocessing_configs,
+) -> tuple[str, ...]:
+    preprocessing_name = str(row["preprocessing"])
+    configs_by_family = _normalize_preprocessing_configs_by_family(preprocessing_configs)
+    matrix_family = row_str(
+        row,
+        "matrix_family",
+        matrix_family_from_method(row_str(row, "matrix_method", "")),
+    )
+    configs = _preprocessing_configs_for_family(configs_by_family, matrix_family)
+    if preprocessing_name in configs:
+        return tuple(configs[preprocessing_name])
+    return tuple(parse_preprocessing_steps(row_value(row, "preprocessing_steps", preprocessing_name)))
 
 
 def balanced_strategy_grid_for_matrix(
@@ -402,7 +449,7 @@ def run_simca_pixel_projection_grid(
     non_target_label: str = DEFAULT_NON_TARGET_LABEL,
 ) -> tuple[pd.DataFrame, dict, pd.DataFrame]:
     """Grid search for standard SIMCA rules with pixel-level projection."""
-    preprocessing_configs = normalize_preprocessing_configs(preprocessing_configs)
+    preprocessing_configs_by_family = _normalize_preprocessing_configs_by_family(preprocessing_configs)
     train_filters = train_filters or make_target_train_filters(target_class=target_class)
     projection_filters = projection_filters or {"sample_kind": ["mixture"]}
 
@@ -420,9 +467,13 @@ def run_simca_pixel_projection_grid(
             balanced_pixel_strategy_values=balanced_pixel_strategy_values,
             default_m=default_m,
         )
+        current_preprocessing_configs = _preprocessing_configs_for_family(
+            preprocessing_configs_by_family,
+            matrix_family,
+        )
 
         for matrix_params in matrix_param_configs:
-            for preprocessing_name, preprocessing_steps in preprocessing_configs.items():
+            for preprocessing_name, preprocessing_steps in current_preprocessing_configs.items():
                 preprocessing_steps = tuple(preprocessing_steps)
                 for sg_window_length, sg_polyorder in valid_sg_parameter_pairs(
                     preprocessing_steps=preprocessing_steps,
@@ -887,7 +938,7 @@ def run_simca_rule_variant_grid(
     non_target_label: str = DEFAULT_NON_TARGET_LABEL,
 ) -> tuple[pd.DataFrame, dict, pd.DataFrame]:
     """Grid search for empirical-CV SIMCA rule variants."""
-    preprocessing_configs = normalize_preprocessing_configs(preprocessing_configs)
+    preprocessing_configs_by_family = _normalize_preprocessing_configs_by_family(preprocessing_configs)
     summary_rows = []
     results = {}
     errors = []
@@ -902,8 +953,12 @@ def run_simca_rule_variant_grid(
             balanced_pixel_strategy_values=balanced_pixel_strategy_values,
             default_m=default_m,
         )
+        current_preprocessing_configs = _preprocessing_configs_for_family(
+            preprocessing_configs_by_family,
+            matrix_family,
+        )
         for matrix_params in matrix_param_configs:
-            for preprocessing_name, preprocessing_steps in preprocessing_configs.items():
+            for preprocessing_name, preprocessing_steps in current_preprocessing_configs.items():
                 preprocessing_steps = tuple(preprocessing_steps)
                 for sg_window_length, sg_polyorder in valid_sg_parameter_pairs(
                     preprocessing_steps=preprocessing_steps,
@@ -1118,9 +1173,8 @@ def refit_best_grid_row(
     non_target_label: str = DEFAULT_NON_TARGET_LABEL,
 ) -> dict[str, Any]:
     """Refit one standard-rule configuration from a grid summary row."""
-    preprocessing_configs = normalize_preprocessing_configs(preprocessing_configs)
     preprocessing_name = str(best_row["preprocessing"])
-    steps = tuple(preprocessing_configs.get(preprocessing_name, tuple(str(best_row.get("preprocessing_steps", preprocessing_name)).split("+"))))
+    steps = _resolve_preprocessing_steps_for_row(best_row, preprocessing_configs)
 
     if object_thresholds is None:
         object_thresholds = [row_float(best_row, "object_threshold", 0.75)]
@@ -1178,9 +1232,8 @@ def refit_empirical_cv_rule_row(
     keep_cv_tables: bool = False,
 ) -> dict[str, Any]:
     """Refit one empirical-CV SIMCA configuration from a selected row."""
-    preprocessing_configs = normalize_preprocessing_configs(preprocessing_configs)
     preprocessing_name = str(best_row["preprocessing"])
-    steps = tuple(preprocessing_configs.get(preprocessing_name, tuple(str(best_row.get("preprocessing_steps", preprocessing_name)).split("+"))))
+    steps = _resolve_preprocessing_steps_for_row(best_row, preprocessing_configs)
 
     rule_variant = str(row_value(best_row, "rule_variant", row_value(best_row, "rule_for_refit", None)))
     if rule_variant in {"None", "nan"}:
@@ -1262,6 +1315,10 @@ def refit_empirical_cv_rule_row(
 def _attach_selected_metadata(df: pd.DataFrame, row: pd.Series, evaluation_split: str) -> pd.DataFrame:
     out = df.copy()
     for col in [
+        "candidate_id",
+        "model_candidate_id",
+        "candidate_source",
+        "candidate_sources",
         "selected_config_id",
         "matrix_family",
         "training_matrix_id",
@@ -1648,4 +1705,3 @@ def run_selected_simca_random_state_stability_full(
         pd.concat(pixel_error_parts, ignore_index=True, sort=False) if pixel_error_parts else pd.DataFrame(),
         pd.concat(error_parts, ignore_index=True, sort=False) if error_parts else pd.DataFrame(),
     )
-

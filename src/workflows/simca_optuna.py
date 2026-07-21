@@ -8,8 +8,7 @@ import pandas as pd
 import optuna
 
 from src.decision.labels import DEFAULT_NON_TARGET_LABEL, DEFAULT_TARGET_CLASS
-from src.spectra.preprocessing_configs import normalize_preprocessing_configs
-from src.utils import row_str
+from src.utils import parse_preprocessing_steps, row_str, row_value
 from src.workflows.simca_selection_utils import (
     detection_selection_score,
     ensure_candidate_columns,
@@ -21,11 +20,22 @@ from src.workflows.simca_selection_utils import (
     pareto_front_by_group,
 )
 from src.workflows.simca import (
+    _normalize_preprocessing_configs_by_family,
+    _preprocessing_configs_for_family,
     make_target_train_filters,
-    run_single_simca_pixel_projection,
     matrix_family_from_method,
+    run_single_simca_pixel_projection,
     run_simca_rule_variant_grid,
 )
+
+
+def _families_for_matrix_methods(matrix_methods: Sequence[str]) -> set[str]:
+    return {matrix_family_from_method(str(method)) for method in matrix_methods}
+
+
+def _preprocessing_param_name(matrix_family: str, matrix_methods: Sequence[str]) -> str:
+    families = _families_for_matrix_methods(matrix_methods)
+    return "preprocessing" if len(families) <= 1 else f"preprocessing_{matrix_family}"
 
 
 def _require_optuna():
@@ -72,7 +82,7 @@ def make_simca_optuna_objective(
 ):
     """Create an Optuna objective for the SIMCA pixel-projection workflow."""
     optuna = _require_optuna()
-    preprocessing_configs = normalize_preprocessing_configs(preprocessing_configs)
+    preprocessing_configs_by_family = _normalize_preprocessing_configs_by_family(preprocessing_configs)
 
     if train_filters is None:
         train_filters = make_target_train_filters(target_class=target_class, train_batches=[1, 2])
@@ -85,8 +95,18 @@ def make_simca_optuna_objective(
 
     def objective(trial):
         matrix_method = trial.suggest_categorical("matrix_method", list(matrix_methods))
-        preprocessing_name = trial.suggest_categorical("preprocessing", list(preprocessing_configs.keys()))
-        preprocessing_steps = tuple(preprocessing_configs[preprocessing_name])
+        matrix_family = matrix_family_from_method(matrix_method)
+        current_preprocessing_configs = _preprocessing_configs_for_family(
+            preprocessing_configs_by_family,
+            matrix_family,
+        )
+        if not current_preprocessing_configs:
+            raise optuna.exceptions.TrialPruned()
+        preprocessing_name = trial.suggest_categorical(
+            _preprocessing_param_name(matrix_family, matrix_methods),
+            list(current_preprocessing_configs.keys()),
+        )
+        preprocessing_steps = tuple(current_preprocessing_configs[preprocessing_name])
         rule_name = trial.suggest_categorical("rule", list(rule_names))
         n_components = trial.suggest_categorical("n_components", list(n_components_choices))
         alpha = trial.suggest_categorical("alpha", list(alpha_choices))
@@ -109,7 +129,6 @@ def make_simca_optuna_objective(
             trial.set_user_attr("m", np.nan)
             trial.set_user_attr("balanced_pixel_strategy", "not_applicable")
 
-        matrix_family = matrix_family_from_method(matrix_method)
         if matrix_method == "balanced_pixels":
             training_matrix_id = f"balanced_pixel_{balanced_pixel_strategy}_m{int(m)}"
             m_effective = int(m)
@@ -415,16 +434,25 @@ def refit_optuna_best_trial(
     non_target_label: str = DEFAULT_NON_TARGET_LABEL,
 ):
     """Refit the best Optuna configuration and keep full pixel/object outputs."""
-    preprocessing_configs = normalize_preprocessing_configs(preprocessing_configs)
     preprocessing_name = str(best_row["preprocessing"])
+    matrix_method = str(best_row["matrix_method"])
+    matrix_family = row_str(
+        best_row,
+        "matrix_family",
+        matrix_family_from_method(matrix_method),
+    )
+    preprocessing_configs_by_family = _normalize_preprocessing_configs_by_family(preprocessing_configs)
+    current_preprocessing_configs = _preprocessing_configs_for_family(
+        preprocessing_configs_by_family,
+        matrix_family,
+    )
     preprocessing_steps = tuple(
-        preprocessing_configs.get(
+        current_preprocessing_configs.get(
             preprocessing_name,
-            tuple(str(best_row.get("preprocessing_steps", preprocessing_name)).split("+")),
+            tuple(parse_preprocessing_steps(row_value(best_row, "preprocessing_steps", preprocessing_name))),
         )
     )
 
-    matrix_method = str(best_row["matrix_method"])
     m = int(best_row.get("m", 40)) if matrix_method == "balanced_pixels" and pd.notna(best_row.get("m", np.nan)) else 40
     target_class = row_str(best_row, "target_class", target_class)
     non_target_label = row_str(best_row, "non_target_label", non_target_label)
@@ -503,19 +531,46 @@ def optuna_trials_to_candidate_configs(
     if "state" in df.columns:
         df = df[df["state"].astype(str).eq("COMPLETE")].copy()
 
-    if "value" in df.columns:
+    has_multi_objective = {"value_0", "value_1", "value_2"}.issubset(df.columns)
+    if has_multi_objective:
+        df = df[pd.to_numeric(df["value_0"], errors="coerce").notna()].copy()
+    elif "value" in df.columns:
         df = df[pd.to_numeric(df["value"], errors="coerce").notna()].copy()
 
     if df.empty:
         return pd.DataFrame()
 
-    df["optuna_value"] = pd.to_numeric(df["value"], errors="coerce")
+    if has_multi_objective:
+        value_0 = pd.to_numeric(df["value_0"], errors="coerce")
+        value_1 = pd.to_numeric(df["value_1"], errors="coerce")
+        value_2 = pd.to_numeric(df["value_2"], errors="coerce")
+        df["optuna_value"] = -10.0 * value_0 - value_1 + value_2
+    else:
+        df["optuna_value"] = pd.to_numeric(df["value"], errors="coerce")
     df["optuna_trial_number"] = df["number"].astype(int)
 
     if "score" in df.columns:
         df["selection_score"] = pd.to_numeric(df["score"], errors="coerce")
     else:
         df["selection_score"] = df["optuna_value"]
+
+    def _fill_numeric(target: str, sources: Sequence[str]) -> None:
+        if target in df.columns and pd.to_numeric(df[target], errors="coerce").notna().any():
+            return
+        values = pd.Series(np.nan, index=df.index, dtype="float64")
+        for source in sources:
+            if source not in df.columns:
+                continue
+            source_values = pd.to_numeric(df[source], errors="coerce")
+            values = values.where(values.notna(), source_values)
+        df[target] = values
+
+    _fill_numeric("fn_rate", ("fn_rate_max", "objective_fn_rate_max", "value_0"))
+    _fill_numeric("fp_rate", ("fp_rate_mean", "objective_fp_rate_mean", "value_1"))
+    _fill_numeric(
+        "balanced_accuracy",
+        ("balanced_accuracy_mean", "objective_balanced_accuracy_mean", "value_2"),
+    )
 
     if "target_class" not in df.columns:
         df["target_class"] = target_class
@@ -579,6 +634,12 @@ def optuna_trials_to_candidate_configs(
     if "preprocessing_steps" not in df.columns:
         df["preprocessing_steps"] = df["preprocessing"].astype(str)
 
+    if "object_threshold" not in df.columns and "object_threshold_median" in df.columns:
+        df["object_threshold"] = pd.to_numeric(
+            df["object_threshold_median"],
+            errors="coerce",
+        )
+
     for col, default in {
         "sg_window_length": 11,
         "sg_polyorder": 2,
@@ -610,6 +671,7 @@ def optuna_trials_to_candidate_configs(
 
     df["selection_split"] = selection_split
     df["selection_strategy"] = selection_strategy
+    df["candidate_source"] = selection_strategy
 
     df = (
         df.sort_values(
@@ -651,8 +713,15 @@ def optuna_trials_to_candidate_configs(
         "selected_config_id",
         "selection_split",
         "selection_strategy",
+        "candidate_source",
         "optuna_trial_number",
         "optuna_value",
+        "value_0",
+        "value_1",
+        "value_2",
+        "objective_fn_rate_max",
+        "objective_fp_rate_mean",
+        "objective_balanced_accuracy_mean",
 
         "model_family",
         "matrix_family",
@@ -725,12 +794,20 @@ def suggest_simca_config(
     position_dilation_radius_choices,
 ):
     matrix_method = trial.suggest_categorical("matrix_method", list(matrix_methods))
+    matrix_family = matrix_family_from_method(matrix_method)
+    preprocessing_configs_by_family = _normalize_preprocessing_configs_by_family(preprocessing_configs)
+    current_preprocessing_configs = _preprocessing_configs_for_family(
+        preprocessing_configs_by_family,
+        matrix_family,
+    )
+    if not current_preprocessing_configs:
+        raise optuna.exceptions.TrialPruned()
 
     preprocessing_name = trial.suggest_categorical(
-        "preprocessing",
-        list(preprocessing_configs.keys()),
+        _preprocessing_param_name(matrix_family, matrix_methods),
+        list(current_preprocessing_configs.keys()),
     )
-    preprocessing_steps = tuple(preprocessing_configs[preprocessing_name])
+    preprocessing_steps = tuple(current_preprocessing_configs[preprocessing_name])
 
     rule_variant = trial.suggest_categorical("rule_variant", list(rule_variants))
     n_components = trial.suggest_categorical("n_components", list(n_components_choices))
@@ -765,7 +842,7 @@ def suggest_simca_config(
 
     return {
         "matrix_method": matrix_method,
-        "matrix_family": matrix_family_from_method(matrix_method),
+        "matrix_family": matrix_family,
         "preprocessing": preprocessing_name,
         "preprocessing_steps": preprocessing_steps,
         "rule_variant": rule_variant,
@@ -898,16 +975,21 @@ def make_optuna_binary_pareto_objective(
     rule_variants,
     object_thresholds,
     seeds=(0, 1, 2),
+    max_fn_rate=0.00,
+    max_fp_rate=None,
+    wavelengths=None,
+    target_class: str = DEFAULT_TARGET_CLASS,
+    non_target_label: str = DEFAULT_NON_TARGET_LABEL,
     **search_space_kwargs,
 ):
     optuna = _require_optuna()
-    preprocessing_configs = normalize_preprocessing_configs(preprocessing_configs)
+    preprocessing_configs_by_family = _normalize_preprocessing_configs_by_family(preprocessing_configs)
 
     def objective(trial):
         cfg = suggest_simca_config(
             trial=trial,
             matrix_methods=matrix_methods,
-            preprocessing_configs=preprocessing_configs,
+            preprocessing_configs=preprocessing_configs_by_family,
             rule_variants=rule_variants,
             **search_space_kwargs,
         )
@@ -921,6 +1003,11 @@ def make_optuna_binary_pareto_objective(
             preprocessing_configs=preprocessing_configs,
             object_thresholds=object_thresholds,
             seeds=seeds,
+            max_fn_rate=max_fn_rate,
+            max_fp_rate=max_fp_rate,
+            wavelengths=wavelengths,
+            target_class=target_class,
+            non_target_label=non_target_label,
         )
 
         for key, value in cfg.items():
