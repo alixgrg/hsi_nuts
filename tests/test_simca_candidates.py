@@ -121,6 +121,33 @@ def test_deduplicate_candidates_merges_sources_and_counts_duplicates():
     assert int(first["n_duplicate_rows"]) == 2
 
 
+def test_deduplicate_candidates_drops_previous_provenance_counters_before_merge():
+    df = pd.DataFrame(
+        [
+            _base_candidate(
+                candidate_source="grid",
+                candidate_sources="grid",
+                n_candidate_sources=99,
+                n_duplicate_rows=99,
+            ),
+            _base_candidate(
+                candidate_source="optuna",
+                candidate_sources="optuna",
+                n_candidate_sources=99,
+                n_duplicate_rows=99,
+            ),
+        ]
+    )
+
+    deduped = deduplicate_simca_candidates(df)
+
+    assert len(deduped) == 1
+    assert not any(col.endswith("_x") or col.endswith("_y") for col in deduped.columns)
+    assert deduped.loc[0, "candidate_sources"] == "grid,optuna"
+    assert int(deduped.loc[0, "n_candidate_sources"]) == 2
+    assert int(deduped.loc[0, "n_duplicate_rows"]) == 2
+
+
 def test_deduplicate_refit_configs_keeps_first_and_reports_dropped_rows():
     df = pd.DataFrame(
         [

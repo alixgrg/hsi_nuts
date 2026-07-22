@@ -627,6 +627,106 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
         "validate_simca_table_columns",
     ),
 
+    # ------------------------------------------------------------------
+    # SIMCA robustness diagnostics
+    # ------------------------------------------------------------------
+    "validate_no_pure_test_inputs": (
+        "src.workflows.simca_robustness",
+        "validate_no_pure_test_inputs",
+    ),
+    "validate_simca_robustness_inputs": (
+        "src.workflows.simca_robustness",
+        "validate_simca_robustness_inputs",
+    ),
+    "select_track_primary_or_available_metrics": (
+        "src.workflows.simca_robustness",
+        "select_track_primary_or_available_metrics",
+    ),
+    "add_simca_robustness_scores": (
+        "src.workflows.simca_robustness",
+        "add_simca_robustness_scores",
+    ),
+    "build_pareto_diagnostics": (
+        "src.workflows.simca_robustness",
+        "build_pareto_diagnostics",
+    ),
+    "build_ablation_diagnostics": (
+        "src.workflows.simca_robustness",
+        "build_ablation_diagnostics",
+    ),
+    "build_random_state_stability_panel": (
+        "src.workflows.simca_robustness",
+        "build_random_state_stability_panel",
+    ),
+    "summarize_random_state_stability_metrics": (
+        "src.workflows.simca_robustness",
+        "summarize_random_state_stability_metrics",
+    ),
+    "build_border_core_skip_table": (
+        "src.workflows.simca_robustness",
+        "build_border_core_skip_table",
+    ),
+    "build_border_core_diagnostics": (
+        "src.workflows.simca_robustness",
+        "build_border_core_diagnostics",
+    ),
+    "build_duplicated_candidate_review": (
+        "src.workflows.simca_robustness",
+        "build_duplicated_candidate_review",
+    ),
+    "summarize_duplicated_candidate_review": (
+        "src.workflows.simca_robustness",
+        "summarize_duplicated_candidate_review",
+    ),
+    "build_track_scoring_table": (
+        "src.workflows.simca_robustness",
+        "build_track_scoring_table",
+    ),
+
+    # ------------------------------------------------------------------
+    # SIMCA table schemas
+    # ------------------------------------------------------------------
+    "SIMCA_TABLE_COLUMNS": (
+        "src.workflows.simca_tables",
+        "SIMCA_TABLE_COLUMNS",
+    ),
+    "TABLE_KIND_BY_FILE_NAME": (
+        "src.workflows.simca_tables",
+        "TABLE_KIND_BY_FILE_NAME",
+    ),
+    "TABLE_KIND_BY_FILE_SUFFIX": (
+        "src.workflows.simca_tables",
+        "TABLE_KIND_BY_FILE_SUFFIX",
+    ),
+    "canonicalize_simca_columns": (
+        "src.workflows.simca_tables",
+        "canonicalize_simca_columns",
+    ),
+    "resolve_merge_suffix_columns": (
+        "src.workflows.simca_tables",
+        "resolve_merge_suffix_columns",
+    ),
+    "drop_all_na_columns": (
+        "src.workflows.simca_tables",
+        "drop_all_na_columns",
+    ),
+    "compact_simca_table": (
+        "src.workflows.simca_tables",
+        "compact_simca_table",
+    ),
+    "compact_simca_table_for_path": (
+        "src.workflows.simca_tables",
+        "compact_simca_table_for_path",
+    ),
+    "schema_diagnostics": (
+        "src.workflows.simca_tables",
+        "schema_diagnostics",
+    ),
+    "build_schema_manifest": (
+        "src.workflows.simca_tables",
+        "build_schema_manifest",
+    ),
+
     # Backward-compatible aliases for older notebooks.
     # Prefer add_detection_selection_score / sort_detection_selection in new notebooks.
     "add_simca_selection_score": (

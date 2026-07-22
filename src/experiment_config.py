@@ -245,6 +245,71 @@ SIMCA_FINAL_MODEL_SELECTION_REQUIRED_COLUMNS = (
 )
 
 
+# SIMCA notebook 05 robustness diagnostics
+SIMCA_ROBUSTNESS_RANDOM_STATES = (0, 1, 2, 3, 4, 5, 10, 20, 42, 100)
+SIMCA_ROBUSTNESS_MAX_STABILITY_CANDIDATES_PER_TRACK = 12
+SIMCA_ROBUSTNESS_PREFER_BALANCED_PIXELS_FOR_STABILITY = True
+SIMCA_ROBUSTNESS_BORDER_WIDTHS = (0, 1, 2, 3, 4)
+SIMCA_ROBUSTNESS_MIN_CORE_PIXELS = 20
+SIMCA_ROBUSTNESS_PARETO_EPSILON = 1e-12
+
+SIMCA_ROBUSTNESS_WARNING_THRESHOLDS = {
+    "fn_rate": 0.05,
+    "fp_rate": 0.20,
+    "balanced_accuracy": 0.80,
+    "target_miss_rate": 0.05,
+    "non_target_false_accept_rate": 0.20,
+    "uncertain_rate": 0.25,
+    "coverage_rate": 0.75,
+    "decided_balanced_accuracy": 0.80,
+    "std_fn_rate": 0.03,
+    "std_fp_rate": 0.05,
+    "std_balanced_accuracy": 0.03,
+}
+
+SIMCA_ROBUSTNESS_2WAY_SCORE_WEIGHTS = {
+    "fn_rate": -10.0,
+    "fp_rate": -2.0,
+    "balanced_accuracy": 2.0,
+}
+
+SIMCA_ROBUSTNESS_3WAY_SCORE_WEIGHTS = {
+    "target_miss_rate": -10.0,
+    "non_target_false_accept_rate": -2.0,
+    "uncertain_rate": -0.75,
+    "coverage_rate": 1.0,
+    "screening_sensitivity": 1.0,
+    "decided_balanced_accuracy": 2.0,
+}
+
+SIMCA_ROBUSTNESS_ABLATION_FACTOR_COLUMNS = (
+    "matrix_method",
+    "training_matrix_id",
+    "preprocessing",
+    "rule_for_refit",
+    "limit_source",
+    "n_components",
+    "object_threshold",
+    "sg_window_length",
+    "sg_polyorder",
+    "position_dilation_radius",
+    "balanced_pixel_strategy_effective",
+)
+
+SIMCA_ROBUSTNESS_2WAY_PARETO_MINIMIZE_COLUMNS = ("fn_rate", "fp_rate")
+SIMCA_ROBUSTNESS_2WAY_PARETO_MAXIMIZE_COLUMNS = ("balanced_accuracy",)
+SIMCA_ROBUSTNESS_3WAY_PARETO_MINIMIZE_COLUMNS = (
+    "target_miss_rate",
+    "non_target_false_accept_rate",
+    "uncertain_rate",
+)
+SIMCA_ROBUSTNESS_3WAY_PARETO_MAXIMIZE_COLUMNS = (
+    "coverage_rate",
+    "screening_sensitivity",
+    "decided_balanced_accuracy",
+)
+
+
 # PCA shortlist policy
 MAX_PCA_PREPROCESSINGS_PER_FAMILY = 5
 

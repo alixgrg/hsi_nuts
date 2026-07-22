@@ -53,6 +53,67 @@ Candidate and evaluation output schemas are documented by:
 
 The PCA shortlist from notebook 03 must remain scoped by matrix family. Use `build_pca_preprocessing_configs_by_matrix_family(...)` before running grid search or Optuna. This prevents preprocessings selected for `object_matrix` from being applied to `pixel_matrix`, and vice versa, unless the preprocessing appears in both PCA shortlist families.
 
+## SIMCA Output Table Policy
+
+SIMCA notebooks 04A to 05 write compact result tables through `src.workflows.simca_tables`.
+
+The table policy is:
+
+- resolve pandas merge suffixes such as `_x` and `_y`;
+- normalize common aliases such as `non_target_class` to `non_target_label`;
+- preserve and, when possible, re-infer `matrix_family` from `matrix_method`, `training_matrix_id`, or `selection_track`;
+- keep model-defining parameters in their effective form, for example `m_effective` and `balanced_pixel_strategy_effective`;
+- drop columns that are entirely non-applicable for a given output;
+- preserve stable empty schemas for known empty support tables, such as error logs and optional duplicate-refit outputs.
+
+Scientific metric tables have stricter schemas than detailed object or pixel tables. Detailed projection tables may keep additional diagnostic columns because they are consumed by border/core and downstream visual checks.
+
+Use:
+
+```python
+from src.workflows.simca_tables import compact_simca_table_for_path
+
+save_parquet(compact_simca_table_for_path(df, output_path), output_path)
+```
+
+for SIMCA result files. When adding a new SIMCA output file, register its file name or suffix in `TABLE_KIND_BY_FILE_NAME` or `TABLE_KIND_BY_FILE_SUFFIX` if the table should have a strict schema. Leave it unregistered only when all non-empty columns are intentionally diagnostic payload.
+
+Notebook 04C can skip the expensive validation refit and reuse saved validation parquet outputs with:
+
+```python
+RUN_REFIT = False
+USE_EXISTING_VALIDATION_REFIT_OUTPUTS = True
+```
+
+This mode still rebuilds the lightweight candidate and duplicate panels, then loads the existing validation metric outputs before optional duplicated-candidate refits. To run only the duplicated-candidate check after a previous full 04C run, use:
+
+```python
+RUN_REFIT = False
+USE_EXISTING_VALIDATION_REFIT_OUTPUTS = True
+REFIT_DUPLICATED = True
+```
+
+When `REFIT_DUPLICATED = False`, notebook 04C no longer overwrites existing duplicated-refit parquet files with empty tables.
+
+## SIMCA Robustness Review Policy
+
+Notebook 05 uses the following project-level settings from `src/experiment_config.py`:
+
+- `SIMCA_ROBUSTNESS_RANDOM_STATES`: seeds used by the optional random-state stability refit.
+- `SIMCA_ROBUSTNESS_MAX_STABILITY_CANDIDATES_PER_TRACK`: maximum candidates per track sent to the optional seed-stability panel.
+- `SIMCA_ROBUSTNESS_PREFER_BALANCED_PIXELS_FOR_STABILITY`: prioritizes `balanced_pixels` candidates when the stability panel is limited.
+- `SIMCA_ROBUSTNESS_BORDER_WIDTHS`: border widths tested when detailed pixel tables are available.
+- `SIMCA_ROBUSTNESS_MIN_CORE_PIXELS`: minimum core pixels required before a core-only object decision is trusted.
+- `SIMCA_ROBUSTNESS_PARETO_EPSILON`: numerical tolerance used by Pareto dominance checks.
+- `SIMCA_ROBUSTNESS_WARNING_THRESHOLDS`: warning thresholds used to create notebook-05 flags.
+- `SIMCA_ROBUSTNESS_2WAY_SCORE_WEIGHTS`: diagnostic score weights for 2-way metrics.
+- `SIMCA_ROBUSTNESS_3WAY_SCORE_WEIGHTS`: diagnostic score weights for 3-way metrics.
+- `SIMCA_ROBUSTNESS_ABLATION_FACTOR_COLUMNS`: hyperparameters summarized in the ablation diagnostics.
+- `SIMCA_ROBUSTNESS_2WAY_PARETO_MINIMIZE_COLUMNS` and `SIMCA_ROBUSTNESS_2WAY_PARETO_MAXIMIZE_COLUMNS`: 2-way Pareto objectives.
+- `SIMCA_ROBUSTNESS_3WAY_PARETO_MINIMIZE_COLUMNS` and `SIMCA_ROBUSTNESS_3WAY_PARETO_MAXIMIZE_COLUMNS`: 3-way Pareto objectives.
+
+Notebook 05 is a validation robustness review. It must not consume pure-test outputs and must not perform final model selection. Its outputs should be interpreted as diagnostic evidence for the later pure-test and final multi-model selection stages.
+
 ## Matrix And Pixel Sampling Defaults
 
 - `M_BALANCED_PIXELS`: number of sampled pixels per object for balanced pixel matrices.

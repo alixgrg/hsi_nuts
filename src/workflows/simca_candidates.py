@@ -348,7 +348,14 @@ def deduplicate_simca_candidates(
         )
 
     summary_df = pd.DataFrame(summary_rows)
-    first_rows = out.drop_duplicates(id_col, keep="first").drop(columns=[sources_col])
+    first_rows = out.drop_duplicates(id_col, keep="first").drop(
+        columns=[
+            sources_col,
+            "n_candidate_sources",
+            "n_duplicate_rows",
+        ],
+        errors="ignore",
+    )
     return first_rows.merge(summary_df, on=id_col, how="left").reset_index(drop=True)
 
 
