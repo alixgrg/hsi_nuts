@@ -28,6 +28,18 @@ SIMCA_VALIDATION_BATCHES = [3]
 PURE_TEST_TRAIN_BATCHES = [1, 2, 3]
 PURE_TEST_BATCHES = [4]
 MIXTURE_FINAL_TRAIN_BATCHES = [1, 2, 3, 4]
+MIXTURE_APPLICATION_EVALUATION_STAGE = "mixture_application"
+MIXTURE_APPLICATION_BATCH_SIZE = 10
+MIXTURE_APPLICATION_MAX_MODELS_PER_TRACK = None
+MIXTURE_APPLICATION_SAVE_BATCH_METRIC_TABLES = True
+MIXTURE_APPLICATION_SAVE_BATCH_OBJECT_TABLES = False
+MIXTURE_APPLICATION_SAVE_BATCH_PIXEL_TABLES = False
+MIXTURE_APPLICATION_SAVE_BATCH_3WAY_OBJECT_TABLES = False
+MIXTURE_APPLICATION_SAVE_COMBINED_OBJECT_TABLES = True
+MIXTURE_APPLICATION_SAVE_COMBINED_PIXEL_TABLES = True
+MIXTURE_APPLICATION_SAVE_COMBINED_3WAY_OBJECT_TABLES = True
+MIXTURE_APPLICATION_KEEP_ONLY_ASSIGNED_TRACK_METRICS = True
+MIXTURE_APPLICATION_DIAGNOSTIC_TOP_IMAGES = 3
 
 
 # Main search-grid reduction agreed after the audit
@@ -239,10 +251,57 @@ SIMCA_FINAL_MODEL_SELECTION_REQUIRED_COLUMNS = (
     "selection_track",
     "matrix_family",
     "decision_mode",
-    "rank",
-    "selection_score",
+    "final_rank_in_track",
+    "pareto_tier",
     "selection_reason",
 )
+
+
+# SIMCA notebook 06B final multi-model selection
+# None keeps every model that survives both Pareto filters. Set an integer only
+# when an explicit display/export cap is desired.
+SIMCA_FINAL_TOP_N_PER_TRACK = None
+SIMCA_FINAL_APPLY_DIVERSITY = False
+SIMCA_FINAL_DIVERSITY_COLUMNS = (
+    "preprocessing",
+    "rule_for_refit",
+    "balanced_pixel_strategy_effective",
+)
+SIMCA_FINAL_DEDUPLICATE_ACROSS_TRACKS = False
+SIMCA_FINAL_CROSS_TRACK_DEDUP_COL = "selected_config_id"
+
+SIMCA_FINAL_2WAY_PARETO_MINIMIZE_COLUMNS = ("fn_rate", "fp_rate")
+SIMCA_FINAL_3WAY_PARETO_MINIMIZE_COLUMNS = (
+    "target_miss_rate",
+    "non_target_false_accept_rate",
+    "uncertain_rate",
+)
+SIMCA_FINAL_TIEBREAK_2WAY_COLUMNS = (
+    "fn_rate",
+    "fp_rate",
+    "balanced_accuracy",
+    "selected_config_id",
+)
+SIMCA_FINAL_TIEBREAK_3WAY_COLUMNS = (
+    "target_miss_rate",
+    "non_target_false_accept_rate",
+    "uncertain_rate",
+    "coverage_rate",
+    "decided_balanced_accuracy",
+    "selected_config_id",
+)
+
+SIMCA_FINAL_APPLY_PREVIOUS_FLAG_FILTER = False
+SIMCA_FINAL_PREVIOUS_FLAG_COLUMNS = (
+    "review_flags",
+    "robustness_flags",
+    "stability_flags",
+)
+SIMCA_FINAL_PREVIOUS_FLAGS_TO_FILTER = ()
+SIMCA_FINAL_EXCLUDE_PURE_TEST_ERRORS = True
+SIMCA_FINAL_FN_RATE_MAX = 0.5
+SIMCA_FINAL_FP_RATE_MAX = 0.9
+SIMCA_FINAL_UNCERTAIN_RATE_MAX = 0.6
 
 
 # SIMCA notebook 05 robustness diagnostics

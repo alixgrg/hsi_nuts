@@ -42,18 +42,41 @@ from src.decision.truth import (
     target_truth_map_for_image,
     union_object_masks,
 )
-from src.decision.uncertainty import (
-    add_three_way_object_decision,
-    evaluate_three_way_object_decision,
-    summarize_three_way_decision,
-    three_way_object_threshold_grid,
-    three_way_object_threshold_grid_by_group,
-    select_three_way_threshold_one_config,
-    select_three_way_threshold_pareto,
-    calibrate_three_way_thresholds_by_config,
-    apply_three_way_thresholds_by_config,
-    evaluate_three_way_by_config,
-)
+_LAZY_EXPORTS = {
+    "add_three_way_object_decision": ("src.decision.uncertainty", "add_three_way_object_decision"),
+    "evaluate_three_way_object_decision": ("src.decision.uncertainty", "evaluate_three_way_object_decision"),
+    "summarize_three_way_decision": ("src.decision.uncertainty", "summarize_three_way_decision"),
+    "three_way_object_threshold_grid": ("src.decision.uncertainty", "three_way_object_threshold_grid"),
+    "three_way_object_threshold_grid_by_group": (
+        "src.decision.uncertainty",
+        "three_way_object_threshold_grid_by_group",
+    ),
+    "select_three_way_threshold_one_config": (
+        "src.decision.uncertainty",
+        "select_three_way_threshold_one_config",
+    ),
+    "select_three_way_threshold_pareto": ("src.decision.uncertainty", "select_three_way_threshold_pareto"),
+    "calibrate_three_way_thresholds_by_config": (
+        "src.decision.uncertainty",
+        "calibrate_three_way_thresholds_by_config",
+    ),
+    "apply_three_way_thresholds_by_config": (
+        "src.decision.uncertainty",
+        "apply_three_way_thresholds_by_config",
+    ),
+    "evaluate_three_way_by_config": ("src.decision.uncertainty", "evaluate_three_way_by_config"),
+}
+
+
+def __getattr__(name):
+    if name in _LAZY_EXPORTS:
+        from importlib import import_module
+
+        module_name, attr_name = _LAZY_EXPORTS[name]
+        value = getattr(import_module(module_name), attr_name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     "DEFAULT_NON_TARGET_LABEL",

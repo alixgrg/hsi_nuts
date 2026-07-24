@@ -47,6 +47,7 @@ DEFAULT_PREPROCESSING_CONFIGS: dict[str, tuple[str, ...]] = {
     "sg_smooth": PREPROCESSING_ALIASES["sg_smooth"],
     "sg_d1": PREPROCESSING_ALIASES["sg_d1"],
     "sg_d2": PREPROCESSING_ALIASES["sg_d2"],
+    "vector_norm": PREPROCESSING_ALIASES["vector_norm"],
 
     "absorbance_snv": PREPROCESSING_ALIASES["absorbance_snv"],
     "absorbance_msc": PREPROCESSING_ALIASES["absorbance_msc"],
@@ -67,6 +68,7 @@ DEFAULT_PREPROCESSING_CONFIGS: dict[str, tuple[str, ...]] = {
 SIMCA_SEARCH_PREPROCESSING_CONFIGS: dict[str, tuple[str, ...]] = {
     "snv": PREPROCESSING_ALIASES["snv"],
     "absorbance": PREPROCESSING_ALIASES["absorbance"],
+    "vector_norm": PREPROCESSING_ALIASES["vector_norm"],
     "absorbance_snv": PREPROCESSING_ALIASES["absorbance_snv"],
     "absorbance_sg_smooth": PREPROCESSING_ALIASES["absorbance_sg_smooth"],
     "absorbance_sg_d1": PREPROCESSING_ALIASES["absorbance_sg_d1"],

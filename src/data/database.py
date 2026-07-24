@@ -150,8 +150,6 @@ def infer_object_nut_type_from_metadata(meta):
     return "unknown"
 
 
-_infer_split_from_metadata = infer_split_from_metadata
-_infer_object_nut_type_from_metadata = infer_object_nut_type_from_metadata
 
 def _unpack_segmentation_result(seg_result):
     """

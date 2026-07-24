@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
+
+from src.utils import save_parquet
 
 
 SIMCA_ID_COLUMNS = (
@@ -256,6 +259,29 @@ SIMCA_PIXEL_ERROR_SUMMARY_COLUMNS = (
     + SIMCA_2WAY_METRIC_COLUMNS
 )
 
+SIMCA_IMAGE_2WAY_DIAGNOSTIC_COLUMNS = (
+    SIMCA_ID_COLUMNS
+    + SIMCA_TRACK_COLUMNS
+    + SIMCA_TARGET_COLUMNS
+    + SIMCA_CONFIG_COLUMNS
+    + (
+        "source_image",
+    )
+    + SIMCA_2WAY_METRIC_COLUMNS
+    + SIMCA_PIXEL_METRIC_COLUMNS
+)
+
+SIMCA_IMAGE_3WAY_DIAGNOSTIC_COLUMNS = (
+    SIMCA_ID_COLUMNS
+    + SIMCA_TRACK_COLUMNS
+    + SIMCA_TARGET_COLUMNS
+    + SIMCA_CONFIG_COLUMNS
+    + (
+        "source_image",
+    )
+    + SIMCA_3WAY_METRIC_COLUMNS
+)
+
 SIMCA_BATCH_MANIFEST_COLUMNS = (
     "batch_id",
     "row_start",
@@ -281,6 +307,300 @@ SIMCA_BATCH_MANIFEST_COLUMNS = (
     "objects_path",
     "pixels_path",
     "objects_3way_path",
+)
+
+SIMCA_FINAL_SELECTION_ID_COLUMNS = (
+    "selected_config_id",
+    "candidate_id",
+    "selection_track",
+    "matrix_family",
+    "decision_mode",
+    "metric_level",
+)
+
+SIMCA_FINAL_SELECTION_CONTEXT_COLUMNS = (
+    "matrix_method",
+    "preprocessing",
+    "rule_for_refit",
+    "n_components",
+    "alpha",
+    "object_threshold",
+    "balanced_pixel_strategy_effective",
+)
+
+SIMCA_FINAL_SELECTION_RATE_COLUMNS = (
+    "n",
+    "fn_rate",
+    "fp_rate",
+    "balanced_accuracy",
+    "target_miss_rate",
+    "non_target_false_accept_rate",
+    "uncertain_rate",
+    "coverage_rate",
+    "decided_balanced_accuracy",
+)
+
+SIMCA_FINAL_SELECTED_MODEL_COLUMNS = (
+    SIMCA_FINAL_SELECTION_ID_COLUMNS
+    + SIMCA_FINAL_SELECTION_CONTEXT_COLUMNS
+    + SIMCA_FINAL_SELECTION_RATE_COLUMNS
+    + (
+        "final_rank_in_track",
+        "pareto_tier",
+        "pareto_rank_in_track",
+        "is_pareto_front",
+        "selection_reason",
+        "previous_flags",
+        "selection_status",
+        "assigned_selection_track",
+    )
+)
+
+SIMCA_FINAL_SELECTION_POOL_COLUMNS = (
+    SIMCA_FINAL_SELECTED_MODEL_COLUMNS
+    + (
+        "is_final_selected",
+        "preselection_status",
+        "filter_reason",
+        "previous_flag_count",
+        "previous_flag_filter_applied",
+        "filtered_by_previous_flags",
+        "has_pure_test_error",
+        "pure_test_error",
+        "validation_metric_level",
+        "diversity_rule_applied",
+        "diversity_reason",
+        "cross_track_deduplication_status",
+    )
+)
+
+SIMCA_FINAL_SELECTION_SUMMARY_COLUMNS = (
+    "selection_track",
+    "selection_status",
+    "preselection_status",
+    "pareto_tier",
+    "n_rows",
+    "n_selected",
+)
+
+SIMCA_MIXTURE_SELECTED_CONFIG_COLUMNS = (
+    SIMCA_FINAL_SELECTED_MODEL_COLUMNS
+    + (
+        "target_class",
+        "non_target_label",
+        "model_family",
+        "training_matrix_id",
+        "preprocessing_steps",
+        "rule",
+        "rule_variant",
+        "selected_rule_name",
+        "limit_source",
+        "m_effective",
+        "sg_window_length",
+        "sg_polyorder",
+        "position_dilation_radius",
+        "three_way_lower_threshold",
+        "three_way_upper_threshold",
+    )
+)
+
+SIMCA_MIXTURE_2WAY_METRIC_COLUMNS = tuple(
+    col for col in SIMCA_2WAY_METRIC_COLUMNS if col != "selection_score"
+)
+
+SIMCA_MIXTURE_3WAY_METRIC_COLUMNS = tuple(
+    col for col in SIMCA_3WAY_METRIC_COLUMNS if col not in {"selection_score", "three_way_score"}
+)
+
+SIMCA_MIXTURE_METRIC_COLUMNS = (
+    (
+        "selected_config_id",
+        "candidate_id",
+        "assigned_selection_track",
+        "final_rank_in_track",
+        "selection_track",
+        "matrix_family",
+        "decision_mode",
+        "metric_level",
+        "evaluation_stage",
+        "evaluation_split",
+        "target_class",
+        "non_target_label",
+        "matrix_method",
+        "training_matrix_id",
+        "preprocessing",
+        "rule_for_refit",
+        "n_components",
+        "alpha",
+        "object_threshold",
+        "balanced_pixel_strategy_effective",
+    )
+    + SIMCA_MIXTURE_2WAY_METRIC_COLUMNS
+    + SIMCA_PIXEL_METRIC_COLUMNS
+    + SIMCA_MIXTURE_3WAY_METRIC_COLUMNS
+    + (
+        "three_way_lower_threshold",
+        "three_way_upper_threshold",
+    )
+)
+
+SIMCA_MIXTURE_IMAGE_DIAGNOSTIC_COLUMNS = (
+    SIMCA_MIXTURE_METRIC_COLUMNS
+    + (
+        "source_image",
+        "n_true_target_objects",
+        "n_predicted_target_objects",
+    )
+)
+
+SIMCA_MIXTURE_OBJECT_COLUMNS = (
+    (
+        "selected_config_id",
+        "candidate_id",
+        "assigned_selection_track",
+        "selection_track",
+        "matrix_family",
+        "decision_mode",
+        "source_image",
+        "object_id",
+        "target_class",
+        "non_target_label",
+        "matrix_method",
+        "preprocessing",
+        "rule_for_refit",
+        "n_components",
+        "alpha",
+        "object_threshold",
+        "true_label_object",
+        "predicted_label_object",
+        "true_peanut_object",
+        "predicted_peanut_object",
+        "peanut_pixel_ratio",
+        "true_peanut_pixel_ratio",
+        "truth_available_ratio",
+        "decision_3way",
+        "three_way_confidence",
+        "three_way_margin",
+        "area_pixels",
+        "centroid_row",
+        "centroid_col",
+        "H_mean",
+        "Q_mean",
+        "H_norm_limit_mean",
+        "Q_norm_limit_mean",
+        "rule_statistic_mean",
+        "rule_limit_mean",
+    )
+)
+
+SIMCA_MIXTURE_PIXEL_COLUMNS = (
+    (
+        "selected_config_id",
+        "candidate_id",
+        "assigned_selection_track",
+        "selection_track",
+        "matrix_family",
+        "decision_mode",
+        "source_image",
+        "object_id",
+        "row",
+        "col",
+        "target_class",
+        "non_target_label",
+        "true_peanut_pixel",
+        "predicted_peanut_pixel",
+        "truth_available",
+        "predicted_label_pixel",
+        "decision_3way",
+        "H",
+        "Q",
+        "H_norm_limit",
+        "Q_norm_limit",
+        "rule_statistic",
+        "rule_limit",
+    )
+)
+
+SIMCA_MIXTURE_SUMMARY_COLUMNS = (
+    "selection_track",
+    "assigned_selection_track",
+    "matrix_family",
+    "decision_mode",
+    "metric_level",
+    "n_models",
+    "n_rows",
+    "best_fn_rate",
+    "best_fp_rate",
+    "best_balanced_accuracy",
+    "median_fn_rate",
+    "median_fp_rate",
+    "median_balanced_accuracy",
+    "best_target_miss_rate",
+    "best_non_target_false_accept_rate",
+    "best_uncertain_rate",
+    "median_target_miss_rate",
+    "median_non_target_false_accept_rate",
+    "median_uncertain_rate",
+)
+
+SIMCA_MIXTURE_PROTOCOL_COLUMNS = (
+    "notebook",
+    "results_tag",
+    "input_06b_dir",
+    "input_06a_dir",
+    "input_04c_dir",
+    "db_h5_path",
+    "pca_selected_preprocessings_path",
+    "evaluation_stage",
+    "target_class",
+    "non_target_label",
+    "train_batches",
+    "projection_filters",
+    "batch_size",
+    "run_mixture_refit",
+    "use_existing_mixture_outputs",
+    "keep_only_assigned_track_metrics",
+    "save_combined_object_tables",
+    "save_combined_pixel_tables",
+    "save_combined_3way_object_tables",
+    "n_selected_models",
+    "n_restored_configs",
+    "n_2way_object_metrics",
+    "n_2way_pixel_metrics",
+    "n_3way_object_metrics",
+    "n_metrics_long",
+    "n_object_image_diagnostics",
+    "n_pixel_image_diagnostics",
+    "n_3way_object_image_diagnostics",
+    "n_errors",
+)
+
+SIMCA_FINAL_SELECTION_GUARDRAIL_COLUMNS = (
+    "check_name",
+    "passed",
+    "status",
+    "severity",
+    "details",
+    "n_records",
+)
+
+SIMCA_FINAL_SELECTION_PROTOCOL_COLUMNS = (
+    "notebook",
+    "results_tag",
+    "input_05_dir",
+    "input_06a_dir",
+    "top_n_final_per_track",
+    "apply_diversity",
+    "diversity_columns",
+    "deduplicate_across_tracks",
+    "cross_track_dedup_col",
+    "apply_previous_flag_filter",
+    "previous_flags_to_filter",
+    "exclude_pure_test_errors",
+    "n_pool_rows",
+    "n_candidate_rows",
+    "n_selected_rows",
+    "n_selected_tracks",
 )
 
 SIMCA_PARETO_AUDIT_COLUMNS = (
@@ -544,7 +864,22 @@ SIMCA_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
     "border_core_status": SIMCA_BORDER_CORE_STATUS_COLUMNS,
     "simca_error_log": SIMCA_ERROR_COLUMNS,
     "simca_pixel_error_summary": SIMCA_PIXEL_ERROR_SUMMARY_COLUMNS,
+    "simca_image_2way_diagnostics": SIMCA_IMAGE_2WAY_DIAGNOSTIC_COLUMNS,
+    "simca_image_3way_diagnostics": SIMCA_IMAGE_3WAY_DIAGNOSTIC_COLUMNS,
     "simca_batch_manifest": SIMCA_BATCH_MANIFEST_COLUMNS,
+    "final_selection_pool": SIMCA_FINAL_SELECTION_POOL_COLUMNS,
+    "final_selected_models": SIMCA_FINAL_SELECTED_MODEL_COLUMNS,
+    "final_selection_summary": SIMCA_FINAL_SELECTION_SUMMARY_COLUMNS,
+    "final_selection_guardrails": SIMCA_FINAL_SELECTION_GUARDRAIL_COLUMNS,
+    "final_selection_protocol": SIMCA_FINAL_SELECTION_PROTOCOL_COLUMNS,
+    "mixture_selected_configs": SIMCA_MIXTURE_SELECTED_CONFIG_COLUMNS,
+    "mixture_metrics": SIMCA_MIXTURE_METRIC_COLUMNS,
+    "mixture_image_diagnostics": SIMCA_MIXTURE_IMAGE_DIAGNOSTIC_COLUMNS,
+    "mixture_objects": SIMCA_MIXTURE_OBJECT_COLUMNS,
+    "mixture_pixels": SIMCA_MIXTURE_PIXEL_COLUMNS,
+    "mixture_summary": SIMCA_MIXTURE_SUMMARY_COLUMNS,
+    "mixture_guardrails": SIMCA_FINAL_SELECTION_GUARDRAIL_COLUMNS,
+    "mixture_protocol": SIMCA_MIXTURE_PROTOCOL_COLUMNS,
     "pareto_audit": SIMCA_PARETO_AUDIT_COLUMNS,
     "ablation_diagnostics": SIMCA_ABLATION_COLUMNS,
     "three_way_threshold_grid": SIMCA_THREE_WAY_THRESHOLD_COLUMNS,
@@ -598,6 +933,39 @@ TABLE_KIND_BY_FILE_NAME: dict[str, str] = {
     "duplicated_candidate_summary.parquet": "duplicated_candidate_summary",
     "border_core_diagnostics.parquet": "border_core_diagnostics",
     "border_core_status.parquet": "border_core_status",
+    "pure_test_candidate_panel.parquet": "candidate_panel",
+    "pure_test_2way_object_metrics.parquet": "simca_2way_metrics",
+    "pure_test_2way_pixel_metrics.parquet": "simca_2way_pixel_metrics",
+    "pure_test_3way_object_metrics.parquet": "simca_3way_metrics",
+    "pure_test_metrics_long.parquet": "simca_metrics_review",
+    "pure_test_object_diagnostics_by_image.parquet": "simca_image_2way_diagnostics",
+    "pure_test_pixel_diagnostics_by_image.parquet": "simca_image_2way_diagnostics",
+    "pure_test_3way_object_diagnostics_by_image.parquet": "simca_image_3way_diagnostics",
+    "pure_test_pixel_errors_by_image.parquet": "simca_pixel_error_summary",
+    "pure_test_errors.parquet": "simca_error_log",
+    "pure_test_batch_manifest.parquet": "simca_batch_manifest",
+    "final_selection_pool.parquet": "final_selection_pool",
+    "final_selected_models.parquet": "final_selected_models",
+    "final_selection_summary.parquet": "final_selection_summary",
+    "final_selection_guardrails.parquet": "final_selection_guardrails",
+    "final_selection_protocol.parquet": "final_selection_protocol",
+    "mixture_selected_configs.parquet": "mixture_selected_configs",
+    "mixture_2way_object_metrics.parquet": "mixture_metrics",
+    "mixture_2way_pixel_metrics.parquet": "mixture_metrics",
+    "mixture_3way_object_metrics.parquet": "mixture_metrics",
+    "mixture_metrics_long.parquet": "mixture_metrics",
+    "mixture_object_diagnostics_by_image.parquet": "mixture_image_diagnostics",
+    "mixture_pixel_diagnostics_by_image.parquet": "mixture_image_diagnostics",
+    "mixture_3way_object_diagnostics_by_image.parquet": "mixture_image_diagnostics",
+    "mixture_pixel_errors_by_image.parquet": "mixture_image_diagnostics",
+    "mixture_objects.parquet": "mixture_objects",
+    "mixture_pixels.parquet": "mixture_pixels",
+    "mixture_3way_objects.parquet": "mixture_objects",
+    "mixture_summary.parquet": "mixture_summary",
+    "mixture_guardrails.parquet": "mixture_guardrails",
+    "mixture_protocol.parquet": "mixture_protocol",
+    "mixture_errors.parquet": "simca_error_log",
+    "mixture_batch_manifest.parquet": "simca_batch_manifest",
 }
 
 
@@ -833,6 +1201,72 @@ def compact_simca_table_for_path(
         include_remaining=include_remaining,
         drop_all_na=drop_all_na,
     )
+
+
+def read_simca_table(
+    path_or_name: Any,
+    *,
+    required: bool = False,
+    include_remaining: bool = False,
+    drop_all_na: bool = True,
+) -> pd.DataFrame:
+    """Read a parquet SIMCA table and apply the schema inferred from its file name."""
+    path = Path(path_or_name)
+    if not path.exists():
+        if required:
+            raise FileNotFoundError(path)
+        return compact_simca_table_for_path(
+            pd.DataFrame(),
+            path,
+            include_remaining=include_remaining,
+            drop_all_na=drop_all_na,
+        )
+    return compact_simca_table_for_path(
+        pd.read_parquet(path),
+        path,
+        include_remaining=include_remaining,
+        drop_all_na=drop_all_na,
+    )
+
+
+def write_simca_table(
+    df: pd.DataFrame | None,
+    path_or_name: Any,
+    *,
+    include_remaining: bool = False,
+    drop_all_na: bool = True,
+) -> Path:
+    """Compact a SIMCA table from its file name and write it as parquet."""
+    path = Path(path_or_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out = compact_simca_table_for_path(
+        pd.DataFrame() if df is None else df,
+        path,
+        include_remaining=include_remaining,
+        drop_all_na=drop_all_na,
+    )
+    return save_parquet(out, path)
+
+
+def concat_nonempty_tables(parts: Sequence[pd.DataFrame | None]) -> pd.DataFrame:
+    """Concatenate non-empty DataFrames while preserving empty-safe behavior."""
+    valid_parts = [part for part in parts if part is not None and len(part) > 0]
+    return pd.concat(valid_parts, ignore_index=True, sort=False) if valid_parts else pd.DataFrame()
+
+
+def iter_dataframe_batches(
+    df: pd.DataFrame,
+    batch_size: int,
+    *,
+    batch_prefix: str = "batch",
+):
+    """Yield stable `(batch_id, row_start, row_stop, batch_df)` chunks."""
+    if batch_size is None or int(batch_size) <= 0:
+        raise ValueError("batch_size must be a positive integer.")
+    batch_size = int(batch_size)
+    for batch_idx, start in enumerate(range(0, len(df), batch_size), start=1):
+        stop = min(start + batch_size, len(df))
+        yield f"{batch_prefix}_{batch_idx:04d}", start, stop, df.iloc[start:stop].copy()
 
 
 def schema_diagnostics(df: pd.DataFrame) -> dict[str, Any]:
