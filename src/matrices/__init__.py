@@ -7,7 +7,12 @@ from src.matrices.matrix_registry import (
     get_matrix_spec,
     matrix_method_to_args,
 )
-from src.matrices.redim_matrix import object_db_to_matrix
+from src.matrices.redim_matrix import (
+    object_db_to_matrix,
+    pixel_selection_hash,
+    select_balanced_pixel_indices,
+    stable_object_seed,
+)
 
 __all__ = [
     "MatrixSpec",
@@ -18,4 +23,7 @@ __all__ = [
     "get_matrix_spec",
     "matrix_method_to_args",
     "object_db_to_matrix",
+    "pixel_selection_hash",
+    "select_balanced_pixel_indices",
+    "stable_object_seed",
 ]

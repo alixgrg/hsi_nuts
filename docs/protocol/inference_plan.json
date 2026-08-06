@@ -1,0 +1,118 @@
+{
+  "amendment_justification": "2026-08-03: tasks 25-26 added before batch-3 inspection: fixed train-projection eligibility thresholds, explicit unsupported tracks, and one globally calibrated spatial post-processing lock using only pure-image OOF maps from batches 1-2.",
+  "amendment_policy": "Any scientific change after the freeze requires a new protocol version, a dated justification, and regeneration of every protocol artifact.",
+  "bootstrap": {
+    "confidence_level": 0.95,
+    "group_column": "source_image",
+    "method": "clustered_nonparametric_bootstrap",
+    "n_resamples": 2000,
+    "objects_and_pixels_remain_grouped": true,
+    "random_state": 42,
+    "report_batches_separately": true
+  },
+  "data_roles": {
+    "calibration_batches": [
+      1,
+      2
+    ],
+    "external_test_batches": [
+      4
+    ],
+    "external_test_opening_rule": "Open only after the eight-track panel and all thresholds are locked; never retune after opening.",
+    "selection_validation_batches": [
+      3
+    ]
+  },
+  "freeze_date": "2026-08-03",
+  "hypotheses": [
+    {
+      "hypothesis_id": "H1",
+      "name": "object_training_family",
+      "question": "At fixed object projection and decision mode, does the training matrix family change object-level performance?",
+      "scope": "primary"
+    },
+    {
+      "hypothesis_id": "H2",
+      "name": "pixel_training_family",
+      "question": "At fixed pixel projection and decision mode, does the training matrix family change pixel and small-fragment performance?",
+      "scope": "primary"
+    },
+    {
+      "hypothesis_id": "H3",
+      "name": "train_projection_transfer",
+      "question": "Does the interaction between training family and projection level create a measurable standardized domain shift?",
+      "scope": "primary"
+    },
+    {
+      "hypothesis_id": "H4",
+      "name": "selective_rejection",
+      "question": "At fixed training family and projection level, does 3-way decision improve the risk-coverage trade-off over 2-way?",
+      "scope": "primary"
+    }
+  ],
+  "multiplicity": {
+    "exploratory_analyses_must_be_labelled": true,
+    "families": [
+      "H1",
+      "H2",
+      "H3",
+      "H4"
+    ],
+    "method": "holm_within_hypothesis_family",
+    "report_all_planned_estimates_and_intervals": true
+  },
+  "n_planned_contrasts": 22,
+  "planned_contrasts_sha256": "71d7fe422c54dbe6db8b3b640079541ea06e9c867c839c3b6bc3bb7a12bb7333",
+  "practical_tolerances": {
+    "absolute_rate_difference": 0.05,
+    "standardized_projection_shift": 0.2
+  },
+  "primary_inference_unit": "source_image",
+  "prior_evidence": {
+    "batch4_blinding_claim": "not_asserted",
+    "scope": "All outputs generated before this freeze are supporting or exploratory and cannot redefine the primary contrasts.",
+    "status": "legacy_exploratory"
+  },
+  "protocol_version": "8tracks_v3",
+  "registration_mode": "prospective_amendment_tasks25_26",
+  "schema_version": "8tracks_v2",
+  "selection": {
+    "hard_constraints_before_pareto": true,
+    "pareto_scope": "evaluation_track",
+    "technical_filters_first": true,
+    "tie_break": "lexicographic",
+    "tie_break_priority": [
+      "risk_guardrails",
+      "worst_image",
+      "stability",
+      "simplicity",
+      "compute_cost"
+    ],
+    "weighted_scores_allowed": false
+  },
+  "status": "frozen",
+  "threshold_policy": {
+    "batch3_or_batch4_threshold_learning_forbidden": true,
+    "direct_object_or_pixel_decision": "simca_margin",
+    "fixed_2way_pixel_to_object_vote": [
+      0.75,
+      0.8
+    ],
+    "fixed_vote_scope": [
+      "E3",
+      "E7"
+    ],
+    "three_way_threshold_source": "track-specific grouped OOF calibration on batches 1-2"
+  },
+  "truth_policy": {
+    "ambiguity_policy_id": "separate_validity_mask",
+    "boundary_policy_id": "majority_pixel_area",
+    "double_annotation_policy": "all_selected_images",
+    "mask_semantics_id": "binary_peanut_presence",
+    "object_truth": "object_exact",
+    "pixel_fragment_primary_truth": "pixel_annotated",
+    "positive_class": "peanut",
+    "target_class": "peanut",
+    "weak_or_indirect_truth_is_not_primary": true
+  }
+}

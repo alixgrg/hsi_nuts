@@ -24,6 +24,7 @@ SIMCA_RULE_METADATA: dict[str, dict[str, str]] = {
     "data_driven_emp_cv": {"rule_base": "data_driven", "rule_variant": "data_driven_emp_cv", "limit_source": "empirical_cv"},
     "combined_index": {"rule_base": "combined_index", "rule_variant": "combined_index_chi2", "limit_source": "scaled_chi2"},
     "combined_index_chi2": {"rule_base": "combined_index", "rule_variant": "combined_index_chi2", "limit_source": "scaled_chi2"},
+    "combined_index_emp_cv": {"rule_base": "combined_index", "rule_variant": "combined_index_emp_cv", "limit_source": "empirical_cv"},
 }
 
 
@@ -347,6 +348,7 @@ def infer_model_family_from_rule_token(rule_token: str) -> str:
         "data_driven_chi2",
         "data_driven_emp_cv",
         "combined_index_chi2",
+        "combined_index_emp_cv",
     }:
         return "empirical_cv_rule"
     return "unknown"

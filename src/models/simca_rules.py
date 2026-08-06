@@ -297,6 +297,12 @@ def compute_rule_variant_stat_limit(
         limit = rule.limit(model)
         return stat, limit
 
+    if variant_name == "combined_index_emp_cv":
+        _require_cv_thresholds(cv_thresholds, ["combined_index_emp_cv"])
+        stat = H / model.H_limit_ + Q / model.Q_limit_
+        limit = cv_thresholds["combined_index_emp_cv"]
+        return stat, limit
+
     raise ValueError(f"Unknown rule variant: {variant_name}")
 
 

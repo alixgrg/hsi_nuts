@@ -1,0 +1,49 @@
+{
+  "protocol_id": "peanut_presence",
+  "protocol_version": "spatial_gt_v1",
+  "task": "binary_pixel_presence",
+  "target_class": "peanut",
+  "annotated_class": "peanut",
+  "positive_value": 1,
+  "positive_class": "peanut",
+  "positive_definition": "Peanut tissue occupies at least 50% of the pixel footprint.",
+  "negative_value": 0,
+  "negative_definition": "No visible peanut tissue within a valid annotated pixel.",
+  "annotation_roi": {
+    "source": "image_db.labels>0",
+    "definition": "Pixels retained by the frozen object segmentation for the source image.",
+    "outside_roi_definition": "Not evaluated; never counted as a valid negative."
+  },
+  "boundary_policy": {
+    "policy_id": "majority_pixel_area",
+    "positive_rule": "Mark positive when peanut occupies at least 50% of the pixel footprint.",
+    "negative_rule": "Mark negative when peanut occupies less than 50% of the pixel footprint and the decision is visually reliable.",
+    "ambiguous_rule": "Mark ambiguous when mixing, blur, shadow, saturation or occlusion prevents a reliable binary decision.",
+    "automatic_morphology_allowed": false,
+    "automatic_hole_filling_allowed": false
+  },
+  "ambiguity_policy": {
+    "policy_id": "separate_validity_mask",
+    "target_mask": "Boolean peanut-presence layer.",
+    "validity_mask": "Boolean layer that is true only where the annotator made a valid binary decision.",
+    "constraints": [
+      "target_mask <= validity_mask",
+      "validity_mask <= annotation_roi"
+    ],
+    "agreement_roi": "annotation_roi & validity_mask_a & validity_mask_b",
+    "report_ambiguity_rate": true,
+    "adjudication_rule": "Resolve disagreements independently or retain the pixel as unavailable."
+  },
+  "component_policy": {
+    "connectivity": 2,
+    "meaning": "Eight-connected peanut components are reference fragments."
+  },
+  "blinding": {
+    "model_predictions_visible": false,
+    "other_annotator_mask_visible": false,
+    "allowed_display": "Frozen source image_ref and annotation ROI only."
+  },
+  "double_annotation_policy": "all_selected_images",
+  "annotation_tool": "matplotlib_lasso_mask_editor",
+  "annotation_tool_version": "1.0"
+}

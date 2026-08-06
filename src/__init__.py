@@ -24,6 +24,14 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
     "load_nir_uco_h5": ("src.io.database_h5", "load_nir_uco_h5"),
     "save_nir_uco_h5": ("src.io.database_h5", "save_nir_uco_h5"),
     "validate_nir_uco_h5": ("src.io.database_h5", "validate_nir_uco_h5"),
+    "database_content_hash": (
+        "src.io.database_h5",
+        "database_content_hash",
+    ),
+    "build_database_manifest": (
+        "src.io.database_h5",
+        "build_database_manifest",
+    ),
 
     # ------------------------------------------------------------------
     # Data / database / segmentation
@@ -62,6 +70,18 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
     "is_hyperspectral_cube": ("src.data.database", "is_hyperspectral_cube"),
     "detect_known_image_keys": ("src.data.database", "detect_known_image_keys"),
     "resolve_selected_keys": ("src.data.database", "resolve_selected_keys"),
+    "build_raw_image_manifest": (
+        "src.data.database",
+        "build_raw_image_manifest",
+    ),
+    "validate_raw_image_manifest": (
+        "src.data.database",
+        "validate_raw_image_manifest",
+    ),
+    "validate_extracted_object": (
+        "src.data.database",
+        "validate_extracted_object",
+    ),
 
     # ------------------------------------------------------------------
     # Decision labels
@@ -90,7 +110,6 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
         "binary_detection_metrics",
     ),
     "metrics_by_group": ("src.decision.metrics", "metrics_by_group"),
-    "add_detection_score": ("src.decision.metrics", "add_detection_score"),
     "add_binary_confusion_case": (
         "src.decision.metrics",
         "add_binary_confusion_case",
@@ -102,6 +121,14 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
     "summarize_object_errors_by_image": (
         "src.decision.metrics",
         "summarize_object_errors_by_image",
+    ),
+    "binary_mask_agreement": (
+        "src.decision.metrics",
+        "binary_mask_agreement",
+    ),
+    "component_agreement": (
+        "src.decision.metrics",
+        "component_agreement",
     ),
 
     # ------------------------------------------------------------------
@@ -123,6 +150,47 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
     "add_pixel_truth_labels": (
         "src.decision.truth",
         "add_pixel_truth_labels",
+    ),
+    "TruthResult": ("src.decision.truth", "TruthResult"),
+    "select_annotation_subset": (
+        "src.decision.truth",
+        "select_annotation_subset",
+    ),
+    "select_double_annotation_images": (
+        "src.decision.truth",
+        "select_double_annotation_images",
+    ),
+    "validate_reference_mask": (
+        "src.decision.truth",
+        "validate_reference_mask",
+    ),
+    "validate_reference_annotation": (
+        "src.decision.truth",
+        "validate_reference_annotation",
+    ),
+    "build_spatial_ground_truth_manifest": (
+        "src.decision.truth",
+        "build_spatial_ground_truth_manifest",
+    ),
+    "extract_reference_components": (
+        "src.decision.truth",
+        "extract_reference_components",
+    ),
+    "resolve_truth_for_image": (
+        "src.decision.truth",
+        "resolve_truth_for_image",
+    ),
+    "build_annotation_agreement_table": (
+        "src.decision.truth",
+        "build_annotation_agreement_table",
+    ),
+    "build_spatial_ground_truth_lock": (
+        "src.decision.truth",
+        "build_spatial_ground_truth_lock",
+    ),
+    "verify_spatial_ground_truth_lock": (
+        "src.decision.truth",
+        "verify_spatial_ground_truth_lock",
     ),
 
     # ------------------------------------------------------------------
@@ -216,6 +284,10 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
         "available_matrix_methods",
     ),
     "object_db_to_matrix": ("src.matrices.redim_matrix", "object_db_to_matrix"),
+    "select_balanced_pixel_indices": (
+        "src.matrices.redim_matrix",
+        "select_balanced_pixel_indices",
+    ),
 
     # ------------------------------------------------------------------
     # Models
@@ -259,6 +331,10 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
         "src.spectra.preprocessing",
         "reflectance_to_absorbance",
     ),
+    "preprocessing_input_validity_report": (
+        "src.spectra.preprocessing",
+        "preprocessing_input_validity_report",
+    ),
     "VALID_PREPROCESSING_STEPS": (
         "src.spectra.preprocessing_configs",
         "VALID_PREPROCESSING_STEPS",
@@ -290,6 +366,10 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
     "normalize_preprocessing_configs": (
         "src.spectra.preprocessing_configs",
         "normalize_preprocessing_configs",
+    ),
+    "preprocessing_derivative": (
+        "src.spectra.preprocessing_configs",
+        "preprocessing_derivative",
     ),
     "wavelength_selection_summary": (
         "src.spectra.band_selection",
@@ -343,9 +423,41 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
         "src.workflows.pca",
         "compare_pca_representations",
     ),
-    "add_pca_selection_score": (
+    "build_pca_candidate_plan": (
         "src.workflows.pca",
-        "add_pca_selection_score",
+        "build_pca_candidate_plan",
+    ),
+    "fit_pca_candidate": (
+        "src.workflows.pca",
+        "fit_pca_candidate",
+    ),
+    "subset_object_db_for_pca": (
+        "src.workflows.pca",
+        "subset_object_db_for_pca",
+    ),
+    "pca_component_variance_table": (
+        "src.workflows.pca",
+        "pca_component_variance_table",
+    ),
+    "compute_group_compactness": (
+        "src.workflows.pca",
+        "compute_group_compactness",
+    ),
+    "compute_group_centroid_displacements": (
+        "src.workflows.pca",
+        "compute_group_centroid_displacements",
+    ),
+    "compare_aligned_loadings": (
+        "src.workflows.pca",
+        "compare_aligned_loadings",
+    ),
+    "evaluate_pca_stability": (
+        "src.workflows.pca",
+        "evaluate_pca_stability",
+    ),
+    "summarize_pca_stability": (
+        "src.workflows.pca",
+        "summarize_pca_stability",
     ),
     "DEFAULT_PCA_SELECTION_CONFIG": (
         "src.workflows.pca_selection",
@@ -363,9 +475,53 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
         "src.workflows.pca_selection",
         "make_pca_selection_config",
     ),
-    "add_pca_selection_scores": (
+    "build_pca_artifact_review_table": (
         "src.workflows.pca_selection",
-        "add_pca_selection_scores",
+        "build_pca_artifact_review_table",
+    ),
+    "apply_pca_artifact_review_decisions": (
+        "src.workflows.pca_selection",
+        "apply_pca_artifact_review_decisions",
+    ),
+    "aggregate_pca_preprocessing_diagnostics": (
+        "src.workflows.pca_selection",
+        "aggregate_pca_preprocessing_diagnostics",
+    ),
+    "build_pca_run_fingerprint": (
+        "src.workflows.pca_selection",
+        "build_pca_run_fingerprint",
+    ),
+    "freeze_pca_shortlist": (
+        "src.workflows.pca_selection",
+        "freeze_pca_shortlist",
+    ),
+    "hash_pca_review_table": (
+        "src.workflows.pca_selection",
+        "hash_pca_review_table",
+    ),
+    "hash_pca_input_artifacts": (
+        "src.workflows.pca_selection",
+        "hash_pca_input_artifacts",
+    ),
+    "pca_input_artifact_paths": (
+        "src.workflows.pca_selection",
+        "pca_input_artifact_paths",
+    ),
+    "pca_input_fingerprint": (
+        "src.workflows.pca_selection",
+        "pca_input_fingerprint",
+    ),
+    "validate_pca_artifact_review": (
+        "src.workflows.pca_selection",
+        "validate_pca_artifact_review",
+    ),
+    "build_pca_selection_flow_tables": (
+        "src.workflows.pca_selection",
+        "build_pca_selection_flow_tables",
+    ),
+    "build_pca_selection_diagnostics": (
+        "src.workflows.pca_selection",
+        "build_pca_selection_diagnostics",
     ),
     "build_pca_scoring_diagnostics": (
         "src.workflows.pca_selection",
@@ -383,9 +539,89 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
         "src.workflows.pca_selection",
         "select_pca_preprocessing_shortlist",
     ),
+    "select_pca_pareto_front": (
+        "src.workflows.pca_selection",
+        "select_pca_pareto_front",
+    ),
     "validate_pca_preprocessing_shortlist": (
         "src.workflows.pca_selection",
         "validate_pca_preprocessing_shortlist",
+    ),
+    "build_reference_object_table": (
+        "src.workflows.simca_internal_calibration",
+        "build_reference_object_table",
+    ),
+    "build_calibration_folds": (
+        "src.workflows.simca_internal_calibration",
+        "build_calibration_folds",
+    ),
+    "build_internal_calibration_configurations": (
+        "src.workflows.simca_internal_calibration",
+        "build_internal_calibration_configurations",
+    ),
+    "expand_projection_configurations": (
+        "src.workflows.simca_internal_calibration",
+        "expand_projection_configurations",
+    ),
+    "hash_internal_calibration_configuration": (
+        "src.workflows.simca_internal_calibration",
+        "hash_internal_calibration_configuration",
+    ),
+    "validate_simca_configuration": (
+        "src.workflows.simca_internal_calibration",
+        "validate_simca_configuration",
+    ),
+    "compute_train_only_rule_thresholds": (
+        "src.workflows.simca_internal_calibration",
+        "compute_train_only_rule_thresholds",
+    ),
+    "run_internal_calibration": (
+        "src.workflows.simca_internal_calibration",
+        "run_internal_calibration",
+    ),
+    "run_internal_calibration_8tracks": (
+        "src.workflows.simca_internal_calibration",
+        "run_internal_calibration_8tracks",
+    ),
+    "evaluate_internal_2way_tracks": (
+        "src.workflows.simca_internal_calibration",
+        "evaluate_internal_2way_tracks",
+    ),
+    "evaluate_crossfitted_three_way_thresholds": (
+        "src.workflows.simca_internal_calibration",
+        "evaluate_crossfitted_three_way_thresholds",
+    ),
+    "build_internal_calibrated_hyperparameters_8tracks": (
+        "src.workflows.simca_internal_calibration",
+        "build_internal_calibrated_hyperparameters_8tracks",
+    ),
+    "build_calibration_domain_8tracks": (
+        "src.workflows.simca_internal_calibration",
+        "build_calibration_domain_8tracks",
+    ),
+    "select_smallest_plateau_components": (
+        "src.workflows.simca_internal_calibration",
+        "select_smallest_plateau_components",
+    ),
+    "build_exact_oof_prediction_equivalence": (
+        "src.workflows.simca_internal_calibration",
+        "build_exact_oof_prediction_equivalence",
+    ),
+    "evaluate_internal_object_thresholds": (
+        "src.workflows.simca_internal_calibration",
+        "evaluate_internal_object_thresholds",
+    ),
+    "evaluate_internal_three_way_thresholds": (
+        "src.workflows.simca_internal_calibration",
+        "evaluate_internal_three_way_thresholds",
+    ),
+    "build_internal_calibrated_hyperparameters": (
+        "src.workflows.simca_internal_calibration",
+        "build_internal_calibrated_hyperparameters",
+    ),
+    "build_calibration_domain_from_03b": (
+        "src.workflows.simca_internal_calibration",
+        "build_calibration_domain_from_03b",
     ),
     "build_image_qc_table": (
         "src.workflows.quality_check",
@@ -411,9 +647,89 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
         "src.workflows.quality_check",
         "build_qc_flags_table",
     ),
+    "build_qc_alerts_table": (
+        "src.workflows.quality_check",
+        "build_qc_alerts_table",
+    ),
+    "add_robust_spectral_qc": (
+        "src.workflows.quality_check",
+        "add_robust_spectral_qc",
+    ),
+    "merge_existing_reviews_or_initialize": (
+        "src.workflows.quality_check",
+        "merge_existing_reviews_or_initialize",
+    ),
+    "validate_qc_review_closure": (
+        "src.workflows.quality_check",
+        "validate_qc_review_closure",
+    ),
+    "build_qc_visual_review_report": (
+        "src.workflows.quality_check",
+        "build_qc_visual_review_report",
+    ),
+    "build_qc_protocol": (
+        "src.workflows.quality_check",
+        "build_qc_protocol",
+    ),
+    "build_qc_exclusion_report": (
+        "src.workflows.quality_check",
+        "build_qc_exclusion_report",
+    ),
+    "build_segmentation_diagnostics_table": (
+        "src.workflows.quality_check",
+        "build_segmentation_diagnostics_table",
+    ),
+    "build_spectral_integrity_table": (
+        "src.workflows.quality_check",
+        "build_spectral_integrity_table",
+    ),
     "check_missing_required_fields": (
         "src.workflows.quality_check",
         "check_missing_required_fields",
+    ),
+    "qc_requires_new_cycle": (
+        "src.workflows.quality_check",
+        "qc_requires_new_cycle",
+    ),
+    "build_matrix_coverage_table": (
+        "src.workflows.matrix_preprocessing",
+        "build_matrix_coverage_table",
+    ),
+    "build_protocol_manifest": (
+        "src.workflows.protocol_split",
+        "build_protocol_manifest",
+    ),
+    "build_grouped_folds": (
+        "src.workflows.protocol_split",
+        "build_grouped_folds",
+    ),
+    "build_split_diagnostics": (
+        "src.workflows.protocol_split",
+        "build_split_diagnostics",
+    ),
+    "assert_no_split_leakage": (
+        "src.workflows.protocol_split",
+        "assert_no_split_leakage",
+    ),
+    "eligible_object_ids": (
+        "src.workflows.protocol_split",
+        "eligible_object_ids",
+    ),
+    "build_wavelength_config": (
+        "src.workflows.matrix_preprocessing",
+        "build_wavelength_config",
+    ),
+    "assert_wavelength_lock": (
+        "src.workflows.matrix_preprocessing",
+        "assert_wavelength_lock",
+    ),
+    "evaluate_balanced_sampling_grid": (
+        "src.workflows.matrix_preprocessing",
+        "evaluate_balanced_sampling_grid",
+    ),
+    "evaluate_preprocessing_grid": (
+        "src.workflows.matrix_preprocessing",
+        "evaluate_preprocessing_grid",
     ),
     "summarize_matrix_output": (
         "src.workflows.matrix_preprocessing",
@@ -426,6 +742,34 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
     "validate_required_columns": (
         "src.workflows.matrix_preprocessing",
         "validate_required_columns",
+    ),
+    "build_inference_plan": (
+        "src.protocol_governance",
+        "build_inference_plan",
+    ),
+    "build_planned_contrasts": (
+        "src.protocol_governance",
+        "build_planned_contrasts",
+    ),
+    "build_protocol_configuration": (
+        "src.protocol_governance",
+        "build_protocol_configuration",
+    ),
+    "build_scientific_protocol_manifest": (
+        "src.protocol_governance",
+        "build_scientific_protocol_manifest",
+    ),
+    "freeze_protocol": (
+        "src.protocol_governance",
+        "freeze_protocol",
+    ),
+    "validate_protocol_contract": (
+        "src.protocol_governance",
+        "validate_protocol_contract",
+    ),
+    "verify_frozen_protocol": (
+        "src.protocol_governance",
+        "verify_frozen_protocol",
     ),
 
     # ------------------------------------------------------------------
@@ -450,6 +794,18 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
         "make_target_train_filters",
     ),
     "fit_one_class_simca": ("src.workflows.simca", "fit_one_class_simca"),
+    "fit_simca_bundle_from_matrix": (
+        "src.workflows.simca",
+        "fit_simca_bundle_from_matrix",
+    ),
+    "prepare_simca_projection": (
+        "src.workflows.simca",
+        "prepare_simca_projection",
+    ),
+    "project_simca_bundle": (
+        "src.workflows.simca",
+        "project_simca_bundle",
+    ),
     "predict_pixels_with_simca": (
         "src.workflows.simca",
         "predict_pixels_with_simca",
@@ -589,6 +945,14 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
     "deduplicate_simca_refit_configs": (
         "src.workflows.simca_candidates",
         "deduplicate_simca_refit_configs",
+    ),
+    "audit_simca_candidate_technical_status": (
+        "src.workflows.simca_candidates",
+        "audit_simca_candidate_technical_status",
+    ),
+    "build_simca_output_signatures": (
+        "src.workflows.simca_candidates",
+        "build_simca_output_signatures",
     ),
     "normalize_simca_candidate_columns": (
         "src.workflows.simca_candidates",
@@ -768,6 +1132,26 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
     "close_optuna_study": (
         "src.workflows.simca_optuna",
         "close_optuna_study",
+    ),
+    "build_optuna_search_plan_hash": (
+        "src.workflows.simca_optuna",
+        "build_optuna_search_plan_hash",
+    ),
+    "build_optuna_study_registry": (
+        "src.workflows.simca_optuna",
+        "build_optuna_study_registry",
+    ),
+    "build_optuna_pareto_candidates": (
+        "src.workflows.simca_optuna",
+        "build_optuna_pareto_candidates",
+    ),
+    "build_optuna_search_efficiency_audit": (
+        "src.workflows.simca_optuna",
+        "build_optuna_search_efficiency_audit",
+    ),
+    "build_preregistered_ablation_plan": (
+        "src.workflows.simca_optuna",
+        "build_preregistered_ablation_plan",
     ),
 
     # ------------------------------------------------------------------

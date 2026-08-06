@@ -1,6 +1,8 @@
 import numpy as np
 from scipy.signal import savgol_filter
 
+from src.spectra.preprocessing_configs import validate_preprocessing_steps
+
 
 _SAVGOL_DERIV_BY_STEP = {
     "sg_smooth": 0,
@@ -81,21 +83,20 @@ def msc_transform(X, ref, eps=1e-12):
     X = np.asarray(X, dtype=float)
     ref = np.asarray(ref, dtype=float)
 
-    X_corr = np.zeros_like(X)
-
-    # Design matrix: [1, ref]
-    A = np.vstack([np.ones_like(ref), ref]).T
-
-    for i in range(X.shape[0]):
-        coef, _, _, _ = np.linalg.lstsq(A, X[i, :], rcond=None)
-        a_i, b_i = coef
-
-        if abs(b_i) < eps:
-            b_i = 1.0
-
-        X_corr[i, :] = (X[i, :] - a_i) / b_i
-
-    return X_corr
+    if X.ndim != 2 or ref.ndim != 1 or X.shape[1] != ref.size:
+        raise ValueError(
+            f"MSC requires X=(n, bands) and ref=(bands,), got {X.shape} "
+            f"and {ref.shape}."
+        )
+    ref_centered = ref - ref.mean()
+    denominator = float(ref_centered @ ref_centered)
+    if denominator <= float(eps):
+        raise ValueError("MSC reference spectrum has zero variance.")
+    means = X.mean(axis=1)
+    slopes = ((X - means[:, None]) @ ref_centered) / denominator
+    safe_slopes = np.where(np.abs(slopes) < float(eps), 1.0, slopes)
+    intercepts = means - safe_slopes * ref.mean()
+    return (X - intercepts[:, None]) / safe_slopes[:, None]
 
 
 def savgol_derivative(
@@ -125,14 +126,66 @@ def savgol_derivative(
     )
 
 
-def reflectance_to_absorbance(X, eps=1e-8):
+def reflectance_to_absorbance(X, eps=1e-8, nonpositive_policy="error"):
     """
     Convert reflectance to absorbance:
         A = log10(1 / R) = -log10(R)
     """
     X = np.asarray(X, dtype=float)
-    X_safe = np.clip(X, eps, None)
+    nonpositive = X <= 0
+    policy = str(nonpositive_policy)
+    if np.any(nonpositive) and policy == "error":
+        raise ValueError(
+            "Absorbance is undefined for non-positive reflectance; "
+            f"found {int(nonpositive.sum())} value(s)."
+        )
+    if policy not in {"error", "clip"}:
+        raise ValueError(
+            "nonpositive_policy must be either 'error' or 'clip'."
+        )
+    X_safe = np.clip(X, eps, None) if policy == "clip" else X
     return np.log10(1.0 / X_safe)
+
+
+def preprocessing_input_validity_report(
+    X,
+    *,
+    steps=("raw",),
+    absorbance_nonpositive_policy="error",
+):
+    """Return the row mask required before applying a preprocessing chain.
+
+    General QC removes non-finite spectra. Strict absorbance adds a
+    preprocessing-dependent requirement: every reflectance value in a row
+    must be strictly positive. Keeping this rule next to the transform avoids
+    duplicating it in PCA/SIMCA projection workflows and prevents silent
+    clipping to extreme absorbance values.
+    """
+    values = np.asarray(X, dtype=float)
+    if values.ndim != 2:
+        raise ValueError(f"X must be 2D, got shape={values.shape}")
+    resolved_steps = [steps] if isinstance(steps, str) else list(steps)
+    finite_mask = np.isfinite(values).all(axis=1)
+    strict_absorbance = (
+        "absorbance" in resolved_steps
+        and str(absorbance_nonpositive_policy) == "error"
+    )
+    nonpositive_absorbance_mask = (
+        finite_mask & np.any(values <= 0.0, axis=1)
+        if strict_absorbance
+        else np.zeros(values.shape[0], dtype=bool)
+    )
+    valid_mask = finite_mask & ~nonpositive_absorbance_mask
+    return {
+        "valid_mask": valid_mask,
+        "n_input_rows": int(values.shape[0]),
+        "n_valid_rows": int(valid_mask.sum()),
+        "n_filtered_rows": int((~valid_mask).sum()),
+        "n_nonfinite_rows": int((~finite_mask).sum()),
+        "n_nonpositive_absorbance_rows": int(
+            nonpositive_absorbance_mask.sum()
+        ),
+    }
 
 
 class SpectralPreprocessor:
@@ -142,36 +195,66 @@ class SpectralPreprocessor:
         sg_window_length=9,
         sg_polyorder=2,
         eps=1e-12,
+        absorbance_nonpositive_policy="error",
     ):
-        self.steps = [steps] if isinstance(steps, str) else list(steps)
-        self.sg_window_length = sg_window_length
-        self.sg_polyorder = sg_polyorder
+        resolved_steps = [steps] if isinstance(steps, str) else list(steps)
+        self.steps = list(validate_preprocessing_steps(resolved_steps))
+        self.sg_window_length = int(sg_window_length)
+        self.sg_polyorder = int(sg_polyorder)
         self.eps = eps
+        self.absorbance_nonpositive_policy = str(
+            absorbance_nonpositive_policy
+        )
         self.fitted_params_ = {}
         self.wavelengths_ = None
         self.is_fitted_ = False
+
+    def input_validity_report(self, X):
+        """Return preprocessing-aware row validity without transforming X."""
+        return preprocessing_input_validity_report(
+            X,
+            steps=self.steps,
+            absorbance_nonpositive_policy=(
+                self.absorbance_nonpositive_policy
+            ),
+        )
 
     def _resolve_savgol_params(self, step):
         if step not in _SAVGOL_DERIV_BY_STEP:
             raise ValueError(f"Unknown Savitzky-Golay preprocessing step: {step}")
 
         deriv = _SAVGOL_DERIV_BY_STEP[step]
-        if deriv == 2:
-            window_length = max(self.sg_window_length, 11)
-            polyorder = max(self.sg_polyorder, 3)
-        else:
-            window_length = self.sg_window_length
-            polyorder = self.sg_polyorder
-
         return {
-            "window_length": int(window_length),
-            "polyorder": int(polyorder),
+            "window_length": self.sg_window_length,
+            "polyorder": self.sg_polyorder,
             "deriv": int(deriv),
         }
 
     def fit(self, X, wavelengths=None):
         X_work = np.asarray(X, dtype=float)
-        self.wavelengths_ = None if wavelengths is None else np.asarray(wavelengths)
+        if X_work.ndim != 2:
+            raise ValueError(f"X must be 2D, got shape={X_work.shape}")
+        if any(step in _SAVGOL_DERIV_BY_STEP for step in self.steps):
+            validate_preprocessing_steps(
+                self.steps,
+                n_features=X_work.shape[1],
+                sg_window_length=self.sg_window_length,
+                sg_polyorder=self.sg_polyorder,
+            )
+        self.wavelengths_ = None if wavelengths is None else np.asarray(
+            wavelengths,
+            dtype=float,
+        )
+        if self.wavelengths_ is not None:
+            if (
+                self.wavelengths_.ndim != 1
+                or len(self.wavelengths_) != X_work.shape[1]
+                or not np.all(np.diff(self.wavelengths_) > 0)
+            ):
+                raise ValueError(
+                    "The wavelength axis must be one-dimensional, aligned "
+                    "with X, and strictly increasing."
+                )
 
         for step in self.steps:
             if step == "raw":
@@ -223,7 +306,11 @@ class SpectralPreprocessor:
 
     def _apply_stateless_step(self, X, step):
         if step == "absorbance":
-            return reflectance_to_absorbance(X, eps=self.eps)
+            return reflectance_to_absorbance(
+                X,
+                eps=self.eps,
+                nonpositive_policy=self.absorbance_nonpositive_policy,
+            )
         if step == "snv":
             return snv(X, eps=self.eps)
         if step == "vector_norm":

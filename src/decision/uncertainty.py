@@ -12,7 +12,6 @@ from src.decision.labels import (
     pixel_ratio_col,
     true_col as make_true_col,
 )
-from src.workflows.simca_selection_utils import pareto_front_by_group
 from src.decision.metrics import coerce_binary_series
 
 def add_three_way_object_decision(
@@ -422,6 +421,8 @@ def select_three_way_threshold_pareto(
     max_target_miss_rate: float = 0.00,
     max_false_accept_rate: float | None = None,
     max_uncertain_rate: float | None = None,
+    min_coverage: float | None = None,
+    allow_infeasible_fallback: bool = True,
 ) -> pd.Series:
     """
     Select one lower/upper threshold pair using constraints and Pareto logic.
@@ -432,6 +433,9 @@ def select_three_way_threshold_pareto(
     3. uncertain_rate
     4. coverage_rate
     """
+    # Local import avoids a decision/workflows package initialization cycle.
+    from src.workflows.simca_selection_utils import pareto_front_by_group
+
     df = threshold_grid_df.copy()
 
     for col in [
@@ -462,8 +466,27 @@ def select_three_way_threshold_pareto(
             <= float(max_uncertain_rate)
         ].copy()
 
+    if min_coverage is not None and len(feasible) > 0:
+        feasible = feasible[
+            feasible["coverage_rate"].fillna(0.0)
+            >= float(min_coverage)
+        ].copy()
+
     if feasible.empty:
-        feasible = df.copy()
+        if allow_infeasible_fallback:
+            feasible = df.copy()
+        else:
+            return pd.Series(
+                {
+                    "three_way_lower_threshold": np.nan,
+                    "three_way_upper_threshold": np.nan,
+                    "selection_status": (
+                        "technically_calculable_but_not_acceptable"
+                    ),
+                    "feasible": False,
+                    "n_feasible": 0,
+                }
+            )
 
     front = pareto_front_by_group(
         feasible,
@@ -476,7 +499,7 @@ def select_three_way_threshold_pareto(
         maximize_cols=["coverage_rate"],
     )
 
-    return (
+    selected = (
         front.sort_values(
             [
                 "target_miss_rate",
@@ -488,6 +511,11 @@ def select_three_way_threshold_pareto(
         )
         .iloc[0]
     )
+    selected = selected.copy()
+    selected["selection_status"] = "acceptable"
+    selected["feasible"] = True
+    selected["n_feasible"] = int(len(feasible))
+    return selected
 
 
 def calibrate_three_way_thresholds_by_config(
@@ -500,6 +528,8 @@ def calibrate_three_way_thresholds_by_config(
     max_target_miss_rate: float = 0.00,
     max_false_accept_rate: float | None = None,
     max_uncertain_rate: float | None = None,
+    min_coverage: float | None = None,
+    allow_infeasible_fallback: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     For each selected model/config, evaluate all 3-way thresholds
@@ -530,6 +560,8 @@ def calibrate_three_way_thresholds_by_config(
             max_target_miss_rate=max_target_miss_rate,
             max_false_accept_rate=max_false_accept_rate,
             max_uncertain_rate=max_uncertain_rate,
+            min_coverage=min_coverage,
+            allow_infeasible_fallback=allow_infeasible_fallback,
         )
 
         grid_parts.append(grid)
@@ -560,37 +592,52 @@ def apply_three_way_thresholds_by_config(
     if config_id_col not in thresholds_df.columns:
         raise KeyError(f"Missing {config_id_col!r} in thresholds_df.")
 
-    threshold_lookup = (
-        thresholds_df
-        .drop_duplicates(config_id_col)
-        .set_index(config_id_col)
+    threshold_cols = (
+        "three_way_lower_threshold",
+        "three_way_upper_threshold",
+    )
+    missing = [col for col in threshold_cols if col not in thresholds_df.columns]
+    if missing:
+        raise KeyError(f"Missing 3-way threshold column(s): {missing}")
+
+    lookup = thresholds_df[
+        [config_id_col, *threshold_cols]
+    ].drop_duplicates(config_id_col)
+    out = object_df.drop(
+        columns=list(threshold_cols),
+        errors="ignore",
+    ).merge(
+        lookup,
+        on=config_id_col,
+        how="left",
+        validate="many_to_one",
     )
 
-    parts = []
-
-    for config_id, group in object_df.groupby(config_id_col, dropna=False):
-        if config_id not in threshold_lookup.index:
-            raise KeyError(f"No 3-way thresholds found for config {config_id!r}.")
-
-        row = threshold_lookup.loc[config_id]
-        lower = float(row["three_way_lower_threshold"])
-        upper = float(row["three_way_upper_threshold"])
-
-        tmp = add_three_way_object_decision(
-            group,
-            target_class=target_class,
-            non_target_label=non_target_label,
-            lower_threshold=lower,
-            upper_threshold=upper,
+    lower = pd.to_numeric(out["three_way_lower_threshold"], errors="coerce")
+    upper = pd.to_numeric(out["three_way_upper_threshold"], errors="coerce")
+    invalid = ~np.isfinite(lower) | ~np.isfinite(upper) | lower.ge(upper)
+    if invalid.any():
+        invalid_ids = (
+            out.loc[invalid, config_id_col].astype(str).drop_duplicates().tolist()
+        )
+        raise ValueError(
+            "Missing or invalid fixed 3-way thresholds for config(s): "
+            f"{invalid_ids[:10]}"
         )
 
-        parts.append(tmp)
+    ratio_col = pixel_ratio_col(target_class)
+    if ratio_col not in out.columns:
+        raise KeyError(f"Missing ratio column: {ratio_col}")
+    ratio = pd.to_numeric(out[ratio_col], errors="coerce")
+    if not np.isfinite(ratio).all():
+        raise ValueError(f"{ratio_col!r} contains NaN or Inf.")
 
-    return (
-        pd.concat(parts, ignore_index=True, sort=False)
-        if parts
-        else object_df.copy()
+    out["decision_3way"] = np.select(
+        (ratio.ge(upper), ratio.lt(lower)),
+        (target_class, non_target_label),
+        default=UNCERTAIN_LABEL,
     )
+    return out
 
 
 def evaluate_three_way_by_config(

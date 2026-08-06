@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+import json
+from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import numpy as np
@@ -9,10 +13,13 @@ from scipy.stats import chi2
 import gc
 from sklearn.model_selection import GroupKFold, LeaveOneGroupOut
 
+from src import experiment_config as expcfg
 from src.decision.aggregation import object_threshold_grid
+from src.decision.border import add_border_flags_to_pixel_df
 from src.decision.labels import (
     DEFAULT_NON_TARGET_LABEL,
     DEFAULT_TARGET_CLASS,
+    pixel_ratio_col,
     predicted_col,
     true_col,
 )
@@ -21,9 +28,19 @@ from src.decision.truth import add_pixel_truth_labels
 from src.matrices.matrix_registry import build_matrix
 from src.models.simca import SIMCAClassModel
 from src.models.simca_rules import compute_rule_variant_stat_limit, make_simca_rule
+from src.protocol_governance import sha256_file
 from src.spectra.preprocessing import SpectralPreprocessor
 from src.spectra.preprocessing_configs import normalize_preprocessing_configs
-from src.utils import as_list, parse_preprocessing_steps, row_float, row_int, row_str, row_value
+from src.utils import (
+    as_list,
+    load_parquet,
+    parse_preprocessing_steps,
+    row_float,
+    row_int,
+    row_str,
+    row_value,
+    save_parquet,
+)
 from src.workflows.simca_selection_utils import add_detection_selection_score, detection_selection_score
 
 
@@ -215,6 +232,755 @@ def _make_group_splitter(groups, n_splits: int | None = None):
 # -----------------------------------------------------------------------------
 
 
+@dataclass
+class SimcaFitBundle:
+    """Reusable train-only preprocessing and SIMCA fit."""
+
+    target_class: str
+    preprocessing_steps: tuple[str, ...]
+    preprocessor: SpectralPreprocessor
+    model: SIMCAClassModel
+    X_train_raw: np.ndarray
+    X_train: np.ndarray
+    y_train: np.ndarray
+    metadata: dict[str, np.ndarray]
+    wavelengths: np.ndarray | None
+    raw_rank: int
+    preprocessed_rank: int
+    preprocessing_seconds: float
+    fit_seconds: float
+    train_scores: pd.DataFrame
+
+
+def fit_simca_bundle_from_matrix(
+    X_train_raw,
+    y_train,
+    metadata,
+    *,
+    preprocessing_spec,
+    n_components: int,
+    alpha: float,
+    wavelengths=None,
+    target_class: str = DEFAULT_TARGET_CLASS,
+    fitted_preprocessor: SpectralPreprocessor | None = None,
+    X_train_preprocessed=None,
+) -> SimcaFitBundle:
+    """Fit one reusable SIMCA bundle from a raw train matrix only."""
+    X_raw = np.asarray(X_train_raw, dtype=float)
+    y = np.asarray(y_train).astype(str)
+    if X_raw.ndim != 2 or X_raw.shape[0] != len(y) or X_raw.size == 0:
+        raise ValueError("The SIMCA train matrix must be non-empty and aligned.")
+    if not np.isfinite(X_raw).all():
+        raise ValueError("The SIMCA train matrix contains non-finite values.")
+    target_mask = y == str(target_class)
+    if not target_mask.any():
+        raise ValueError("The SIMCA train matrix contains no target observation.")
+    X_target_raw = X_raw[target_mask]
+    target_metadata = {
+        str(key): np.asarray(values)[target_mask]
+        for key, values in dict(metadata).items()
+    }
+    if isinstance(preprocessing_spec, Mapping):
+        steps = tuple(preprocessing_spec.get("steps", ("raw",)))
+        sg_window_length = int(preprocessing_spec.get("sg_window_length", 9))
+        sg_polyorder = int(preprocessing_spec.get("sg_polyorder", 2))
+    else:
+        steps = tuple(preprocessing_spec)
+        sg_window_length = 9
+        sg_polyorder = 2
+    raw_rank = int(
+        np.linalg.matrix_rank(
+            X_target_raw - X_target_raw.mean(axis=0, keepdims=True)
+        )
+    )
+    if fitted_preprocessor is None:
+        preprocessor = SpectralPreprocessor(
+            steps=steps,
+            sg_window_length=sg_window_length,
+            sg_polyorder=sg_polyorder,
+        )
+        start = perf_counter()
+        X_target = preprocessor.fit_transform(
+            X_target_raw,
+            wavelengths=wavelengths,
+        )
+        preprocessing_seconds = perf_counter() - start
+    else:
+        if X_train_preprocessed is None:
+            raise ValueError(
+                "X_train_preprocessed is required with fitted_preprocessor."
+            )
+        preprocessor = fitted_preprocessor
+        X_target = np.asarray(X_train_preprocessed, dtype=float)
+        if X_target.shape[0] != X_target_raw.shape[0]:
+            raise ValueError("Reused preprocessed train matrix is misaligned.")
+        preprocessing_seconds = 0.0
+    if not np.isfinite(X_target).all():
+        raise ValueError("Preprocessing produced non-finite train values.")
+    preprocessed_rank = int(
+        np.linalg.matrix_rank(
+            X_target - X_target.mean(axis=0, keepdims=True)
+        )
+    )
+    k = int(n_components)
+    if k < 1 or k > min(preprocessed_rank, len(X_target) - 1):
+        raise ValueError(
+            "n_components is incompatible with target count/rank: "
+            f"k={k}, n_target={len(X_target)}, rank={preprocessed_rank}."
+        )
+    model = SIMCAClassModel(
+        class_name=str(target_class),
+        n_components=k,
+        alpha=float(alpha),
+    )
+    start = perf_counter()
+    model.fit(X_target)
+    fit_seconds = perf_counter() - start
+    pca_scores = np.asarray(model.pca_.scores_, dtype=float)
+    train_scores = pd.DataFrame(
+        {
+            "pca_score_pc1": pca_scores[:, 0],
+            "pca_score_pc2": (
+                pca_scores[:, 1]
+                if pca_scores.shape[1] > 1
+                else np.full(len(pca_scores), np.nan)
+            ),
+            "H": np.asarray(model.H_train_, dtype=float),
+            "Q": np.asarray(model.Q_train_, dtype=float),
+        }
+    )
+    return SimcaFitBundle(
+        target_class=str(target_class),
+        preprocessing_steps=steps,
+        preprocessor=preprocessor,
+        model=model,
+        X_train_raw=X_target_raw,
+        X_train=X_target,
+        y_train=y[target_mask],
+        metadata=target_metadata,
+        wavelengths=(
+            None if wavelengths is None else np.asarray(wavelengths, dtype=float)
+        ),
+        raw_rank=raw_rank,
+        preprocessed_rank=preprocessed_rank,
+        preprocessing_seconds=float(preprocessing_seconds),
+        fit_seconds=float(fit_seconds),
+        train_scores=train_scores,
+    )
+
+
+def project_simca_bundle(
+    bundle: SimcaFitBundle,
+    *,
+    object_db,
+    projection_matrix_method: str,
+    projection_filters: Mapping[str, Any] | None,
+    projection_data: tuple[Any, Any, Mapping[str, Any]] | None = None,
+    projection_cache: Mapping[str, Any] | None = None,
+    rule_variant: str | None = None,
+    rule: Any | None = None,
+    train_only_thresholds: Mapping[str, float] | None = None,
+    target_class: str | None = None,
+    m: int = 10,
+    random_state: int = 0,
+    balanced_pixel_strategy: str = "random",
+    under_m_policy: str = "exclude",
+) -> pd.DataFrame:
+    """Project a reusable fit and return canonical signed SIMCA margins."""
+    if projection_cache is None:
+        projection_cache = prepare_simca_projection(
+            bundle,
+            object_db=object_db,
+            projection_matrix_method=projection_matrix_method,
+            projection_filters=projection_filters,
+            projection_data=projection_data,
+            m=m,
+            random_state=random_state,
+            balanced_pixel_strategy=balanced_pixel_strategy,
+            under_m_policy=under_m_policy,
+        )
+    X_raw = projection_cache["X_raw"]
+    y = projection_cache["y"]
+    metadata = projection_cache["metadata"]
+    X = projection_cache["X"]
+    values = projection_cache["values"]
+    if not np.isfinite(X).all():
+        raise ValueError("Projection preprocessing produced non-finite values.")
+    H = np.asarray(values["H"], dtype=float)
+    Q = np.asarray(values["Q"], dtype=float)
+    pca_scores = np.asarray(values["scores"], dtype=float)
+    if rule_variant is None:
+        if rule is None:
+            raise ValueError("Provide rule_variant or a fitted legacy rule.")
+        statistic = rule.statistic(H, Q, bundle.model)
+        limit = rule.limit(bundle.model)
+    else:
+        statistic, limit = compute_rule_variant_stat_limit(
+            H=H,
+            Q=Q,
+            model=bundle.model,
+            variant_name=str(rule_variant),
+            cv_thresholds=train_only_thresholds,
+        )
+    statistic = np.asarray(statistic, dtype=float)
+    limit = float(limit)
+    if not np.isfinite(limit) or limit <= 0.0:
+        raise ValueError(
+            f"SIMCA rule limit must be finite and positive, got {limit}."
+        )
+    if not np.isfinite(statistic).all():
+        raise ValueError("SIMCA rule statistics contain non-finite values.")
+    ratio = statistic / limit
+    margin = 1.0 - ratio
+    target = str(bundle.target_class if target_class is None else target_class)
+    out = pd.DataFrame(metadata)
+    out["truth"] = np.asarray(y).astype(str) == target
+    out["truth_level"] = (
+        "object_label_inherited_weak"
+        if str(projection_matrix_method) in {"pixel", "all_pixels"}
+        else "pure_reference_object"
+    )
+    out["pca_score_pc1"] = pca_scores[:, 0]
+    out["pca_score_pc2"] = (
+        pca_scores[:, 1]
+        if pca_scores.shape[1] > 1
+        else np.full(len(pca_scores), np.nan)
+    )
+    out["H"] = H
+    out["Q"] = Q
+    out["rule_statistic"] = statistic
+    out["rule_limit"] = limit
+    out["normalized_ratio"] = ratio
+    out["simca_margin"] = margin
+    out["direct_2way_decision"] = margin >= 0.0
+    out["projection_matrix_method"] = str(projection_matrix_method)
+    out.attrs["simca_values"] = values
+    out.attrs["X_transformed"] = X
+    return out
+
+
+def prepare_simca_projection(
+    bundle: SimcaFitBundle,
+    *,
+    object_db,
+    projection_matrix_method: str,
+    projection_filters: Mapping[str, Any] | None,
+    projection_data: tuple[Any, Any, Mapping[str, Any]] | None = None,
+    m: int = 10,
+    random_state: int = 0,
+    balanced_pixel_strategy: str = "random",
+    under_m_policy: str = "exclude",
+) -> dict[str, Any]:
+    """Build and transform one projection matrix once for all SIMCA rules."""
+    if projection_data is None:
+        X_raw, y, metadata = build_matrix(
+            object_db=object_db,
+            matrix_method=str(projection_matrix_method),
+            filters=dict(projection_filters or {}),
+            m=int(m),
+            random_state=int(random_state),
+            balanced_pixel_strategy=str(balanced_pixel_strategy),
+            under_m_policy=str(under_m_policy),
+        )
+    else:
+        X_raw, y, metadata = projection_data
+    X_raw = np.asarray(X_raw, dtype=float)
+    y = np.asarray(y)
+    metadata = {
+        str(key): np.asarray(value)
+        for key, value in dict(metadata).items()
+    }
+    validity = bundle.preprocessor.input_validity_report(X_raw)
+    valid_mask = np.asarray(validity["valid_mask"], dtype=bool)
+    if not valid_mask.any():
+        raise ValueError(
+            "Projection contains no row compatible with the fitted "
+            "preprocessing chain."
+        )
+    if len(y) != len(X_raw):
+        raise ValueError("Projection labels are not aligned with X rows.")
+    for key, values in metadata.items():
+        if values.ndim == 0 or len(values) != len(X_raw):
+            raise ValueError(
+                f"Projection metadata[{key!r}] are not aligned with X rows."
+            )
+    X_raw_valid = X_raw[valid_mask]
+    y_valid = y[valid_mask]
+    metadata_valid = {
+        key: values[valid_mask]
+        for key, values in metadata.items()
+    }
+    X = bundle.preprocessor.transform(X_raw_valid)
+    if not np.isfinite(X).all():
+        raise ValueError("Projection preprocessing produced non-finite values.")
+    return {
+        "X_raw": X_raw_valid,
+        "y": y_valid,
+        "metadata": metadata_valid,
+        "X": X,
+        "values": bundle.model.decision_values(X),
+        "input_validity": {
+            key: value
+            for key, value in validity.items()
+            if key != "valid_mask"
+        },
+    }
+
+
+def run_locked_simca_validation_refit(
+    candidate_pool: pd.DataFrame,
+    *,
+    object_db: Mapping[str, Mapping[str, Any]],
+    wavelengths=None,
+    train_batches: Sequence[int] = expcfg.SIMCA_CONCAT_REFIT_TRAIN_BATCHES,
+    projection_batches: Sequence[int] = (
+        expcfg.SIMCA_CONCAT_REFIT_PROJECTION_BATCHES
+    ),
+    target_class: str = expcfg.TARGET_CLASS,
+    non_target_label: str = expcfg.NON_TARGET_LABEL,
+    under_m_policy: str = expcfg.INTERNAL_CALIBRATION_UNDER_M_POLICY,
+    border_width: int = expcfg.SIMCA_CONCAT_REFIT_BORDER_WIDTH,
+    verbose: bool = expcfg.SIMCA_CONCAT_REFIT_VERBOSE,
+) -> dict[str, pd.DataFrame]:
+    """Refit frozen 03B configurations and project batch 3 once per fit.
+
+    Continuous predictions are stored once per ``projection_config_id``.
+    Candidate-specific 2-way/3-way decisions are intentionally applied later,
+    so alternative locked thresholds do not duplicate the large pixel table.
+    """
+    required = {
+        "data_config_id",
+        "fit_config_id",
+        "projection_config_id",
+        "evaluation_track",
+        "matrix_family",
+        "matrix_method",
+        "projection_level",
+        "projection_matrix_method",
+        "m",
+        "balanced_pixel_strategy",
+        "preprocessing_steps",
+        "rule_variant",
+        "n_components",
+        "alpha",
+        "sg_window_length",
+        "sg_polyorder",
+        "random_state",
+    }
+    missing = sorted(required - set(candidate_pool.columns))
+    if missing:
+        raise KeyError(f"Missing locked validation columns: {missing}")
+    if candidate_pool.empty:
+        return {
+            "object_predictions": pd.DataFrame(
+                columns=expcfg.SIMCA_VALIDATION_OBJECT_PREDICTION_COLUMNS
+            ),
+            "pixel_predictions": pd.DataFrame(
+                columns=expcfg.SIMCA_VALIDATION_PIXEL_PREDICTION_COLUMNS
+            ),
+            "technical_errors": pd.DataFrame(
+                columns=(
+                    "data_config_id",
+                    "fit_config_id",
+                    "projection_config_id",
+                    "stage",
+                    "error_type",
+                    "error_message",
+                )
+            ),
+        }
+    if set(map(int, train_batches)) & set(map(int, projection_batches)):
+        raise RuntimeError("Training and validation batches must be disjoint.")
+    forbidden = set(map(int, expcfg.SIMCA_CONCAT_REFIT_FORBIDDEN_BATCHES))
+    if forbidden & (set(map(int, train_batches)) | set(map(int, projection_batches))):
+        raise RuntimeError("04C cannot load a forbidden protocol batch.")
+
+    # Importing here avoids a module-level cycle: the 03B workflow itself uses
+    # the shared fit/projection primitives defined in this module.
+    from src.workflows.simca_internal_calibration import (
+        compute_train_only_rule_thresholds,
+    )
+
+    object_area = {
+        str(object_id): float(
+            record.get(
+                "area_pixels",
+                record.get("n_pixels", len(record.get("spectra", ()))),
+            )
+        )
+        for object_id, record in object_db.items()
+    }
+    object_parts: list[pd.DataFrame] = []
+    pixel_parts: list[pd.DataFrame] = []
+    errors: list[dict[str, Any]] = []
+    data_groups = list(candidate_pool.groupby("data_config_id", sort=False))
+
+    def record_error(rows: pd.DataFrame, stage: str, exc: Exception) -> None:
+        fit_ids = rows.get("fit_config_id", pd.Series([pd.NA])).astype("string")
+        projection_ids = rows.get(
+            "projection_config_id", pd.Series([pd.NA])
+        ).astype("string")
+        for fit_id, projection_id in sorted(
+            set(zip(fit_ids.fillna(""), projection_ids.fillna("")))
+        ):
+            errors.append(
+                {
+                    "data_config_id": str(rows.iloc[0]["data_config_id"]),
+                    "fit_config_id": str(fit_id),
+                    "projection_config_id": str(projection_id),
+                    "stage": str(stage),
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                }
+            )
+
+    for data_index, (data_config_id, data_rows) in enumerate(data_groups, start=1):
+        base = data_rows.iloc[0]
+        if verbose:
+            print(
+                f"[04C data {data_index}/{len(data_groups)}] "
+                f"{base['matrix_method']} | {base['preprocessing_steps']} | "
+                f"seed={base['random_state']}"
+            )
+        m_value = (
+            int(base["m"])
+            if not pd.isna(base["m"])
+            else int(expcfg.PCA_BALANCED_M_VALUES[0])
+        )
+        strategy = str(base["balanced_pixel_strategy"])
+        if strategy == "not_applicable":
+            strategy = "random"
+        train_filters = {
+            "sample_kind": ["pure"],
+            "object_nut_type": [str(target_class)],
+            "batch": list(map(int, train_batches)),
+        }
+        projection_filters = {
+            "sample_kind": ["pure"],
+            "object_nut_type": [str(target_class), str(non_target_label)],
+            "batch": list(map(int, projection_batches)),
+        }
+        try:
+            X_train_raw, y_train, train_metadata = build_matrix(
+                object_db=object_db,
+                matrix_method=str(base["matrix_method"]),
+                filters=train_filters,
+                m=m_value,
+                random_state=int(base["random_state"]),
+                replace=False,
+                balanced_pixel_strategy=strategy,
+                under_m_policy=str(under_m_policy),
+            )
+            projection_data = {
+                method: build_matrix(
+                    object_db=object_db,
+                    matrix_method=str(method),
+                    filters=projection_filters,
+                    under_m_policy=str(under_m_policy),
+                )
+                for method in sorted(
+                    data_rows["projection_matrix_method"].astype(str).unique()
+                )
+            }
+        except Exception as exc:
+            record_error(data_rows, "matrix_build", exc)
+            continue
+
+        fitted_preprocessor = None
+        X_train_preprocessed = None
+        fit_groups = sorted(
+            data_rows.groupby("fit_config_id", sort=False),
+            key=lambda item: int(item[1].iloc[0]["n_components"]),
+        )
+        for fit_config_id, fit_rows in fit_groups:
+            fit_base = fit_rows.iloc[0]
+            try:
+                bundle = fit_simca_bundle_from_matrix(
+                    X_train_raw,
+                    y_train,
+                    train_metadata,
+                    preprocessing_spec={
+                        "steps": tuple(
+                            parse_preprocessing_steps(
+                                fit_base["preprocessing_steps"]
+                            )
+                        ),
+                        "sg_window_length": int(fit_base["sg_window_length"]),
+                        "sg_polyorder": int(fit_base["sg_polyorder"]),
+                    },
+                    n_components=int(fit_base["n_components"]),
+                    alpha=float(fit_base["alpha"]),
+                    wavelengths=wavelengths,
+                    target_class=str(target_class),
+                    fitted_preprocessor=fitted_preprocessor,
+                    X_train_preprocessed=X_train_preprocessed,
+                )
+                if fitted_preprocessor is None:
+                    fitted_preprocessor = bundle.preprocessor
+                    X_train_preprocessed = bundle.X_train
+                thresholds = compute_train_only_rule_thresholds(
+                    bundle.model,
+                    alpha=float(fit_base["alpha"]),
+                )
+            except Exception as exc:
+                record_error(fit_rows, "fit", exc)
+                continue
+
+            projection_caches: dict[str, dict[str, Any]] = {}
+            cache_errors: dict[str, Exception] = {}
+            for method in sorted(
+                fit_rows["projection_matrix_method"].astype(str).unique()
+            ):
+                try:
+                    projection_caches[method] = prepare_simca_projection(
+                        bundle,
+                        object_db=object_db,
+                        projection_matrix_method=method,
+                        projection_filters=projection_filters,
+                        projection_data=projection_data[method],
+                        under_m_policy=str(under_m_policy),
+                    )
+                except Exception as exc:
+                    cache_errors[method] = exc
+
+            for projection_config_id, projection_rows in fit_rows.groupby(
+                "projection_config_id", sort=False
+            ):
+                projection_base = projection_rows.iloc[0]
+                method = str(projection_base["projection_matrix_method"])
+                if method in cache_errors:
+                    record_error(
+                        projection_rows,
+                        "projection_preparation",
+                        cache_errors[method],
+                    )
+                    continue
+                try:
+                    projected = project_simca_bundle(
+                        bundle,
+                        object_db=object_db,
+                        projection_matrix_method=method,
+                        projection_filters=projection_filters,
+                        projection_cache=projection_caches[method],
+                        rule_variant=str(projection_base["rule_variant"]),
+                        train_only_thresholds=thresholds,
+                        target_class=str(target_class),
+                        under_m_policy=str(under_m_policy),
+                    )
+                    projected.attrs = {}
+                    projected["projection_config_id"] = str(projection_config_id)
+                    projected["fit_config_id"] = str(fit_config_id)
+                    projected["random_state"] = int(projection_base["random_state"])
+                    projected["training_matrix_family"] = str(
+                        projection_base["matrix_family"]
+                    )
+                    projected["projection_level"] = str(
+                        projection_base["projection_level"]
+                    )
+                    projected["object_area"] = (
+                        projected["object_id"].astype(str).map(object_area)
+                    )
+                    if projected["object_area"].isna().any():
+                        raise RuntimeError(
+                            "A validation observation has no object-area provenance."
+                        )
+                    projected["batch"] = pd.to_numeric(
+                        projected["batch"], errors="raise"
+                    ).astype(int)
+                    if not set(projected["batch"]).issubset(
+                        set(map(int, projection_batches))
+                    ):
+                        raise RuntimeError("A projection row is outside batch 3.")
+                    projected = projected.drop(
+                        columns=["direct_2way_decision"], errors="ignore"
+                    )
+                    if str(projection_base["projection_level"]) == "pixel_projection":
+                        # On pure batch-3 images the class of every segmented
+                        # nut pixel is known exactly; background is excluded.
+                        projected["truth_level"] = (
+                            expcfg.SIMCA_CONCAT_REFIT_TRUTH_SOURCE
+                        )
+                        projected = add_border_flags_to_pixel_df(
+                            projected,
+                            object_db=dict(object_db),
+                            border_width=int(border_width),
+                        )
+                        pixel_parts.append(
+                            projected.reindex(
+                                columns=expcfg.SIMCA_VALIDATION_PIXEL_PREDICTION_COLUMNS
+                            )
+                        )
+                    else:
+                        object_parts.append(
+                            projected.reindex(
+                                columns=expcfg.SIMCA_VALIDATION_OBJECT_PREDICTION_COLUMNS
+                            )
+                        )
+                except Exception as exc:
+                    record_error(projection_rows, "projection", exc)
+
+    object_predictions = (
+        pd.concat(object_parts, ignore_index=True, sort=False)
+        if object_parts
+        else pd.DataFrame(
+            columns=expcfg.SIMCA_VALIDATION_OBJECT_PREDICTION_COLUMNS
+        )
+    )
+    pixel_predictions = (
+        pd.concat(pixel_parts, ignore_index=True, sort=False)
+        if pixel_parts
+        else pd.DataFrame(
+            columns=expcfg.SIMCA_VALIDATION_PIXEL_PREDICTION_COLUMNS
+        )
+    )
+    for name, frame in (
+        ("object", object_predictions),
+        ("pixel", pixel_predictions),
+    ):
+        if frame.duplicated(
+            [
+                "projection_config_id",
+                "source_image",
+                "object_id",
+                *(["row", "col"] if name == "pixel" else []),
+            ]
+        ).any():
+            raise RuntimeError(f"Duplicated {name} validation predictions.")
+    return {
+        "object_predictions": object_predictions,
+        "pixel_predictions": pixel_predictions,
+        "technical_errors": pd.DataFrame(
+            errors,
+            columns=(
+                "data_config_id",
+                "fit_config_id",
+                "projection_config_id",
+                "stage",
+                "error_type",
+                "error_message",
+            ),
+        ),
+    }
+
+
+def run_locked_simca_validation_refit_checkpointed(
+    candidate_pool: pd.DataFrame,
+    *,
+    object_db: Mapping[str, Mapping[str, Any]],
+    checkpoint_dir: str | Path,
+    checkpoint_context: Mapping[str, str],
+    resume: bool = expcfg.SIMCA_CONCAT_REFIT_RESUME_FROM_CHECKPOINT,
+    **refit_kwargs,
+) -> dict[str, pd.DataFrame]:
+    """Run 04C by data configuration with hash-verified parquet shards."""
+    required_context = {
+        "validation_plan_hash",
+        "candidate_pool_hash",
+        "ablation_plan_hash",
+        "spatial_lock_hash",
+    }
+    context = {str(key): str(value) for key, value in checkpoint_context.items()}
+    missing = sorted(key for key in required_context if not context.get(key))
+    if missing:
+        raise ValueError(f"Incomplete 04C checkpoint context: {missing}")
+    root = Path(checkpoint_dir) / (
+        f"run_{context['validation_plan_hash'][:12]}_"
+        f"{context['candidate_pool_hash'][:12]}"
+    )
+    root.mkdir(parents=True, exist_ok=True)
+    object_parts: list[pd.DataFrame] = []
+    pixel_parts: list[pd.DataFrame] = []
+    error_parts: list[pd.DataFrame] = []
+    for data_config_id, group in candidate_pool.groupby("data_config_id", sort=False):
+        safe_id = str(data_config_id).replace("/", "_").replace("\\", "_")
+        paths = {
+            "object_predictions": root / f"{safe_id}_objects.parquet",
+            "pixel_predictions": root / f"{safe_id}_pixels.parquet",
+            "technical_errors": root / f"{safe_id}_errors.parquet",
+        }
+        marker_path = root / f"{safe_id}.json"
+        loaded = None
+        if marker_path.exists():
+            if not resume:
+                raise RuntimeError(
+                    "A compatible checkpoint exists but 04C resume is disabled."
+                )
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            for key, expected in context.items():
+                if str(marker.get(key)) != expected:
+                    raise RuntimeError(f"04C checkpoint {key} mismatch: {marker_path}")
+            if str(marker.get("data_config_id")) != str(data_config_id):
+                raise RuntimeError(f"04C checkpoint data id mismatch: {marker_path}")
+            for name, path in paths.items():
+                if not path.exists():
+                    raise RuntimeError(f"Incomplete 04C checkpoint: {path}")
+                if sha256_file(path) != str(marker["file_sha256"][name]):
+                    raise RuntimeError(f"Modified 04C checkpoint shard: {path}")
+            loaded = {name: load_parquet(path) for name, path in paths.items()}
+        if loaded is None:
+            loaded = run_locked_simca_validation_refit(
+                group,
+                object_db=object_db,
+                **refit_kwargs,
+            )
+            for name, path in paths.items():
+                save_parquet(loaded[name], path)
+            marker = {
+                **context,
+                "data_config_id": str(data_config_id),
+                "n_candidates": int(len(group)),
+                "file_sha256": {
+                    name: sha256_file(path) for name, path in paths.items()
+                },
+            }
+            marker_path.write_text(
+                json.dumps(marker, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        object_parts.append(loaded["object_predictions"])
+        pixel_parts.append(loaded["pixel_predictions"])
+        error_parts.append(loaded["technical_errors"])
+    outputs = {
+        "object_predictions": pd.concat(
+            object_parts, ignore_index=True, sort=False
+        ) if object_parts else pd.DataFrame(
+            columns=expcfg.SIMCA_VALIDATION_OBJECT_PREDICTION_COLUMNS
+        ),
+        "pixel_predictions": pd.concat(
+            pixel_parts, ignore_index=True, sort=False
+        ) if pixel_parts else pd.DataFrame(
+            columns=expcfg.SIMCA_VALIDATION_PIXEL_PREDICTION_COLUMNS
+        ),
+        "technical_errors": pd.concat(
+            error_parts, ignore_index=True, sort=False
+        ) if error_parts else pd.DataFrame(
+            columns=(
+                "data_config_id",
+                "fit_config_id",
+                "projection_config_id",
+                "stage",
+                "error_type",
+                "error_message",
+            )
+        ),
+        "checkpoint_run_dir": root,
+    }
+    for name, entity_columns in (
+        ("object_predictions", ("source_image", "object_id")),
+        (
+            "pixel_predictions",
+            ("source_image", "object_id", "row", "col"),
+        ),
+    ):
+        frame = outputs[name]
+        keys = ["projection_config_id", *entity_columns]
+        if len(frame) and frame.duplicated(keys).any():
+            raise RuntimeError(
+                f"Hash-valid 04C checkpoints contain duplicated {name}."
+            )
+    return outputs
+
+
 def fit_one_class_simca(
     object_db,
     matrix_method: str,
@@ -243,19 +1009,23 @@ def fit_one_class_simca(
         balanced_pixel_strategy=balanced_pixel_strategy,
     )
 
-    preprocessor = SpectralPreprocessor(
-        steps=tuple(preprocessing_steps),
-        sg_window_length=sg_window_length,
-        sg_polyorder=sg_polyorder,
-    )
-    X_train = preprocessor.fit_transform(X_train_raw, wavelengths=wavelengths)
-
-    model = SIMCAClassModel(
-        class_name=target_class,
+    fit_bundle = fit_simca_bundle_from_matrix(
+        X_train_raw,
+        y_train,
+        meta_train,
+        preprocessing_spec={
+            "steps": tuple(preprocessing_steps),
+            "sg_window_length": int(sg_window_length),
+            "sg_polyorder": int(sg_polyorder),
+        },
         n_components=int(n_components),
         alpha=float(alpha),
+        wavelengths=wavelengths,
+        target_class=target_class,
     )
-    model.fit(X_train)
+    preprocessor = fit_bundle.preprocessor
+    X_train = fit_bundle.X_train
+    model = fit_bundle.model
 
     rule = make_simca_rule(rule_name)
     rule.fit(model)
@@ -271,6 +1041,7 @@ def fit_one_class_simca(
         "X_train": X_train,
         "y_train": y_train,
         "meta_train": meta_train,
+        "fit_bundle": fit_bundle,
     }
 
 
@@ -283,28 +1054,57 @@ def predict_pixels_with_simca(
     balanced_pixel_strategy: str = "random",
 ) -> tuple[pd.DataFrame, dict, np.ndarray]:
     """Apply a fitted one-class SIMCA model to selected object pixels."""
-    X_pixel_raw, y_pixel, meta_pixel = build_matrix(
+    fit_bundle = simca_bundle.get("fit_bundle")
+    if fit_bundle is None:
+        model = simca_bundle["model"]
+        X_train = np.asarray(simca_bundle["X_train"], dtype=float)
+        fit_bundle = SimcaFitBundle(
+            target_class=str(simca_bundle.get("target_class", model.class_name)),
+            preprocessing_steps=tuple(simca_bundle["preprocessing_steps"]),
+            preprocessor=simca_bundle["preprocessor"],
+            model=model,
+            X_train_raw=np.asarray(simca_bundle["X_train_raw"], dtype=float),
+            X_train=X_train,
+            y_train=np.asarray(simca_bundle["y_train"]),
+            metadata={
+                str(key): np.asarray(value)
+                for key, value in dict(simca_bundle["meta_train"]).items()
+            },
+            wavelengths=None,
+            raw_rank=int(np.linalg.matrix_rank(simca_bundle["X_train_raw"])),
+            preprocessed_rank=int(np.linalg.matrix_rank(X_train)),
+            preprocessing_seconds=np.nan,
+            fit_seconds=np.nan,
+            train_scores=pd.DataFrame(
+                {"H": model.H_train_, "Q": model.Q_train_}
+            ),
+        )
+    projected = project_simca_bundle(
+        fit_bundle,
         object_db=object_db,
-        matrix_method="pixel",
-        filters=projection_filters or {},
+        projection_matrix_method="all_pixels",
+        projection_filters=projection_filters or {},
+        rule=simca_bundle["rule"],
+        target_class=target_class,
         balanced_pixel_strategy=balanced_pixel_strategy,
     )
-
-    X_pixel = simca_bundle["preprocessor"].transform(X_pixel_raw)
-    model = simca_bundle["model"]
+    values = projected.attrs["simca_values"]
+    X_pixel = projected.attrs["X_transformed"]
+    model = fit_bundle.model
     rule = simca_bundle["rule"]
 
     if target_class is None:
         target_class = simca_bundle.get("target_class", model.class_name)
 
-    values = model.decision_values(X_pixel)
-    accepted = rule.accept(values["H"], values["Q"], model)
-    rule_statistic = rule.statistic(values["H"], values["Q"], model)
-    rule_limit = rule.limit(model)
+    accepted = projected["direct_2way_decision"].to_numpy(dtype=bool)
+    rule_statistic = projected["rule_statistic"].to_numpy(dtype=float)
+    rule_limit = float(projected["rule_limit"].iloc[0])
 
     pred_col = predicted_col(target_class, "pixel")
-    df = pd.DataFrame(meta_pixel)
-    df["label"] = y_pixel.astype(str)
+    df = projected.copy()
+    df["label"] = np.where(
+        df["truth"].astype(bool), target_class, non_target_label
+    )
     df[pred_col] = accepted.astype(bool)
     df["predicted_label_pixel"] = np.where(accepted, target_class, non_target_label)
     df["H"] = values["H"]
@@ -322,6 +1122,14 @@ def predict_pixels_with_simca(
         df[f"T{k + 1}"] = values["scores"][:, k]
 
     return df, values, X_pixel
+
+
+class _SimcaRefitStageError(RuntimeError):
+    """Internal error carrying the technical stage that failed."""
+
+    def __init__(self, failure_type: str, message: str):
+        super().__init__(message)
+        self.failure_type = str(failure_type)
 
 
 def run_single_simca_pixel_projection(
@@ -348,48 +1156,63 @@ def run_single_simca_pixel_projection(
     non_target_label: str = DEFAULT_NON_TARGET_LABEL,
 ) -> dict[str, Any]:
     """Fit one-class SIMCA, project pixels, add truth, and aggregate to objects."""
-    bundle = fit_one_class_simca(
-        object_db=object_db,
-        matrix_method=matrix_method,
-        train_filters=train_filters,
-        target_class=target_class,
-        preprocessing_steps=tuple(preprocessing_steps),
-        n_components=n_components,
-        alpha=alpha,
-        rule_name=rule_name,
-        wavelengths=wavelengths,
-        m=m,
-        random_state=random_state,
-        replace=replace,
-        sg_window_length=sg_window_length,
-        sg_polyorder=sg_polyorder,
-        balanced_pixel_strategy=balanced_pixel_strategy,
-    )
+    try:
+        bundle = fit_one_class_simca(
+            object_db=object_db,
+            matrix_method=matrix_method,
+            train_filters=train_filters,
+            target_class=target_class,
+            preprocessing_steps=tuple(preprocessing_steps),
+            n_components=n_components,
+            alpha=alpha,
+            rule_name=rule_name,
+            wavelengths=wavelengths,
+            m=m,
+            random_state=random_state,
+            replace=replace,
+            sg_window_length=sg_window_length,
+            sg_polyorder=sg_polyorder,
+            balanced_pixel_strategy=balanced_pixel_strategy,
+        )
+    except Exception as exc:
+        raise _SimcaRefitStageError("training_error", str(exc)) from exc
 
-    pixel_df, simca_values, X_pixel = predict_pixels_with_simca(
-        object_db=object_db,
-        simca_bundle=bundle,
-        projection_filters=projection_filters,
-        target_class=target_class,
-        non_target_label=non_target_label,
-        balanced_pixel_strategy=balanced_pixel_strategy,
-    )
+    if bundle.get("X_train") is None or len(bundle["X_train"]) == 0:
+        raise _SimcaRefitStageError("empty_training_matrix", "Empty training matrix.")
 
-    pixel_df = add_pixel_truth_labels(
-        pixel_df=pixel_df,
-        image_db=image_db,
-        object_db=object_db,
-        target_class=target_class,
-        dilation_radius=position_dilation_radius,
-    )
+    try:
+        pixel_df, simca_values, X_pixel = predict_pixels_with_simca(
+            object_db=object_db,
+            simca_bundle=bundle,
+            projection_filters=projection_filters,
+            target_class=target_class,
+            non_target_label=non_target_label,
+            balanced_pixel_strategy=balanced_pixel_strategy,
+        )
+        if pixel_df is None or len(pixel_df) == 0:
+            raise ValueError("No pixel prediction was produced.")
 
-    threshold_df, object_tables = object_threshold_grid(
-        pixel_df=pixel_df,
-        object_db=object_db,
-        target_class=target_class,
-        non_target_label=non_target_label,
-        thresholds=object_thresholds,
-    )
+        pixel_df = add_pixel_truth_labels(
+            pixel_df=pixel_df,
+            image_db=image_db,
+            object_db=object_db,
+            target_class=target_class,
+            dilation_radius=position_dilation_radius,
+        )
+
+        threshold_df, object_tables = object_threshold_grid(
+            pixel_df=pixel_df,
+            object_db=object_db,
+            target_class=target_class,
+            non_target_label=non_target_label,
+            thresholds=object_thresholds,
+        )
+        if threshold_df is None or len(threshold_df) == 0 or not object_tables:
+            raise ValueError("No object prediction was produced.")
+    except _SimcaRefitStageError:
+        raise
+    except Exception as exc:
+        raise _SimcaRefitStageError("projection_error", str(exc)) from exc
 
     if threshold_df is not None and len(threshold_df) > 0:
         threshold_df = add_detection_selection_score(threshold_df)
@@ -625,6 +1448,7 @@ def _fold_statistics_from_values(values, model) -> dict[str, Any]:
     Q_norm_chi2 = Q / model.Q_limit_
     simple_chi2_stat = np.maximum(H_norm_chi2, Q_norm_chi2)
     alternative_chi2_stat = H_norm_chi2 + Q_norm_chi2
+    combined_index_stat = alternative_chi2_stat.copy()
     data_driven_stat = model.NQ_ * Q / max(model.Q0_, model.eps) + model.NH_ * H / max(model.H0_, model.eps)
     data_driven_limit = chi2.ppf(1.0 - model.alpha, model.NQ_ + model.NH_)
 
@@ -635,6 +1459,7 @@ def _fold_statistics_from_values(values, model) -> dict[str, Any]:
         "Q_norm_chi2": Q_norm_chi2,
         "simple_chi2_stat": simple_chi2_stat,
         "alternative_chi2_stat": alternative_chi2_stat,
+        "combined_index_stat": combined_index_stat,
         "data_driven_stat": data_driven_stat,
         "data_driven_chi2_limit": float(data_driven_limit),
         "H_chi2_limit_fold": float(model.H_limit_),
@@ -732,6 +1557,7 @@ def calibrate_simca_thresholds_cv(
         "simple_emp_cv": _empirical_quantile(cv_df["simple_chi2_stat"], q),
         "alternative_chi2_emp_cv": _empirical_quantile(cv_df["alternative_chi2_stat"], q),
         "alternative_empHQ_emp_cv": _empirical_quantile(cv_df["alternative_empHQ_stat"], q),
+        "combined_index_emp_cv": _empirical_quantile(cv_df["combined_index_stat"], q),
         "data_driven_emp_cv": _empirical_quantile(cv_df["data_driven_stat"], q),
         "H_chi2_limit_fold_median": float(np.median(cv_df["H_chi2_limit_fold"])),
         "Q_chi2_limit_fold_median": float(np.median(cv_df["Q_chi2_limit_fold"])),
@@ -802,6 +1628,7 @@ def project_pixels_with_rule_variants(
         "data_driven_chi2",
         "data_driven_emp_cv",
         "combined_index_chi2",
+        "combined_index_emp_cv",
     ),
     balanced_pixel_strategy: str = "random",
     target_class: str = DEFAULT_TARGET_CLASS,
@@ -856,6 +1683,10 @@ def summarize_cv_calibration(cv_df: pd.DataFrame, cv_thresholds: dict) -> pd.Dat
         "alternative_chi2_emp_cv": ("alternative_chi2_stat", cv_thresholds["alternative_chi2_emp_cv"]),
         "alternative_empHQ_emp_cv": ("alternative_empHQ_stat", cv_thresholds["alternative_empHQ_emp_cv"]),
         "data_driven_emp_cv": ("data_driven_stat", cv_thresholds["data_driven_emp_cv"]),
+        "combined_index_emp_cv": (
+            "combined_index_stat",
+            cv_thresholds["combined_index_emp_cv"],
+        ),
     }
 
     rows = []
@@ -914,6 +1745,7 @@ def run_simca_rule_variant_grid(
         "data_driven_chi2",
         "data_driven_emp_cv",
         "combined_index_chi2",
+        "combined_index_emp_cv",
     ),
     n_components_values=(5, 8, 10, 12, 15, 20),
     alpha_values=(0.05,),
@@ -1008,6 +1840,7 @@ def run_simca_rule_variant_grid(
                 f"SG=({cfg['sg_window_length']},{cfg['sg_polyorder']}) | dilation={cfg['position_dilation_radius']}"
             )
 
+        training_complete = False
         try:
             cv_df, cv_thresholds = calibrate_simca_thresholds_cv(
                 object_db=object_db,
@@ -1044,6 +1877,9 @@ def run_simca_rule_variant_grid(
                 balanced_pixel_strategy=cfg["balanced_pixel_strategy_effective"],
                 target_class=target_class,
             )
+            if final_bundle.get("X_train") is None or len(final_bundle["X_train"]) == 0:
+                raise ValueError("Empty training matrix.")
+            training_complete = True
             pixel_variants_df, simca_values, X_pixel = project_pixels_with_rule_variants(
                 object_db=object_db,
                 final_bundle=final_bundle,
@@ -1067,7 +1903,7 @@ def run_simca_rule_variant_grid(
                 stat_col = f"stat_{rule_variant}"
                 limit_col = f"limit_{rule_variant}"
                 if pred_variant_col not in pixel_variants_df.columns:
-                    errors.append({**cfg, "search_method": "grid_empirical_cv_rules", "model_family": "empirical_cv_rule", "rule_variant": rule_variant, "error": f"Missing prediction column: {pred_variant_col}", "target_class": target_class, "non_target_label": non_target_label})
+                    errors.append({**cfg, "search_method": "grid_empirical_cv_rules", "model_family": "empirical_cv_rule", "rule_variant": rule_variant, "technical_failure_type": "missing_predictions", "error": f"Missing prediction column: {pred_variant_col}", "target_class": target_class, "non_target_label": non_target_label})
                     continue
 
                 tmp_pixel_df = pixel_variants_df.copy()
@@ -1087,7 +1923,7 @@ def run_simca_rule_variant_grid(
                     thresholds=object_thresholds,
                 )
                 if threshold_df is None or len(threshold_df) == 0:
-                    errors.append({**cfg, "search_method": "grid_empirical_cv_rules", "model_family": "empirical_cv_rule", "rule_variant": rule_variant, "error": "Empty threshold_df.", "target_class": target_class, "non_target_label": non_target_label})
+                    errors.append({**cfg, "search_method": "grid_empirical_cv_rules", "model_family": "empirical_cv_rule", "rule_variant": rule_variant, "technical_failure_type": "missing_predictions", "error": "Empty threshold_df.", "target_class": target_class, "non_target_label": non_target_label})
                     continue
 
                 object_tables_by_rule[str(rule_variant)] = object_tables
@@ -1116,7 +1952,7 @@ def run_simca_rule_variant_grid(
                 threshold_df["n_cv_observations"] = int(cv_thresholds.get("n_cv_observations", len(cv_df)))
                 threshold_df["n_cv_groups"] = int(cv_thresholds.get("n_cv_groups", cv_df["group"].nunique()))
 
-                for name in ["H_emp_cv", "Q_emp_cv", "simple_emp_cv", "alternative_chi2_emp_cv", "alternative_empHQ_emp_cv", "data_driven_emp_cv"]:
+                for name in ["H_emp_cv", "Q_emp_cv", "simple_emp_cv", "alternative_chi2_emp_cv", "alternative_empHQ_emp_cv", "combined_index_emp_cv", "data_driven_emp_cv"]:
                     threshold_df[f"{name}_limit" if not name.endswith("_cv") else name] = float(cv_thresholds.get(name, np.nan))
                 for key_diag, value_diag in _cv_rule_diagnostics(cv_calibration_summary, rule_variant).items():
                     threshold_df[key_diag] = value_diag
@@ -1139,7 +1975,8 @@ def run_simca_rule_variant_grid(
             results[base_key] = stored
 
         except Exception as exc:
-            errors.append({**cfg, "search_method": "grid_empirical_cv_rules", "model_family": "empirical_cv_rule", "rule_variant": "ALL", "error": repr(exc), "target_class": target_class, "non_target_label": non_target_label})
+            failure_type = "projection_error" if training_complete else "training_error"
+            errors.append({**cfg, "search_method": "grid_empirical_cv_rules", "model_family": "empirical_cv_rule", "rule_variant": "ALL", "technical_failure_type": failure_type, "error": str(exc), "target_class": target_class, "non_target_label": non_target_label})
             if verbose:
                 print("  -> ERROR:", repr(exc))
 
@@ -1284,10 +2121,29 @@ def refit_empirical_cv_rule_row(
         non_target_label=non_target_label,
     )
     if len(results) == 0:
-        raise RuntimeError("No result returned by empirical CV refit.")
+        if errors_df is not None and len(errors_df):
+            error_row = errors_df.iloc[0]
+            raise _SimcaRefitStageError(
+                str(error_row.get("technical_failure_type", "training_error")),
+                str(error_row.get("error", "No result returned by empirical CV refit.")),
+            )
+        raise _SimcaRefitStageError(
+            "training_error",
+            "No result returned by empirical CV refit.",
+        )
 
     first_key = next(iter(results.keys()))
     stored = results[first_key]
+    if rule_variant not in stored.get("object_tables_by_rule", {}):
+        raise _SimcaRefitStageError(
+            "missing_predictions",
+            f"No object predictions for rule {rule_variant!r}.",
+        )
+    if object_threshold not in stored["object_tables_by_rule"][rule_variant]:
+        raise _SimcaRefitStageError(
+            "missing_predictions",
+            f"No object predictions for threshold {object_threshold!r}.",
+        )
     object_df = stored["object_tables_by_rule"][rule_variant][object_threshold].copy()
     pixel_df = stored["pixel_variants_df"].copy()
 
@@ -1344,6 +2200,8 @@ def _attach_selected_metadata(df: pd.DataFrame, row: pd.Series, evaluation_split
         "n_components",
         "alpha",
         "object_threshold",
+        "three_way_lower_threshold",
+        "three_way_upper_threshold",
         "m",
         "m_effective",
         "sg_window_length",
@@ -1375,29 +2233,45 @@ def refit_selected_simca_row(
     model_family = str(selected_row["model_family"])
     target_class = row_str(selected_row, "target_class", target_class)
     non_target_label = row_str(selected_row, "non_target_label", non_target_label)
+    decision_mode = row_str(selected_row, "decision_mode", "2way")
+    refit_row = selected_row.copy()
+    if decision_mode == "3way":
+        upper_threshold = row_value(
+            selected_row,
+            "three_way_upper_threshold",
+            None,
+        )
+        if upper_threshold is None or not np.isfinite(float(upper_threshold)):
+            raise _SimcaRefitStageError(
+                "impossible_threshold",
+                "A 3-way refit requires its calibrated upper threshold.",
+            )
+        # Object aggregation needs a binary cut to materialize the table, but
+        # the subsequent 3-way decision uses both fixed 03B thresholds.
+        refit_row["object_threshold"] = float(upper_threshold)
 
     if model_family == "standard_rule":
         res = refit_best_grid_row(
             object_db=object_db,
             image_db=image_db,
-            best_row=selected_row,
+            best_row=refit_row,
             train_filters=train_filters,
             projection_filters=projection_filters,
             preprocessing_configs=preprocessing_configs,
-            object_thresholds=[float(selected_row["object_threshold"])],
+            object_thresholds=[float(refit_row["object_threshold"])],
             random_state=random_state,
             replace=replace,
             wavelengths=wavelengths,
             target_class=target_class,
             non_target_label=non_target_label,
         )
-        object_df = res["object_tables"][float(selected_row["object_threshold"])].copy()
+        object_df = res["object_tables"][float(refit_row["object_threshold"])].copy()
         pixel_df = res["pixel_df"].copy()
     elif model_family in {"empirical_cv_rule", "rule_variant_grid"}:
         res = refit_empirical_cv_rule_row(
             object_db=object_db,
             image_db=image_db,
-            best_row=selected_row,
+            best_row=refit_row,
             train_filters=train_filters,
             projection_filters=projection_filters,
             preprocessing_configs=preprocessing_configs,
@@ -1436,6 +2310,7 @@ def refit_selected_simca_configs(
     cv_group_col: str = "object_id",
     target_class: str = DEFAULT_TARGET_CLASS,
     non_target_label: str = DEFAULT_NON_TARGET_LABEL,
+    verbose: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Refit several selected SIMCA configurations and collect object/pixel outputs."""
     metric_rows = []
@@ -1445,8 +2320,12 @@ def refit_selected_simca_configs(
     errors = []
 
     for _, row in selected_configs_df.iterrows():
-        config_id = row.get("selected_config_id", "unknown_config")
-        print(f"[{evaluation_split}] {config_id}")
+        config_id = row.get(
+            "candidate_id",
+            row.get("selected_config_id", "unknown_config"),
+        )
+        if verbose:
+            print(f"[{evaluation_split}] {config_id}")
         try:
             out = refit_selected_simca_row(
                 object_db=object_db,
@@ -1473,6 +2352,42 @@ def refit_selected_simca_configs(
             non_target_label_i = row_str(row, "non_target_label", non_target_label)
             true_object_col = true_col(target_class_i, "object")
             pred_object_col = predicted_col(target_class_i, "object")
+            ratio_col = pixel_ratio_col(target_class_i)
+            pred_pixel_col = predicted_col(target_class_i, "pixel")
+
+            if len(object_df) == 0 or len(pixel_df) == 0:
+                raise _SimcaRefitStageError(
+                    "missing_predictions",
+                    "The refit produced an empty object or pixel prediction table.",
+                )
+            required_object_cols = {ratio_col, pred_object_col}
+            required_pixel_cols = {pred_pixel_col, "rule_statistic", "rule_limit"}
+            missing_output_cols = sorted(
+                (required_object_cols - set(object_df.columns))
+                | (required_pixel_cols - set(pixel_df.columns))
+            )
+            if missing_output_cols:
+                raise _SimcaRefitStageError(
+                    "missing_predictions",
+                    f"Missing output columns: {missing_output_cols}",
+                )
+            finite_cols = (
+                (object_df, (ratio_col,)),
+                (pixel_df, ("rule_statistic", "rule_limit")),
+            )
+            for frame, columns in finite_cols:
+                for col in columns:
+                    values = pd.to_numeric(frame[col], errors="coerce")
+                    if not np.isfinite(values).all():
+                        failure_type = (
+                            "nonfinite_simca_limit"
+                            if col == "rule_limit"
+                            else "nonfinite_output"
+                        )
+                        raise _SimcaRefitStageError(
+                            failure_type,
+                            f"{col} contains NaN or Inf.",
+                        )
 
             metrics = {}
             if {true_object_col, pred_object_col}.issubset(object_df.columns):
@@ -1494,7 +2409,6 @@ def refit_selected_simca_configs(
             pixel_parts.append(pixel_df)
 
             true_pixel_col = true_col(target_class_i, "pixel")
-            pred_pixel_col = predicted_col(target_class_i, "pixel")
             if {true_pixel_col, pred_pixel_col}.issubset(pixel_df.columns):
                 pixel_err = summarize_pixel_errors_by_image(
                     pixel_df,
@@ -1508,11 +2422,21 @@ def refit_selected_simca_configs(
                     pixel_error_parts.append(pixel_err)
 
         except Exception as exc:
-            err = row.to_dict()
-            err["evaluation_split"] = evaluation_split
-            err["error"] = repr(exc)
-            errors.append(err)
-            print("  -> ERROR:", repr(exc))
+            failure_type = (
+                exc.failure_type
+                if isinstance(exc, _SimcaRefitStageError)
+                else "training_error"
+            )
+            errors.append(
+                {
+                    "candidate_id": str(config_id),
+                    "evaluation_split": evaluation_split,
+                    "technical_failure_type": failure_type,
+                    "technical_failure_message": str(exc),
+                }
+            )
+            if verbose:
+                print("  -> ERROR:", repr(exc))
 
     return (
         pd.DataFrame(metric_rows),

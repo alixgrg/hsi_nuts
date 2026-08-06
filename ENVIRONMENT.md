@@ -33,6 +33,17 @@ Verification rapide:
 python -c "import numpy, pandas, pyarrow, scipy, skimage, sklearn, h5py, plotly; import src; print('ok', src.__version__)"
 ```
 
+Exécuter une chaîne de notebooks dans l’ordre demandé :
+
+```powershell
+python scripts\run_notebooks.py 02 03 03B 03C
+```
+
+Le lanceur utilise par défaut le kernel Jupyter `hsi-nuts`, s’arrête au premier
+échec et ne remplace un notebook qu’après son exécution complète. Utiliser
+`--dry-run` pour vérifier le plan, `--list` pour afficher les alias et
+`--no-save` pour exécuter sans modifier les notebooks.
+
 Si les donnees/resultats locaux sont presents, tester aussi:
 
 ```powershell
@@ -79,4 +90,3 @@ Verification rapide:
 - `openpyxl` est inclus pour les fichiers Excel USDA.
 - Les dependances lourdes presentes dans l'environnement local mais non requises
   par le code actuel, comme PyTorch ou UMAP, ne sont pas incluses.
-

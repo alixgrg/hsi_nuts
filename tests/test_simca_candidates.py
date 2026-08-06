@@ -2,6 +2,7 @@ import pandas as pd
 import pytest
 
 from src import experiment_config as expcfg
+from src.utils import parse_preprocessing_steps
 from src.workflows.simca_candidates import (
     add_selection_track,
     add_simca_candidate_ids,
@@ -14,6 +15,21 @@ from src.workflows.simca_candidates import (
     validate_simca_candidate_contract,
     validate_simca_evaluation_contract,
 )
+
+
+@pytest.mark.parametrize(
+    ("stored_value", "expected"),
+    [
+        ("vector_norm", ["vector_norm"]),
+        ("absorbance+vector_norm", ["absorbance", "vector_norm"]),
+        ("snv+sg_smooth", ["snv", "sg_smooth"]),
+    ],
+)
+def test_parse_preprocessing_steps_preserves_compound_step_names(
+    stored_value,
+    expected,
+):
+    assert parse_preprocessing_steps(stored_value) == expected
 
 
 def _base_candidate(**overrides):
@@ -36,6 +52,9 @@ def _base_candidate(**overrides):
         "n_components": 5,
         "alpha": 0.01,
         "object_threshold": 0.75,
+        "decision_mode": "2way",
+        "three_way_lower_threshold": float("nan"),
+        "three_way_upper_threshold": float("nan"),
         "sg_window_length": 11,
         "sg_polyorder": 2,
         "position_dilation_radius": 3,
@@ -166,10 +185,10 @@ def test_deduplicate_refit_configs_keeps_first_and_reports_dropped_rows():
                 candidate_id="optuna_candidate",
                 candidate_source="optuna",
                 candidate_sources="optuna",
-                model_family="rule_variant_grid",
+                model_family="empirical_cv_rule",
                 m=40,
                 m_effective=40,
-                balanced_pixel_strategy="random",
+                balanced_pixel_strategy="not_applicable",
                 balanced_pixel_strategy_effective="random",
                 fn_rate=0.1,
             ),

@@ -2,6 +2,8 @@ import numpy as np
 from scipy import ndimage as ndi
 from skimage import filters, morphology, measure, segmentation, feature
 
+from src.protocol_governance import sha256_ndarray
+
 
 def make_reference_image(cube, method="median", band_index=None):
     """
@@ -160,6 +162,9 @@ def segment_objects(
     fill_holes=True,
     use_watershed=False,
     min_distance=10,
+    override_labels=None,
+    override_provenance=None,
+    return_provenance=False,
 ):
     """
     Segment individual objects in a hyperspectral cube.
@@ -179,28 +184,61 @@ def segment_objects(
         band_index=band_index,
     )
 
-    mask, tau = make_binary_mask(
-        image_ref,
-        threshold_method=threshold_method,
-        percentile=percentile,
-        tau=tau,
-        tau_min=tau_min,
-    )
-
-    mask = clean_mask(
-        mask,
-        min_area=min_area,
-        opening_radius=opening_radius,
-        closing_radius=closing_radius,
-        fill_holes=fill_holes,
-    )
-
-    if use_watershed:
-        labels = label_objects_with_watershed(
-            mask,
-            min_distance=min_distance,
-        )
+    if override_labels is not None:
+        labels = np.asarray(override_labels)
+        if labels.ndim != 2 or labels.shape != np.asarray(cube).shape[:2]:
+            raise ValueError(
+                "override_labels must be a 2-D label image matching the cube."
+            )
+        if not np.issubdtype(labels.dtype, np.integer) or np.any(labels < 0):
+            raise ValueError(
+                "override_labels must contain non-negative integer labels."
+            )
+        if not override_provenance:
+            raise ValueError(
+                "override_labels requires documented override_provenance."
+            )
+        labels = labels.astype(np.int32, copy=False)
+        mask = labels > 0
+        tau = None
+        provenance = dict(override_provenance)
+        provenance.setdefault("source", "documented_override")
+        provenance.setdefault("hash", sha256_ndarray(labels))
     else:
-        labels = measure.label(mask)
+        mask, tau = make_binary_mask(
+            image_ref,
+            threshold_method=threshold_method,
+            percentile=percentile,
+            tau=tau,
+            tau_min=tau_min,
+        )
 
+        mask = clean_mask(
+            mask,
+            min_area=min_area,
+            opening_radius=opening_radius,
+            closing_radius=closing_radius,
+            fill_holes=fill_holes,
+        )
+
+        if use_watershed:
+            labels = label_objects_with_watershed(
+                mask,
+                min_distance=min_distance,
+            )
+        else:
+            labels = measure.label(mask)
+        provenance = {
+            "source": "automatic",
+            "hash": sha256_ndarray(labels),
+        }
+
+    if return_provenance:
+        return {
+            "image_ref": image_ref,
+            "mask": mask,
+            "labels": labels,
+            "threshold": tau,
+            "provenance": provenance,
+        }
     return image_ref, mask, labels, tau

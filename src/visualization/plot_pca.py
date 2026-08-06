@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from pathlib import Path
 from typing import Sequence
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from matplotlib.backends.backend_pdf import PdfPages
 from plotly.subplots import make_subplots
 
 from src.utils import wavelength_axis
@@ -20,6 +24,115 @@ from src.visualization.plot_diagnostics import (
     plot_xy_diagnostic,
 )
 from src.visualization.plot_scores import plot_scores
+
+
+def plot_pca_review_panel(
+    result: Mapping,
+    *,
+    wavelengths=None,
+    figure=None,
+    axes=None,
+):
+    """Render the six-panel visual evidence required for one PCA candidate."""
+    if figure is None or axes is None:
+        figure, axes = plt.subplots(2, 3, figsize=(16, 9))
+    axes = np.asarray(axes).reshape(2, 3)
+    X = np.asarray(result["X_preprocessed"], dtype=float)
+    scores = np.asarray(result["scores"], dtype=float)
+    loadings = np.asarray(result["loadings"], dtype=float)
+    labels = np.asarray(result["y"]).astype(str)
+    axis = np.arange(X.shape[1]) if wavelengths is None else np.asarray(wavelengths)
+
+    spectra_ax = axes[0, 0]
+    noise_ax = axes[0, 1]
+    scores_ax = axes[0, 2]
+    loadings_ax = axes[1, 0]
+    variance_ax = axes[1, 1]
+    distance_ax = axes[1, 2]
+    for label in np.unique(labels):
+        values = X[labels == label]
+        mean = values.mean(axis=0)
+        std = values.std(axis=0)
+        spectra_ax.plot(axis, mean, label=label)
+        spectra_ax.fill_between(axis, mean - std, mean + std, alpha=0.15)
+        noise_ax.plot(axis, std, label=label)
+        scores_ax.scatter(
+            scores[labels == label, 0],
+            scores[labels == label, min(1, scores.shape[1] - 1)],
+            s=10,
+            alpha=0.45,
+            label=label,
+        )
+    spectra_ax.set_title("Spectres prétraités (moyenne ± écart-type)")
+    noise_ax.set_title("Bruit / dispersion spectrale")
+    scores_ax.set_title("Scores PC1–PC2")
+    spectra_ax.legend(fontsize=8)
+    scores_ax.legend(fontsize=8)
+
+    for component in range(min(3, loadings.shape[1])):
+        loadings_ax.plot(axis, loadings[:, component], label=f"PC{component + 1}")
+    loadings_ax.set_title("Loadings")
+    loadings_ax.legend(fontsize=8)
+
+    evr = np.asarray(result["explained_variance_ratio"], dtype=float)
+    shown = min(20, len(evr))
+    components = np.arange(1, shown + 1)
+    variance_ax.bar(components, evr[:shown], alpha=0.65, label="individuelle")
+    variance_ax.plot(components, np.cumsum(evr)[:shown], color="black", label="cumulée")
+    variance_ax.axhline(0.95, color="tab:red", linestyle="--", linewidth=1)
+    variance_ax.set_title("Variance expliquée")
+    variance_ax.legend(fontsize=8)
+
+    pca = result["pca"]
+    n_distance_components = min(3, loadings.shape[1])
+    t2 = pca.hotelling_t2(X, n_components=n_distance_components)
+    q, _ = pca.q_residuals(X, n_components=n_distance_components)
+    distance_ax.scatter(t2, q, s=10, alpha=0.45)
+    distance_ax.set_xlabel("Hotelling T²")
+    distance_ax.set_ylabel("Q résiduel")
+    distance_ax.set_title("Distances Q–T²")
+
+    candidate = str(result.get("candidate_id", "candidate"))
+    title = (
+        f"{candidate} | {result.get('matrix_variant', result.get('matrix_method', ''))}"
+        f" | {result.get('preprocessing', '')}"
+    )
+    figure.suptitle(title, fontsize=12)
+    figure.tight_layout(rect=(0, 0, 1, 0.96))
+    return figure, axes
+
+
+def build_pca_visual_review_pdf(
+    candidate_results: Mapping[str, Mapping],
+    candidate_plan: pd.DataFrame,
+    output_path: str | Path,
+    *,
+    wavelengths=None,
+) -> dict[str, int]:
+    """Write exactly one review page for every technically valid candidate."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    candidate_ids = candidate_plan["candidate_id"].astype(str).tolist()
+    missing = [candidate_id for candidate_id in candidate_ids if candidate_id not in candidate_results]
+    if missing:
+        raise RuntimeError(
+            "The visual review PDF cannot omit technically valid candidates: "
+            f"{missing[:10]}"
+        )
+    page_by_candidate = {}
+    with PdfPages(
+        output_path,
+        metadata={"CreationDate": None, "ModDate": None},
+    ) as pdf:
+        for page, candidate_id in enumerate(candidate_ids, start=1):
+            figure, _ = plot_pca_review_panel(
+                candidate_results[candidate_id],
+                wavelengths=wavelengths,
+            )
+            pdf.savefig(figure, bbox_inches="tight")
+            plt.close(figure)
+            page_by_candidate[candidate_id] = page
+    return page_by_candidate
 
 
 def plot_explained_variance(

@@ -1,10 +1,28 @@
 from copy import deepcopy
+import json
+from pathlib import Path
 import re
 
 import numpy as np
+import pandas as pd
 from skimage import measure
 
+from src import experiment_config as expcfg
 from src.data.segmentation import segment_objects
+from src.protocol_governance import (
+    canonical_json,
+    sha256_file,
+    sha256_ndarray,
+    sha256_payload,
+)
+
+
+class RawManifestValidationError(RuntimeError):
+    """Raised when the canonical raw-data inventory is not admissible."""
+
+
+class SegmentationValidationError(RuntimeError):
+    """Raised when segmentation or object extraction violates its contract."""
 
 NIR_UCO_NAME_CONFIG = {
     "suffixes_to_ignore": ["_sb"],
@@ -55,6 +73,12 @@ def _empty_metadata(original_key, clean_key):
         "is_mixture": False,
         "is_position_reference": False,
         "is_unknown": True,
+        # Initial protocol/QC status. Recognised images are promoted to
+        # ``accepted`` by ``parse_image_key``; unknown names remain excluded.
+        "image_status": "excluded",
+        "metadata_status": "error",
+        "metadata_warning": "",
+        "metadata_error": "unknown image name pattern",
         # readable description
         "description": "unknown image name pattern",
     }
@@ -174,10 +198,11 @@ def _unpack_segmentation_result(seg_result):
             seg_result["mask"],
             seg_result["labels"],
             seg_result.get("threshold", None),
+            dict(seg_result.get("provenance", {})),
         )
     if isinstance(seg_result, tuple) and len(seg_result) == 4:
         image_ref, mask, labels, tau = seg_result
-        return image_ref, mask, labels, tau
+        return image_ref, mask, labels, tau, {}
     raise ValueError(
         "segment_objects must return either "
         "(image_ref, mask, labels, threshold) "
@@ -296,6 +321,10 @@ def parse_image_key(key, config=None):
                 "position_set": position_set,
                 "is_position_reference": True,
                 "is_unknown": False,
+                "image_status": "accepted",
+                "metadata_status": "accepted",
+                "metadata_warning": "",
+                "metadata_error": "",
                 "description": (
                     f"{nut_type} batch {batch} in position set {position_set}"
                 ),
@@ -321,6 +350,10 @@ def parse_image_key(key, config=None):
                 },
                 "is_pure": True,
                 "is_unknown": False,
+                "image_status": "accepted",
+                "metadata_status": "accepted",
+                "metadata_warning": "",
+                "metadata_error": "",
                 "description": f"pure {nut_type}, batch {batch}",
             })
             return meta
@@ -343,11 +376,246 @@ def parse_image_key(key, config=None):
             "components": components,
             "is_mixture": True,
             "is_unknown": False,
+            "image_status": "accepted",
+            "metadata_status": "accepted",
+            "metadata_warning": "",
+            "metadata_error": "",
             "description": f"mixture: {component_desc}",
         })
         return meta
 
     return meta
+
+
+def _scientific_role_from_metadata(meta) -> str:
+    if meta.get("is_mixture"):
+        return "mixture_application"
+    if meta.get("is_position_reference"):
+        return "spatial_reference"
+    if meta.get("is_pure"):
+        batch = meta.get("batch")
+        if batch in expcfg.PROTOCOL_CALIBRATION_BATCHES:
+            return "calibration"
+        if batch in expcfg.PROTOCOL_VALIDATION_BATCHES:
+            return "validation"
+        if batch in expcfg.PROTOCOL_TEST_BATCHES:
+            return "test"
+    return "unknown"
+
+
+def _compact_components(components) -> dict[str, int]:
+    return {
+        str(nut): int(info["batch"])
+        for nut, info in sorted(dict(components or {}).items())
+        if isinstance(info, dict) and info.get("batch") is not None
+    }
+
+
+def build_raw_image_manifest(
+    raw_data,
+    *,
+    expected_band_count: int | None = None,
+    strict_scientific_role: bool = True,
+):
+    """Inventory every 3-D HSI cube without expanding spectra into columns."""
+    rows = []
+    errors = []
+    for original_key, value in raw_data.items():
+        cube = np.asarray(value)
+        if cube.ndim != 3:
+            continue
+        meta = parse_image_key(original_key)
+        role = _scientific_role_from_metadata(meta)
+        metadata_status = str(meta.get("metadata_status", "error"))
+        if expected_band_count is not None and cube.shape[2] != int(
+            expected_band_count
+        ):
+            metadata_status = "error"
+            metadata_error = (
+                f"expected {int(expected_band_count)} bands, "
+                f"observed {int(cube.shape[2])}"
+            )
+        else:
+            metadata_error = str(meta.get("metadata_error", ""))
+        if strict_scientific_role and role == "unknown":
+            metadata_status = "error"
+            metadata_error = metadata_error or "unknown scientific role"
+
+        numeric = np.issubdtype(cube.dtype, np.number)
+        if not numeric:
+            metadata_status = "error"
+            metadata_error = metadata_error or "cube dtype is not numeric"
+        n_nan = int(np.isnan(cube).sum()) if numeric else 0
+        n_inf = int(np.isinf(cube).sum()) if numeric else 0
+        row = {
+            "original_key": str(original_key),
+            "clean_key": str(meta["clean_key"]),
+            "sample_kind": str(meta["sample_kind"]),
+            "scientific_role": role,
+            "nut_type": str(meta["nut_type"]),
+            "batch": meta.get("batch"),
+            "components_json": canonical_json(
+                _compact_components(meta.get("components"))
+            ),
+            "height": int(cube.shape[0]),
+            "width": int(cube.shape[1]),
+            "n_bands": int(cube.shape[2]),
+            "dtype": str(cube.dtype),
+            "n_nan": n_nan,
+            "n_inf": n_inf,
+            "metadata_status": metadata_status,
+        }
+        rows.append(row)
+        if metadata_status != "accepted":
+            errors.append(
+                {
+                    "original_key": str(original_key),
+                    "clean_key": str(meta["clean_key"]),
+                    "metadata_status": metadata_status,
+                    "metadata_error": metadata_error,
+                }
+            )
+
+    manifest = pd.DataFrame(
+        rows,
+        columns=expcfg.RAW_IMAGE_MANIFEST_COLUMNS,
+    ).sort_values("clean_key", ignore_index=True)
+    parsing_errors = pd.DataFrame(
+        errors,
+        columns=expcfg.METADATA_PARSING_ERROR_COLUMNS,
+    )
+    return manifest, parsing_errors
+
+
+def validate_raw_image_manifest(
+    raw_manifest: pd.DataFrame,
+    *,
+    require_finite: bool = True,
+    require_known_role: bool = True,
+    require_common_band_count: bool = True,
+) -> bool:
+    """Fail closed when the raw HSI inventory violates the protocol."""
+    missing = [
+        column
+        for column in expcfg.RAW_IMAGE_MANIFEST_COLUMNS
+        if column not in raw_manifest.columns
+    ]
+    failures = []
+    if missing:
+        failures.append(f"missing_columns={missing}")
+    if raw_manifest.empty:
+        failures.append("no_hyperspectral_cube")
+    if not missing:
+        if raw_manifest["original_key"].duplicated().any():
+            failures.append("duplicate_original_key")
+        if raw_manifest["clean_key"].duplicated().any():
+            failures.append("duplicate_clean_key")
+        if require_finite and (
+            pd.to_numeric(raw_manifest["n_nan"], errors="coerce").fillna(1).gt(0)
+            | pd.to_numeric(raw_manifest["n_inf"], errors="coerce").fillna(1).gt(0)
+        ).any():
+            failures.append("non_finite_cube")
+        if require_known_role and (
+            raw_manifest["scientific_role"].eq("unknown")
+            | ~raw_manifest["metadata_status"].eq("accepted")
+        ).any():
+            failures.append("unknown_scientific_role")
+        if (
+            require_common_band_count
+            and raw_manifest["n_bands"].nunique(dropna=False) != 1
+        ):
+            failures.append("inconsistent_band_count")
+    if failures:
+        raise RawManifestValidationError(
+            "Invalid raw image manifest: " + ", ".join(failures)
+        )
+    return True
+
+
+def load_segmentation_override(
+    override_directory,
+    clean_key: str,
+    *,
+    expected_shape=None,
+):
+    """Load one documented label override and return labels plus provenance."""
+    if override_directory is None:
+        return None, None
+    path = Path(override_directory) / f"{clean_key}.npz"
+    if not path.exists():
+        return None, None
+    with np.load(path, allow_pickle=False) as payload:
+        missing = {
+            "labels",
+            "justification",
+            "version",
+        }.difference(payload.files)
+        if missing:
+            raise SegmentationValidationError(
+                f"Undocumented segmentation override {path}: "
+                f"missing={sorted(missing)}"
+            )
+        labels = np.asarray(payload["labels"])
+        justification = str(np.asarray(payload["justification"]).item()).strip()
+        version = str(np.asarray(payload["version"]).item()).strip()
+    if not justification or not version:
+        raise SegmentationValidationError(
+            f"Override {path} requires non-empty justification and version."
+        )
+    if labels.ndim != 2:
+        raise SegmentationValidationError(
+            f"Override {path} labels must be 2-D, got {labels.shape}."
+        )
+    if expected_shape is not None and tuple(labels.shape) != tuple(expected_shape):
+        raise SegmentationValidationError(
+            f"Override {path} shape {labels.shape} != {tuple(expected_shape)}."
+        )
+    if not np.issubdtype(labels.dtype, np.integer) or np.any(labels < 0):
+        raise SegmentationValidationError(
+            f"Override {path} must contain non-negative integer labels."
+        )
+    return labels.astype(np.int32, copy=False), {
+        "source": "documented_override",
+        "hash": sha256_file(path),
+        "justification": justification,
+        "version": version,
+        "path": str(path),
+    }
+
+
+def validate_extracted_object(obj, image_record) -> bool:
+    """Validate one extracted object immediately against its source image."""
+    spectra = np.asarray(obj.get("spectra"))
+    positions = np.asarray(obj.get("positions_global"))
+    mask = np.asarray(obj.get("mask"), dtype=bool)
+    labels = np.asarray(image_record.get("labels"))
+    label_id = int(obj.get("label_id", -1))
+    expected_mask = labels == label_id
+    expected_pixels = int(expected_mask.sum())
+    failures = []
+    if spectra.ndim != 2:
+        failures.append(f"spectra_shape={spectra.shape}")
+    if positions.shape != (expected_pixels, 2):
+        failures.append(f"positions_shape={positions.shape}")
+    if spectra.ndim == 2 and spectra.shape[0] != expected_pixels:
+        failures.append(f"spectra_rows={spectra.shape[0]}")
+    if int(obj.get("n_pixels", -1)) != expected_pixels:
+        failures.append(f"n_pixels={obj.get('n_pixels')}")
+    if int(obj.get("area_pixels", -1)) != expected_pixels:
+        failures.append(f"area_pixels={obj.get('area_pixels')}")
+    if int(mask.sum()) != expected_pixels:
+        failures.append(f"mask_pixels={int(mask.sum())}")
+    if spectra.ndim == 2 and spectra.shape[1] != np.asarray(
+        image_record.get("cube")
+    ).shape[2]:
+        failures.append("spectral_band_mismatch")
+    if spectra.size and not np.isfinite(spectra).all():
+        failures.append("non_finite_spectra")
+    if failures:
+        raise SegmentationValidationError(
+            f"Invalid extracted object {obj.get('object_id')}: {failures}"
+        )
+    return True
 
 
 
@@ -395,7 +663,6 @@ def extract_objects_from_labeled_image(
     object_nut_type = infer_object_nut_type_from_metadata(image_meta)
     objects = {}
     regions = measure.regionprops(labels, intensity_image=image_ref)
-    obj_counter = 1
 
     for region in regions:
         if region.area < min_area:
@@ -425,11 +692,15 @@ def extract_objects_from_labeled_image(
         mean_spectrum = np.nanmean(spectra, axis=0)
         std_spectrum = np.nanstd(spectra, axis=0)
         median_spectrum = np.nanmedian(spectra, axis=0)
-        object_id = f"{image_meta['clean_key']}_obj{obj_counter:03d}"
+        object_id = f"{image_meta['clean_key']}_obj{int(label_id):03d}"
+        if object_id in objects:
+            raise SegmentationValidationError(
+                f"Duplicate deterministic object_id: {object_id}"
+            )
         objects[object_id] = {
             # object identification
             "object_id": object_id,
-            "object_index": obj_counter,
+            "object_index": int(label_id),
             "label_id": int(label_id),
             # Image source
             "source_image": image_meta["original_key"],
@@ -445,6 +716,12 @@ def extract_objects_from_labeled_image(
             "is_mixture": image_meta["is_mixture"],
             "is_position_reference": image_meta["is_position_reference"],
             "is_unknown": image_meta["is_unknown"],
+            "image_status": image_meta.get("image_status", "accepted"),
+            "object_status": (
+                "excluded"
+                if image_meta.get("image_status") == "excluded"
+                else "accepted"
+            ),
             # object label for learning / projection
             # For mixtures : unknown before SIMCA prediction
             "object_nut_type": object_nut_type,
@@ -480,8 +757,6 @@ def extract_objects_from_labeled_image(
             # Practical description
             "description": image_meta["description"],
         }
-        obj_counter += 1
-
     return objects
 
 
@@ -496,8 +771,9 @@ def build_minimal_nir_uco_object_database(
     data_mode="reflectance",
     min_area=None,
     split=None,
-    skip_unknown=True,
+    skip_unknown=False,
     segmentation_kwargs=None,
+    segmentation_overrides_dir=None,
 ):
     """
     Build a minimal object-level database from NIR UCO images.
@@ -533,6 +809,8 @@ def build_minimal_nir_uco_object_database(
         If True, skip image names not recognized by parse_image_key.
     segmentation_kwargs : dict or None
         Parameters passed to segment_objects.
+    segmentation_overrides_dir : str or Path or None
+        Directory containing documented ``<clean_key>.npz`` label overrides.
 
     Returns
     -------
@@ -568,6 +846,10 @@ def build_minimal_nir_uco_object_database(
         if image_meta["is_unknown"] and skip_unknown:
             print(f"[WARNING] Skipping unknown image name: {key}")
             continue
+        if image_meta["is_unknown"]:
+            raise RawManifestValidationError(
+                f"Unknown HSI cube is blocking in canonical mode: {key}"
+            )
         print(
             f"Processing {key} | "
             f"kind={image_meta['sample_kind']} | "
@@ -583,13 +865,35 @@ def build_minimal_nir_uco_object_database(
             cube = preprocess_func(raw_cube, n_remove_start=n_remove_start, n_stop_end=n_stop_end)
         else:
             cube = np.asarray(raw_cube)
-        seg_result = segment_objects(
-            cube,
-            **segmentation_kwargs,
+        override_labels, override_provenance = load_segmentation_override(
+            segmentation_overrides_dir,
+            image_meta["clean_key"],
+            expected_shape=cube.shape[:2],
         )
+        if override_labels is None:
+            seg_result = segment_objects(cube, **segmentation_kwargs)
+        else:
+            seg_result = segment_objects(
+                cube,
+                override_labels=override_labels,
+                override_provenance=override_provenance,
+                return_provenance=True,
+                **segmentation_kwargs,
+            )
 
-        image_ref, mask, labels, tau = _unpack_segmentation_result(seg_result)
+        image_ref, mask, labels, tau, provenance = _unpack_segmentation_result(
+            seg_result
+        )
+        if not provenance:
+            provenance = {
+                "source": "automatic",
+                "hash": sha256_ndarray(labels),
+            }
         _validate_cube_and_segmentation(cube, labels, image_ref, mask=mask)
+        if int(np.asarray(labels).max(initial=0)) == 0:
+            raise SegmentationValidationError(
+                f"Scientific image {image_meta['clean_key']} has an empty mask."
+            )
         seg_meta = segmentation_metadata(mask=mask, labels=labels, threshold=tau)
         objects = extract_objects_from_labeled_image(
             cube=cube,
@@ -601,8 +905,18 @@ def build_minimal_nir_uco_object_database(
             min_area=object_min_area,
             split=split,
         )
-        object_database.update(objects)
-        image_database[image_meta["clean_key"]] = {
+        if not objects:
+            raise SegmentationValidationError(
+                f"Scientific image {image_meta['clean_key']} produced no "
+                "eligible extracted object."
+            )
+        duplicate_ids = set(object_database).intersection(objects)
+        if duplicate_ids:
+            raise SegmentationValidationError(
+                f"Duplicate object ids before database update: "
+                f"{sorted(duplicate_ids)}"
+            )
+        image_record = {
             # image identification
             "image_id": image_meta["original_key"],
             "clean_key": image_meta["clean_key"],
@@ -618,6 +932,11 @@ def build_minimal_nir_uco_object_database(
             "segmentation_n_labels_positive": seg_meta["n_labels_positive"],
             "segmentation_mask_area_pixels": seg_meta["mask_area_pixels"],
             "segmentation_mask_area_ratio": seg_meta["mask_area_ratio"],
+            "segmentation_source": provenance.get("source", "automatic"),
+            "segmentation_hash": provenance.get(
+                "hash",
+                sha256_ndarray(labels),
+            ),
             # Spectral metadata
             "wavelengths": wavelengths,
             "data_mode": data_mode,
@@ -625,6 +944,10 @@ def build_minimal_nir_uco_object_database(
             "n_objects": len(objects),
             "object_ids": list(objects.keys()),
         }
+        for obj in objects.values():
+            validate_extracted_object(obj, image_record)
+        object_database.update(objects)
+        image_database[image_meta["clean_key"]] = image_record
         print(f"  -> {len(objects)} objects detected")
 
     return object_database, image_database
@@ -705,3 +1028,50 @@ def resolve_selected_keys(data, selected_keys):
         )
 
     return resolved
+
+
+def build_image_summary(image_db) -> pd.DataFrame:
+    """Return the compact canonical image manifest without spectral columns."""
+    rows = []
+    for clean_key, image in image_db.items():
+        cube = np.asarray(image.get("cube"))
+        mask = np.asarray(image.get("mask"), dtype=bool)
+        rows.append(
+            {
+                "clean_key": str(clean_key),
+                "sample_kind": image.get("sample_kind"),
+                "nut_type": image.get("nut_type"),
+                "batch": image.get("batch"),
+                "image_status": image.get("image_status", "accepted"),
+                "n_objects": int(image.get("n_objects", 0)),
+                "height": int(cube.shape[0]) if cube.ndim == 3 else np.nan,
+                "width": int(cube.shape[1]) if cube.ndim == 3 else np.nan,
+                "n_bands": int(cube.shape[2]) if cube.ndim == 3 else np.nan,
+                "mask_area_ratio": (
+                    float(mask.mean()) if mask.size else np.nan
+                ),
+            }
+        )
+    return pd.DataFrame(rows, columns=expcfg.DATABASE_IMAGE_SUMMARY_COLUMNS)
+
+
+def build_object_summary(object_db) -> pd.DataFrame:
+    """Return the compact canonical object manifest without spectra."""
+    rows = [
+        {
+            "object_id": str(object_id),
+            "source_image": obj.get(
+                "source_clean_key",
+                obj.get("source_image"),
+            ),
+            "sample_kind": obj.get("sample_kind"),
+            "object_nut_type": obj.get("object_nut_type"),
+            "batch": obj.get("batch"),
+            "object_status": obj.get("object_status", "accepted"),
+            "area_pixels": int(obj.get("area_pixels", 0)),
+            "n_pixels": int(obj.get("n_pixels", 0)),
+            "n_bands": int(obj.get("n_bands", 0)),
+        }
+        for object_id, obj in object_db.items()
+    ]
+    return pd.DataFrame(rows, columns=expcfg.DATABASE_OBJECT_SUMMARY_COLUMNS)

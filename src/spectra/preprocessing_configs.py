@@ -90,8 +90,23 @@ def preprocessing_name_from_steps(steps: Sequence[str]) -> str:
     return "_".join(str(step) for step in steps)
 
 
-def validate_preprocessing_steps(steps: Sequence[str]) -> tuple[str, ...]:
-    """Validate and return preprocessing steps as tuple."""
+def preprocessing_derivative(steps: Sequence[str]) -> int | None:
+    """Return the Savitzky-Golay derivative encoded by a chain, if any."""
+    deriv_by_step = {"sg_smooth": 0, "sg_d1": 1, "sg_d2": 2}
+    derivatives = [deriv_by_step[step] for step in steps if step in deriv_by_step]
+    if len(derivatives) > 1:
+        raise ValueError("A preprocessing chain may contain only one Savitzky-Golay step.")
+    return derivatives[0] if derivatives else None
+
+
+def validate_preprocessing_steps(
+    steps: Sequence[str],
+    *,
+    n_features: int | None = None,
+    sg_window_length: int | None = None,
+    sg_polyorder: int | None = None,
+) -> tuple[str, ...]:
+    """Validate step names and, when supplied, the complete SG contract."""
     steps = tuple(steps)
 
     if len(steps) == 0:
@@ -106,6 +121,25 @@ def validate_preprocessing_steps(steps: Sequence[str]) -> tuple[str, ...]:
 
     if "raw" in steps and len(steps) > 1:
         raise ValueError("'raw' must be used alone, not inside a preprocessing chain.")
+
+    deriv = preprocessing_derivative(steps)
+    if sg_window_length is not None or sg_polyorder is not None:
+        if sg_window_length is None or sg_polyorder is None:
+            raise ValueError(
+                "Both sg_window_length and sg_polyorder are required for SG validation."
+            )
+        window = int(sg_window_length)
+        polyorder = int(sg_polyorder)
+        if window < 5:
+            raise ValueError("SG window must be at least 5.")
+        if window % 2 == 0:
+            raise ValueError("SG window must be odd.")
+        if n_features is not None and window > int(n_features):
+            raise ValueError("SG window exceeds number of bands.")
+        if polyorder < 0 or polyorder >= window:
+            raise ValueError("Polynomial degree must be lower than the SG window.")
+        if deriv is not None and (deriv not in {0, 1, 2} or deriv > polyorder):
+            raise ValueError("SG derivative must be in {0, 1, 2} and not exceed polyorder.")
 
     return steps
 

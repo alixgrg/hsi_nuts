@@ -27,9 +27,19 @@ class MatrixOutput:
     matrix_method: str
     matrix_spec: MatrixSpec
 
-    def validate(self) -> "MatrixOutput":
+    def validate(
+        self,
+        *,
+        require_finite: bool = True,
+        expected_classes=None,
+        expected_object_ids=None,
+        require_two_classes: bool = False,
+        zero_variance_epsilon: float = 1e-12,
+    ) -> "MatrixOutput":
         if self.X.ndim != 2:
             raise ValueError(f"X must be 2D, got shape={self.X.shape}")
+        if self.X.shape[0] == 0 or self.X.shape[1] == 0:
+            raise ValueError(f"X must be non-empty, got shape={self.X.shape}")
         if len(self.y) != self.X.shape[0]:
             raise ValueError(f"y length {len(self.y)} does not match X rows {self.X.shape[0]}")
         for key, values in self.metadata.items():
@@ -42,7 +52,74 @@ class MatrixOutput:
             raise ValueError(
                 f"wavelengths length {len(self.wavelengths)} does not match X columns {self.X.shape[1]}"
             )
+        if require_finite:
+            if not np.issubdtype(self.X.dtype, np.number):
+                raise ValueError(f"X must be numeric, got dtype={self.X.dtype}")
+            if not np.isfinite(self.X).all():
+                raise ValueError("X contains NaN or infinite values.")
+        matrix_rank = int(np.linalg.matrix_rank(self.X))
+        if matrix_rank == 0:
+            raise ValueError("X has rank zero.")
+        zero_variance_bands = (
+            np.var(self.X, axis=0) <= float(zero_variance_epsilon)
+        )
+        if zero_variance_bands.shape != (self.X.shape[1],):
+            raise RuntimeError("Zero-variance audit is not aligned with X.")
+
+        pixel_fields = {"row", "col", "pixel_index"}
+        if self.matrix_spec.level in {"pixel", "balanced_pixel"}:
+            missing_pixel_fields = pixel_fields.difference(self.metadata)
+            if missing_pixel_fields:
+                raise ValueError(
+                    "Pixel matrices require aligned spatial metadata: "
+                    f"{sorted(missing_pixel_fields)}"
+                )
+        else:
+            unexpected = pixel_fields.intersection(self.metadata)
+            if unexpected:
+                raise ValueError(
+                    "Object matrices must not contain empty pixel metadata "
+                    f"columns: {sorted(unexpected)}"
+                )
+
+        classes = {
+            str(value)
+            for value in np.asarray(self.y).tolist()
+            if value is not None and str(value).lower() != "nan"
+        }
+        if require_two_classes and len(classes) < 2:
+            raise ValueError(
+                f"At least two classes are required, observed={sorted(classes)}."
+            )
+        if expected_classes is not None:
+            expected = {str(value) for value in expected_classes}
+            missing = expected - classes
+            if missing:
+                raise ValueError(f"Matrix is missing expected classes: {sorted(missing)}")
+        if expected_object_ids is not None:
+            if "object_id" not in self.metadata:
+                raise ValueError("metadata must contain object_id for coverage validation.")
+            expected = {str(value) for value in expected_object_ids}
+            observed = {
+                str(value)
+                for value in np.asarray(self.metadata["object_id"]).tolist()
+            }
+            missing = expected - observed
+            unexpected = observed - expected
+            if missing or unexpected:
+                raise ValueError(
+                    "Object coverage mismatch: "
+                    f"missing={sorted(missing)}, unexpected={sorted(unexpected)}"
+                )
         return self
+
+    @property
+    def matrix_rank(self) -> int:
+        return int(np.linalg.matrix_rank(self.X))
+
+    @property
+    def zero_variance_bands(self) -> np.ndarray:
+        return np.var(self.X, axis=0) <= 1e-12
 
     def as_tuple(self, include_wavelengths: bool = True):
         if include_wavelengths:
@@ -152,6 +229,11 @@ def build_matrix_output(
     random_state: int = 42,
     replace: bool = False,
     balanced_pixel_strategy: str = "random",
+    under_m_policy: str | None = None,
+    require_finite: bool = True,
+    expected_classes=None,
+    expected_object_ids=None,
+    require_two_classes: bool = False,
 ):
     """Build a MatrixOutput object from object_db using a registered matrix method."""
     spec = get_matrix_spec(matrix_method)
@@ -164,6 +246,7 @@ def build_matrix_output(
         random_state=random_state,
         replace=replace,
         balanced_pixel_strategy=balanced_pixel_strategy,
+        under_m_policy=under_m_policy,
     )
     output = MatrixOutput(
         X=np.asarray(X, dtype=float),
@@ -173,7 +256,12 @@ def build_matrix_output(
         matrix_method=str(matrix_method),
         matrix_spec=spec,
     )
-    return output.validate()
+    return output.validate(
+        require_finite=require_finite,
+        expected_classes=expected_classes,
+        expected_object_ids=expected_object_ids,
+        require_two_classes=require_two_classes,
+    )
 
 
 def build_matrix(
@@ -184,7 +272,12 @@ def build_matrix(
     random_state: int = 42,
     replace: bool = False,
     balanced_pixel_strategy: str = "random",
+    under_m_policy: str | None = None,
     return_wavelengths: bool = False,
+    require_finite: bool = True,
+    expected_classes=None,
+    expected_object_ids=None,
+    require_two_classes: bool = False,
 ):
     """
     Build X, y, metadata from object_db using a registered matrix method.
@@ -210,5 +303,10 @@ def build_matrix(
         random_state=random_state,
         replace=replace,
         balanced_pixel_strategy=balanced_pixel_strategy,
+        under_m_policy=under_m_policy,
+        require_finite=require_finite,
+        expected_classes=expected_classes,
+        expected_object_ids=expected_object_ids,
+        require_two_classes=require_two_classes,
     )
     return output.as_tuple(include_wavelengths=return_wavelengths)

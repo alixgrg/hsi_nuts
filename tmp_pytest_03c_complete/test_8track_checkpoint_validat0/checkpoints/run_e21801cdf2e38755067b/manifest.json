@@ -1,0 +1,36 @@
+{
+  "configuration_hash": "configuration",
+  "evaluation_config_ids": [
+    "iceval_0e5b717ae1f72024",
+    "iceval_1e053be050267f37",
+    "iceval_38617120d4638617",
+    "iceval_63a4c36c92aa1983",
+    "iceval_76e15b4d3e2f5fef",
+    "iceval_b31272d722cb0b02",
+    "iceval_c1e2a4165e31b352",
+    "iceval_c8a9774589e7d379",
+    "iceval_e3c019a3040caa07",
+    "iceval_f7afa6b391aa0e86"
+  ],
+  "expected_data_config_ids": [
+    "icdata_287d1460297908aa",
+    "icdata_6b39a4838853374a"
+  ],
+  "expected_fit_config_ids": [
+    "icfit_8a096b2589f376e8",
+    "icfit_a2fbc6e9ccc17be5"
+  ],
+  "fold_contract_hash": "folds",
+  "fold_ids": [
+    0,
+    1
+  ],
+  "pca_shortlist_id": "shortlist",
+  "protocol_hash": "protocol",
+  "protocol_version": "8tracks_v3",
+  "runner_contract": "8tracks_projection_input_filter_pca_shift_v2",
+  "schema_version": "8tracks_v2",
+  "signature": "e21801cdf2e38755067b6d8a9fefbba0d79dcef0180ab92c39aed3699510150e",
+  "track_contract_hash": "tracks",
+  "under_m_policy": "exclude"
+}

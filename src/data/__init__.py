@@ -7,7 +7,10 @@ from src.data.segmentation import (
 )
 from src.data.database import (
     NIR_UCO_NAME_CONFIG,
+    build_image_summary,
     build_minimal_nir_uco_object_database,
+    build_object_summary,
+    build_raw_image_manifest,
     detect_known_image_keys,
     extract_objects_from_labeled_image,
     infer_object_nut_type_from_metadata,
@@ -17,11 +20,16 @@ from src.data.database import (
     preprocess_nir_uco_cube,
     resolve_selected_keys,
     segmentation_metadata,
+    validate_extracted_object,
+    validate_raw_image_manifest,
 )
 
 __all__ = [
     "NIR_UCO_NAME_CONFIG",
+    "build_image_summary",
     "build_minimal_nir_uco_object_database",
+    "build_object_summary",
+    "build_raw_image_manifest",
     "clean_mask",
     "detect_known_image_keys",
     "extract_objects_from_labeled_image",
@@ -36,4 +44,6 @@ __all__ = [
     "resolve_selected_keys",
     "segmentation_metadata",
     "segment_objects",
+    "validate_extracted_object",
+    "validate_raw_image_manifest",
 ]

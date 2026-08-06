@@ -356,6 +356,11 @@ def save_parquet(
         if optimize
         else df_safe.copy()
     )
+    # pandas asks the parquet engine to JSON-serialize ``DataFrame.attrs``.
+    # Runtime diagnostics may contain DataFrames, arrays or other objects that
+    # are intentionally outside the persisted table contract. Never let such
+    # transient metadata make an otherwise valid parquet table unsavable.
+    df_to_save.attrs = {}
 
     df_to_save.to_parquet(
         path,
@@ -550,6 +555,15 @@ def parse_preprocessing_steps(value) -> list[str]:
 
     while i < len(raw_parts):
         current = raw_parts[i]
+
+        if (
+            current == "vector"
+            and i + 1 < len(raw_parts)
+            and raw_parts[i + 1] == "norm"
+        ):
+            steps.append("vector_norm")
+            i += 2
+            continue
 
         if (
             current == "sg"

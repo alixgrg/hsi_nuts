@@ -1,7 +1,10 @@
 import numpy as np
 import pytest
 
-from src.spectra.preprocessing import SpectralPreprocessor
+from src.spectra.preprocessing import (
+    SpectralPreprocessor,
+    preprocessing_input_validity_report,
+)
 from src.spectra.preprocessing_configs import PREPROCESSING_ALIASES
 
 
@@ -60,7 +63,7 @@ def test_fit_transform_matches_fit_then_transform_for_each_preprocessing(
     [
         ("sg_smooth", {"window_length": 9, "polyorder": 2, "deriv": 0}),
         ("sg_d1", {"window_length": 9, "polyorder": 2, "deriv": 1}),
-        ("sg_d2", {"window_length": 11, "polyorder": 3, "deriv": 2}),
+        ("sg_d2", {"window_length": 9, "polyorder": 2, "deriv": 2}),
     ],
 )
 def test_savgol_params_are_resolved_once_and_stored(step, expected):
@@ -110,3 +113,28 @@ def test_combined_preprocessing_chains_are_finite_and_reusable(steps):
 
     if "msc" in steps:
         assert "msc_reference" in preprocessor.fitted_params_
+
+
+def test_input_validity_is_preprocessing_aware_without_silent_clipping():
+    X = np.asarray(
+        [
+            [0.4, 0.5, 0.6],
+            [0.0, 0.5, 0.6],
+            [np.nan, 0.5, 0.6],
+        ]
+    )
+    raw = preprocessing_input_validity_report(X, steps=("raw",))
+    absorbance = preprocessing_input_validity_report(
+        X,
+        steps=("absorbance",),
+    )
+    assert raw["valid_mask"].tolist() == [True, True, False]
+    assert absorbance["valid_mask"].tolist() == [True, False, False]
+    assert absorbance["n_nonpositive_absorbance_rows"] == 1
+    assert absorbance["n_nonfinite_rows"] == 1
+    clipped = preprocessing_input_validity_report(
+        X,
+        steps=("absorbance",),
+        absorbance_nonpositive_policy="clip",
+    )
+    assert clipped["valid_mask"].tolist() == [True, True, False]

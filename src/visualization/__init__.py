@@ -51,6 +51,7 @@ from src.visualization.plot_diagnostics import (
 )
 
 from src.visualization.plot_pca import (
+    build_pca_visual_review_pdf,
     plot_explained_variance,
     plot_loadings,
     plot_biplot,
@@ -60,6 +61,7 @@ from src.visualization.plot_pca import (
     plot_pca_metric_heatmap,
     plot_pca_metric_tradeoff,
     plot_pca_metric_ranking,
+    plot_pca_review_panel,
 )
 
 from src.visualization.plot_simca import (
@@ -80,6 +82,7 @@ from src.visualization.plot_decision import (
 __all__ = [
     "background_image",
     "build_scores_dataframe",
+    "build_pca_visual_review_pdf",
     "extract_spectral_matrix",
     "make_customdata",
     "make_dynamic_color_map",
@@ -112,6 +115,7 @@ __all__ = [
     "plot_pca_metric_ranking",
     "plot_pca_metric_t2",
     "plot_pca_metric_tradeoff",
+    "plot_pca_review_panel",
     "plot_pixel_error_overlay",
     "plot_pixel_fp_fn_overlay",
     "plot_pixel_prediction_overlay",

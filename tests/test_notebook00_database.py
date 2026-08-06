@@ -4,6 +4,8 @@ import numpy as np
 import pytest
 
 from src.data.database import (
+    RawManifestValidationError,
+    build_raw_image_manifest,
     build_minimal_nir_uco_object_database,
     detect_known_image_keys,
     extract_objects_from_labeled_image,
@@ -12,8 +14,14 @@ from src.data.database import (
     parse_image_key,
     resolve_selected_keys,
     segmentation_metadata,
+    validate_raw_image_manifest,
 )
-from src.io.database_h5 import load_nir_uco_h5, save_nir_uco_h5, validate_nir_uco_h5
+from src.io.database_h5 import (
+    database_content_hash,
+    load_nir_uco_h5,
+    save_nir_uco_h5,
+    validate_nir_uco_h5,
+)
 
 
 def test_parse_image_key_recognizes_active_nir_uco_patterns():
@@ -23,6 +31,8 @@ def test_parse_image_key_recognizes_active_nir_uco_patterns():
     assert pure["nut_type"] == "almond"
     assert pure["batch"] == 1
     assert pure["is_pure"] is True
+    assert pure["image_status"] == "accepted"
+    assert pure["metadata_status"] == "accepted"
 
     abbreviated_pure = parse_image_key("alm1_sb")
     assert abbreviated_pure["sample_kind"] == "pure"
@@ -43,6 +53,23 @@ def test_parse_image_key_recognizes_active_nir_uco_patterns():
     unknown = parse_image_key("calibration_panel")
     assert unknown["sample_kind"] == "unknown"
     assert unknown["is_unknown"] is True
+    assert unknown["image_status"] == "excluded"
+    assert unknown["metadata_status"] == "error"
+
+
+def test_raw_manifest_is_compact_and_unknown_cube_is_blocking():
+    cube = np.ones((3, 4, 69), dtype=np.float32)
+    manifest, errors = build_raw_image_manifest(
+        {"alm1pea2_sb": cube, "unknown_cube": cube},
+        expected_band_count=69,
+        strict_scientific_role=True,
+    )
+    mixture = manifest.set_index("clean_key").loc["alm1pea2"]
+    assert mixture["batch"] is None
+    assert mixture["components_json"] == '{"almond":1,"peanut":2}'
+    assert errors["original_key"].tolist() == ["unknown_cube"]
+    with pytest.raises(RawManifestValidationError, match="unknown"):
+        validate_raw_image_manifest(manifest)
 
 
 def test_split_and_object_label_inference_are_public_and_stable():
@@ -110,9 +137,9 @@ def test_build_database_reuses_segmentation_min_area_for_object_extraction(monke
     )
 
     assert calls == [{"min_area": 5}]
-    assert list(object_db) == ["almond1_obj001"]
-    assert object_db["almond1_obj001"]["label_id"] == 2
-    assert object_db["almond1_obj001"]["area_pixels"] == 25
+    assert list(object_db) == ["almond1_obj002"]
+    assert object_db["almond1_obj002"]["label_id"] == 2
+    assert object_db["almond1_obj002"]["area_pixels"] == 25
     assert image_db["almond1"]["n_objects"] == 1
 
 
@@ -190,6 +217,20 @@ def test_save_load_nir_uco_h5_roundtrip_reconstructs_heavy_arrays(tmp_path, mini
         include_heavy_object_arrays=False,
     )
     assert validate_nir_uco_h5(saved_path) is True
+    deep_report = validate_nir_uco_h5(
+        saved_path,
+        expected_image_db=image_db,
+        expected_object_db=object_db,
+        deep=True,
+        return_report=True,
+    )
+    assert deep_report["passed"].all()
+    assert {
+        "basic_structure",
+        "spatial_shapes_match",
+        "spectra_shape",
+        "memory_roundtrip_spectra",
+    }.issubset(set(deep_report["check"]))
     loaded_object_db, loaded_image_db = load_nir_uco_h5(
         saved_path,
         reconstruct_heavy_object_arrays=True,
@@ -208,6 +249,10 @@ def test_save_load_nir_uco_h5_roundtrip_reconstructs_heavy_arrays(tmp_path, mini
     np.testing.assert_array_equal(loaded_obj["mask_global"], original_obj["mask_global"])
     np.testing.assert_allclose(loaded_obj["cube_crop"], image_db["almond1"]["cube"][1:3, 1:3, :])
     np.testing.assert_allclose(loaded_image_db["almond1"]["cube"], image_db["almond1"]["cube"])
+    assert database_content_hash(
+        loaded_object_db,
+        loaded_image_db,
+    ) == database_content_hash(object_db, image_db)
 
 
 def test_save_nir_uco_h5_rejects_object_dtype_arrays(tmp_path, mini_hsi_db):

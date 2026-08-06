@@ -1,0 +1,19 @@
+{
+  "amendment_justification": "2026-08-03: tasks 25-26 added before batch-3 inspection: fixed train-projection eligibility thresholds, explicit unsupported tracks, and one globally calibrated spatial post-processing lock using only pure-image OOF maps from batches 1-2.",
+  "amendment_policy": "Any scientific change after the freeze requires a new protocol version, a dated justification, and regeneration of every protocol artifact.",
+  "artifact_sha256": {
+    "checks": "2973b14a6b0732d2e656b2a8b107e020cc195e3497a899d4edc5a7be6a901af6",
+    "inference_plan": "38757f08c4cf16549dc3ef17a869297f8af11ab16e38db32a0bb843af86779f2",
+    "manifest": "6f70f4ad603177f03e205ee786c008b32ffef1230582aad099af15cf1875db24",
+    "planned_contrasts": "7a795bb2e75401ab033f33de3863bcd0213529b80dd0861914c0767d40029f77"
+  },
+  "configuration_sha256": "d9a5771b0e6080b2b0f04da48f05540572694e1599493aa3c2c698410dbacc1d",
+  "freeze_date": "2026-08-03",
+  "immutable": true,
+  "inference_plan_sha256": "6f60368f60d7818e9555649769728ede68af11ba10e20c8c67727e789d95a272",
+  "lock_sha256": "40bc7403b904cc3936bc0f8f40f6cd8379f42e7e170253e1f09eb0c673f66601",
+  "planned_contrasts_sha256": "71d7fe422c54dbe6db8b3b640079541ea06e9c867c839c3b6bc3bb7a12bb7333",
+  "protocol_version": "8tracks_v3",
+  "schema_version": "8tracks_v2",
+  "status": "frozen"
+}
