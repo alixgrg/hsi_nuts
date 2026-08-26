@@ -317,7 +317,9 @@ def test_notebooks_enforce_task15_16_order_and_downstream_hash_lock():
     source03b = "\n".join(
         "".join(cell.get("source", [])) for cell in notebook03b["cells"]
     )
-    assert "expected_protocol_hash=protocol_hash" in source03b
+    assert "expected_protocol_hash=execution_protocol_hash" in source03b
+    assert "validate_selection_only_protocol_lineage(" in source03b
+    assert "checkpoint_context=checkpoint_execution_context" in source03b
     assert "expected_input_fingerprint=pca_input_hash" in source03b
     assert "expected_review_hash=pca_review_hash" in source03b
-    assert "shortlist_id" in source03b
+    assert "validate_pca_preprocessing_shortlist(" in source03b

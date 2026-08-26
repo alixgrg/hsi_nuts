@@ -1,142 +1,181 @@
-import numpy as np
 import pandas as pd
+import pytest
 
 from src import experiment_config as expcfg
-from src.decision.metrics import apply_locked_margin_decision
-from src.workflows.simca_grid_evaluation import (
-    run_exhaustive_locked_grid_evaluation,
+from src.workflows.simca_calibration_selection import (
+    aggregate_threshold_candidates,
+    build_model_metrics,
+)
+from src.workflows.simca_selected_model_audit import (
+    run_selected_model_reference_audit,
 )
 
 
-def test_locked_margin_boundaries_match_03c_contract():
-    target, uncertain = apply_locked_margin_decision(
-        np.array([-1.0, 0.0, 1.0]),
-        "3way",
-        three_way_lower_threshold=0.0,
-        three_way_upper_threshold=1.0,
+def _frame_with_schema(columns, rows):
+    return pd.DataFrame(
+        [{column: row.get(column) for column in columns} for row in rows],
+        columns=columns,
     )
 
-    assert target.tolist() == [False, False, True]
-    assert uncertain.tolist() == [False, True, False]
 
-
-def _domain_row(domain_id, calibration_id, projection_id, seed, n_components=2):
+def _synthetic_inputs(tmp_path):
+    model_id = "model_test"
+    model_catalog = _frame_with_schema(
+        expcfg.INTERNAL_CALIBRATION_MODEL_CATALOG_COLUMNS,
+        [
+            {
+                "model_id": model_id,
+                "track_id": "E1",
+                "decision_mode": "2way",
+                "projection_level": "object_projection",
+            }
+        ],
+    )
+    selected_models = pd.DataFrame(
+        {"model_id": [model_id], "selection_status": ["selected"]}
+    )
+    selected_runs = pd.DataFrame(
+        {
+            "model_id": [model_id],
+            "random_state": [0],
+            "fit_id": ["fit_test"],
+            "projection_id": ["projection_test"],
+        }
+    )
+    selected_thresholds = pd.DataFrame(
+        {
+            "model_id": [model_id],
+            "random_state": [0],
+            "decision_scope": ["direct"],
+            "lower_quantile": [float("nan")],
+            "upper_quantile": [float("nan")],
+            "vote_threshold": [float("nan")],
+            "lower_threshold": [0.0],
+            "upper_threshold": [0.0],
+        }
+    )
+    fold_values = (
+        {
+            "target_miss_rate": 0.0,
+            "false_accept_rate": 0.5,
+            "balanced_accuracy": 0.75,
+            "n_observations": 4,
+            "n_target": 2,
+            "n_non_target": 2,
+            "max_unit_target_miss_rate": 0.0,
+            "max_unit_false_accept_rate": 0.5,
+        },
+        {
+            "target_miss_rate": 0.5,
+            "false_accept_rate": 0.0,
+            "balanced_accuracy": 0.75,
+            "n_observations": 4,
+            "n_target": 2,
+            "n_non_target": 2,
+            "max_unit_target_miss_rate": 0.5,
+            "max_unit_false_accept_rate": 0.0,
+        },
+    )
+    metric_rows = []
+    for fold_id, values in enumerate(fold_values):
+        for metric, value in values.items():
+            metric_rows.append(
+                {
+                    "model_id": model_id,
+                    "random_state": 0,
+                    "evaluation_fold": fold_id,
+                    "decision_scope": "direct",
+                    "lower_quantile": float("nan"),
+                    "upper_quantile": float("nan"),
+                    "vote_threshold": float("nan"),
+                    "lower_threshold": 0.0,
+                    "upper_threshold": 0.0,
+                    "metric": metric,
+                    "value": value,
+                }
+            )
+    threshold_metrics = _frame_with_schema(
+        expcfg.INTERNAL_CALIBRATION_THRESHOLD_METRIC_COLUMNS,
+        metric_rows,
+    )
+    threshold_metrics_path = tmp_path / "threshold_metrics.parquet"
+    threshold_metrics.to_parquet(threshold_metrics_path, index=False)
+    model_metrics = build_model_metrics(
+        aggregate_threshold_candidates(threshold_metrics)
+    )
+    track_contracts = pd.DataFrame(
+        {
+            "track_id": ["E1"],
+            "decision_mode": ["2way"],
+            "projection_level": ["object_projection"],
+        }
+    )
+    projection_eligibility = _frame_with_schema(
+        expcfg.PROJECTION_ELIGIBILITY_COLUMNS,
+        [
+            {
+                "track_id": "E1",
+                "n_selected_models": 1,
+                "n_selected_runs": 1,
+                "eligibility_status": "eligible",
+            }
+        ],
+    )
     return {
-        "domain_config_id": domain_id,
-        "calibration_id": calibration_id,
-        "evaluation_config_id": f"eval_{domain_id}",
-        "projection_config_id": projection_id,
-        "fit_config_id": f"fit_{domain_id}",
-        "source_config_id": f"source_{domain_id}",
-        "track_id": "E1",
-        "evaluation_track": "object_train__object_projection__2way",
-        "parent_track": "object_matrix_2way",
-        "decision_mode": "2way",
-        "decision_score_type": "simca_margin",
-        "matrix_family": "object_matrix",
-        "matrix_method": "object_mean",
-        "projection_level": "object_projection",
-        "projection_matrix_method": "object_mean",
-        "m": np.nan,
-        "balanced_pixel_strategy": "not_applicable",
-        "preprocessing": "raw",
-        "preprocessing_steps": "raw",
-        "rule_family": "simple",
-        "rule_variant": "simple_chi2",
-        "limit_source": "chi2",
-        "n_components": n_components,
-        "alpha": 0.01,
-        "sg_window_length": 11,
-        "sg_polyorder": 2,
-        "position_dilation_radius": 0,
-        "direct_2way_threshold": 0.0,
-        "secondary_object_threshold": np.nan,
-        "three_way_lower_threshold": np.nan,
-        "three_way_upper_threshold": np.nan,
-        "random_state": seed,
-        "calibration_status": "calibrated",
-        "schema_version": "test",
-        "protocol_version": "test",
-        "protocol_hash": "hash",
-        "pca_shortlist_id": "pca_test",
+        "model_catalog": model_catalog,
+        "selected_models": selected_models,
+        "selected_runs": selected_runs,
+        "selected_threshold_rows": selected_thresholds,
+        "model_metrics": model_metrics,
+        "track_contracts": track_contracts,
+        "projection_eligibility": projection_eligibility,
+        "threshold_metrics_path": threshold_metrics_path,
     }
 
 
-def _oof_rows(projection_id, seed, *, finite=True):
-    margins = np.array([-2.0, -1.0, 1.0, 2.0])
-    rows = []
-    for index, (truth, margin) in enumerate(zip([False, False, True, True], margins)):
-        rows.append(
-            {
-                "projection_config_id": projection_id,
-                "fold_id": index % 2,
-                "random_state": seed,
-                "source_image": f"image_{index}",
-                "object_id": f"object_{index}",
-                "truth": truth,
-                "H": 1.0,
-                "Q": 1.0 if finite else np.nan,
-                "rule_statistic": 1.0,
-                "rule_limit": 2.0,
-                "normalized_ratio": 0.5,
-                "simca_margin": margin,
-            }
-        )
-    return rows
-
-
-def test_exhaustive_grid_keeps_seed_repetitions_errors_and_all_tracks():
-    domain = pd.DataFrame(
-        [
-            _domain_row("d1", "c1", "p1", 0),
-            _domain_row("d2", "c1", "p1", 1),
-            _domain_row("d3", "c2", "p2", 0),
-            _domain_row("d4", "c3", "p3", 0, n_components=3),
-        ]
+def test_04a_audits_selected_natural_keys_without_new_ids(tmp_path):
+    outputs = run_selected_model_reference_audit(
+        **_synthetic_inputs(tmp_path)
     )
-    object_predictions = pd.DataFrame(
-        [
-            *_oof_rows("p1", 0),
-            *_oof_rows("p1", 1),
-            *_oof_rows("p2", 0),
-            *_oof_rows("p3", 0, finite=False),
-        ]
-    )
-    pixel_predictions = pd.DataFrame(columns=object_predictions.columns)
-    eligibility = pd.DataFrame(
+
+    assert set(outputs) == {"model_reference", "fold_metrics"}
+    reference = outputs["model_reference"]
+    folds = outputs["fold_metrics"]
+    assert tuple(reference.columns) == expcfg.SIMCA_GRID_MODEL_REFERENCE_COLUMNS
+    assert tuple(folds.columns) == expcfg.SIMCA_GRID_SELECTED_FOLD_METRIC_COLUMNS
+    assert reference.to_dict(orient="records") == [
         {
-            "evaluation_track": expcfg.SIMCA_EVALUATION_TRACKS,
-            "eligibility_status": [
-                "eligible",
-                "eligible_with_warning",
-                "unsupported_internal_calibration",
-                "unsupported_domain_shift",
-                "eligible",
-                "eligible",
-                "eligible_with_warning",
-                "unsupported_domain_shift",
-            ],
+            "model_id": "model_test",
+            "track_id": "E1",
+            "n_selected_runs": 1,
+            "n_decision_scopes": 1,
+            "eligibility_status": "eligible",
+            "downstream_status": "supported",
+            "max_abs_metric_difference": 0.0,
         }
-    )
+    ]
+    assert len(folds) == expcfg.INTERNAL_CALIBRATION_N_SPLITS
+    assert not folds.duplicated(
+        ["model_id", "random_state", "decision_scope", "fold_id"]
+    ).any()
+    forbidden_ids = {
+        "calibration_id",
+        "domain_config_id",
+        "fit_id",
+        "projection_id",
+        "duplicate_group_id",
+    }
+    assert not forbidden_ids.intersection(reference.columns)
+    assert not forbidden_ids.intersection(folds.columns)
 
-    outputs = run_exhaustive_locked_grid_evaluation(
-        domain,
-        object_predictions,
-        pixel_predictions,
-        eligibility,
-    )
 
-    audit = outputs["technical_audit"]
-    assert len(audit) == len(domain)
-    assert audit["domain_config_id"].is_unique
-    assert audit.set_index("domain_config_id").loc["d4", "technical_status"] == "technical_error"
-    metrics = outputs["threshold_metrics"].set_index("calibration_id")
-    assert metrics.loc["c1", "n_seeds"] == 2
-    assert metrics.loc["c1", "n_domain_configurations"] == 2
-    summaries = outputs["pareto_reference"].query("row_type == 'track_summary'")
-    assert set(summaries["evaluation_track"]) == set(expcfg.SIMCA_EVALUATION_TRACKS)
-    exact_groups = outputs["duplicate_groups"].query(
-        "duplicate_kind == 'exact_configuration'"
-    )
-    assert len(exact_groups) == 1
-    assert outputs["calculable_not_acceptable"].empty
+def test_04a_blocks_when_03b_model_metrics_cannot_be_reproduced(tmp_path):
+    inputs = _synthetic_inputs(tmp_path)
+    inputs["model_metrics"] = inputs["model_metrics"].copy()
+    inputs["model_metrics"].loc[
+        inputs["model_metrics"]["metric"].eq("direct.target_miss_rate"),
+        "value",
+    ] += 0.01
+
+    with pytest.raises(RuntimeError, match="not reproducible"):
+        run_selected_model_reference_audit(**inputs)

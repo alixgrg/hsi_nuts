@@ -8,8 +8,8 @@ import numpy as np
 import pandas as pd
 
 from src import experiment_config as expcfg
-from src.matrices.matrix_registry import build_matrix
 from src.matrices.redim_matrix import select_balanced_pixel_indices
+from src.spectra.band_selection import spectral_pixel_validity_report
 from src.spectra.preprocessing import SpectralPreprocessor
 from src.spectra.preprocessing_configs import (
     normalize_preprocessing_configs,
@@ -17,7 +17,7 @@ from src.spectra.preprocessing_configs import (
     preprocessing_name_from_steps,
     validate_preprocessing_steps,
 )
-from src.utils import filter_records
+from src.utils import filter_records, require_columns
 from src.workflows.protocol_split import (
     PROTOCOL_SPLIT_CHECK_COLUMNS as PROTOCOL_CHECK_COLUMNS,
     PROTOCOL_SPLIT_MANIFEST_COLUMNS as PROTOCOL_MANIFEST_COLUMNS,
@@ -31,17 +31,6 @@ PIXEL_SAMPLING_DIAGNOSTIC_COLUMNS = (
     expcfg.PIXEL_SAMPLING_DIAGNOSTIC_COLUMNS
 )
 PREPROCESSING_ERROR_COLUMNS = expcfg.PREPROCESSING_ERROR_COLUMNS
-
-
-def validate_required_columns(
-    df: pd.DataFrame,
-    required_columns: Sequence[str],
-    *,
-    table_name: str,
-) -> None:
-    missing = [col for col in required_columns if col not in df.columns]
-    if missing:
-        raise RuntimeError(f"{table_name} is missing required columns: {missing}")
 
 
 def wavelength_axis_id(wavelengths) -> str:
@@ -268,10 +257,10 @@ def summarize_matrix_output(
 
 def build_matrix_coverage_table(meta, *, matrix_id: str) -> pd.DataFrame:
     meta_df = pd.DataFrame(meta)
-    validate_required_columns(
+    require_columns(
         meta_df,
         expcfg.MATRIX_REQUIRED_METADATA,
-        table_name=f"{matrix_id} metadata",
+        name=f"{matrix_id} metadata",
     )
     return (
         meta_df.groupby(
@@ -302,6 +291,123 @@ def _mean_selection_overlap(selection_runs) -> float:
     return float(np.mean(overlaps)) if overlaps else np.nan
 
 
+def _balance_ratio_from_counts(counts: Mapping[object, int]) -> float:
+    positive = [
+        int(count)
+        for count in counts.values()
+        if int(count) > 0
+    ]
+    if not positive:
+        return np.nan
+    return float(min(positive) / max(positive))
+
+
+def _evaluate_balanced_sampling_run(
+    selected_objects,
+    *,
+    m: int,
+    strategy: str,
+    seed: int,
+    replace: bool,
+    under_m_policy: str,
+    pixel_validity_policy,
+):
+    """Evaluate one sampling seed without rebuilding the spectral matrix."""
+    diagnostic_rows = []
+    selections: dict[str, set[int]] = {}
+    class_counts: dict[object, int] = {}
+    image_counts: dict[object, int] = {}
+    n_rows = 0
+
+    try:
+        for object_id, obj in selected_objects:
+            indices, diagnostic = select_balanced_pixel_indices(
+                obj,
+                m=m,
+                random_state=seed,
+                object_id=str(object_id),
+                replace=replace,
+                balanced_pixel_strategy=strategy,
+                under_m_policy=under_m_policy,
+                return_diagnostics=True,
+                pixel_validity_policy=pixel_validity_policy,
+            )
+
+            diagnostic_rows.append(
+                {
+                    "m": int(m),
+                    "strategy": str(strategy),
+                    "seed": int(seed),
+                    **{
+                        key: diagnostic[key]
+                        for key in (
+                            "object_id",
+                            "n_raw",
+                            "n_available",
+                            "n_invalid",
+                            "n_selected",
+                            "selection_hash",
+                            "status",
+                        )
+                    },
+                }
+            )
+
+            if indices is None or len(indices) == 0:
+                continue
+
+            indices = np.asarray(indices, dtype=int)
+            object_key = str(object_id)
+            selections[object_key] = set(indices.tolist())
+
+            n_selected = int(indices.size)
+            n_rows += n_selected
+
+            label = obj.get("object_nut_type")
+            image = obj.get(
+                "source_clean_key",
+                obj.get("source_image"),
+            )
+            class_counts[label] = (
+                class_counts.get(label, 0)
+                + n_selected
+            )
+            image_counts[image] = (
+                image_counts.get(image, 0)
+                + n_selected
+            )
+
+        if n_rows == 0:
+            raise ValueError(
+                "No balanced pixels were selected."
+            )
+        if len(class_counts) < 2:
+            raise ValueError(
+                "Balanced sampling produced fewer than two classes."
+            )
+
+        metrics = {
+            "n_rows": n_rows,
+            "n_classes": len(class_counts),
+            "n_images": len(image_counts),
+            "class_balance_ratio": (
+                _balance_ratio_from_counts(class_counts)
+            ),
+            "image_balance_ratio": (
+                _balance_ratio_from_counts(image_counts)
+            ),
+        }
+        return metrics, selections, diagnostic_rows, None
+
+    except Exception as exc:
+        return (
+            None,
+            None,
+            diagnostic_rows,
+            repr(exc),
+        )
+
+
 def evaluate_balanced_sampling_grid(
     object_db,
     *,
@@ -313,154 +419,153 @@ def evaluate_balanced_sampling_grid(
     under_m_policy=expcfg.BALANCED_SAMPLING_UNDER_M_POLICY,
     min_eligible_rate=expcfg.BALANCED_SAMPLING_MIN_ELIGIBLE_RATE,
     return_diagnostics: bool = False,
+    pixel_validity_policy=expcfg.SPECTRAL_PIXEL_VALIDITY_POLICY,
 ) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
-    """Evaluate the technical feasibility and seed stability of candidate m."""
-    selected = filter_records(object_db, **(filters or {}))
+    """
+    Evaluate technical feasibility and seed stability of candidate m values.
+
+    Each object/strategy/seed selection is computed exactly once. Summary
+    metrics are derived directly from selected indices and object metadata.
+    """
+    selected = list(
+        filter_records(
+            object_db,
+            **(filters or {}),
+        )
+    )
     total = len(selected)
+
+    available_by_object = {}
+    for object_id, obj in selected:
+        spectra = np.asarray(
+            obj.get("spectra"),
+            dtype=float,
+        )
+        validity = spectral_pixel_validity_report(
+            spectra,
+            policy=pixel_validity_policy,
+        )
+        available_by_object[str(object_id)] = int(
+            validity["valid_mask"].sum()
+        )
+
     rows = []
     diagnostic_rows = []
 
-    for m in m_values:
-        m = int(m)
+    for m_value in m_values:
+        m = int(m_value)
         under_ids = [
-            str(object_id)
-            for object_id, obj in selected
-            if len(np.asarray(obj.get("spectra"))) < m
+            object_id
+            for object_id, n_available
+            in available_by_object.items()
+            if n_available < m
         ]
-        eligible_rate = float((total - len(under_ids)) / total) if total else 0.0
-        for strategy in strategies:
+        eligible_rate = (
+            float((total - len(under_ids)) / total)
+            if total
+            else 0.0
+        )
+
+        for strategy_value in strategies:
+            strategy = str(strategy_value)
             run_metrics = []
             selection_runs = []
             errors = []
-            for seed in seeds:
-                try:
-                    for object_id, obj in selected:
-                        indices, diagnostic = select_balanced_pixel_indices(
-                            obj,
-                            m=m,
-                            random_state=int(seed),
-                            object_id=str(object_id),
-                            replace=replace,
-                            balanced_pixel_strategy=strategy,
-                            under_m_policy=under_m_policy,
-                            return_diagnostics=True,
-                        )
-                        repeat, repeat_diagnostic = select_balanced_pixel_indices(
-                            obj,
-                            m=m,
-                            random_state=int(seed),
-                            object_id=str(object_id),
-                            replace=replace,
-                            balanced_pixel_strategy=strategy,
-                            under_m_policy=under_m_policy,
-                            return_diagnostics=True,
-                        )
-                        if diagnostic["selection_hash"] != repeat_diagnostic[
-                            "selection_hash"
-                        ] or not np.array_equal(indices, repeat):
-                            raise RuntimeError(
-                                "Balanced-pixel selection is not reproducible "
-                                f"for object={object_id!r}, seed={seed}."
-                            )
-                        diagnostic_rows.append(
-                            {
-                                "m": m,
-                                "strategy": str(strategy),
-                                "seed": int(seed),
-                                **{
-                                    key: diagnostic[key]
-                                    for key in (
-                                        "object_id",
-                                        "n_available",
-                                        "n_selected",
-                                        "selection_hash",
-                                        "status",
-                                    )
-                                },
-                            }
-                        )
-                    X, y, meta = build_matrix(
-                        object_db,
-                        matrix_method="balanced_pixels",
-                        filters=filters,
-                        m=m,
-                        random_state=int(seed),
-                        replace=replace,
-                        balanced_pixel_strategy=strategy,
-                        under_m_policy=under_m_policy,
-                        require_two_classes=True,
-                    )
-                    meta_df = pd.DataFrame(meta)
-                    selections = {
-                        str(object_id): set(
-                            group["pixel_index"].astype(int).tolist()
-                        )
-                        for object_id, group in meta_df.groupby("object_id")
-                    }
-                    selection_runs.append(selections)
-                    run_metrics.append(
-                        {
-                            "n_rows": len(X),
-                            "n_classes": pd.Series(y).nunique(),
-                            "n_images": meta_df["source_image"].nunique(),
-                            "class_balance_ratio": _balance_ratio(pd.Series(y)),
-                            "image_balance_ratio": _balance_ratio(
-                                meta_df["source_image"]
-                            ),
-                        }
-                    )
-                except Exception as exc:
-                    errors.append(repr(exc))
 
-            metrics = pd.DataFrame(run_metrics)
-            if errors or metrics.empty:
+            for seed_value in seeds:
+                seed = int(seed_value)
+                (
+                    metrics,
+                    selections,
+                    run_diagnostics,
+                    error,
+                ) = _evaluate_balanced_sampling_run(
+                    selected,
+                    m=m,
+                    strategy=strategy,
+                    seed=seed,
+                    replace=bool(replace),
+                    under_m_policy=str(under_m_policy),
+                    pixel_validity_policy=pixel_validity_policy,
+                )
+
+                diagnostic_rows.extend(run_diagnostics)
+
+                if error is not None:
+                    errors.append(error)
+                    continue
+
+                run_metrics.append(metrics)
+                selection_runs.append(selections)
+
+            metrics_df = pd.DataFrame(run_metrics)
+
+            if errors or metrics_df.empty:
                 status = "invalid"
             elif eligible_rate < float(min_eligible_rate):
                 status = "warning"
             else:
                 status = "accepted"
+
             rows.append(
                 {
                     "m": m,
-                    "strategy": str(strategy),
+                    "strategy": strategy,
                     "under_m_policy": str(under_m_policy),
                     "n_objects_total": total,
                     "n_objects_under_m": len(under_ids),
                     "eligible_rate": eligible_rate,
                     "n_rows": (
-                        int(round(metrics["n_rows"].median()))
-                        if not metrics.empty
+                        int(round(metrics_df["n_rows"].median()))
+                        if not metrics_df.empty
                         else 0
                     ),
                     "n_classes": (
-                        int(metrics["n_classes"].min())
-                        if not metrics.empty
+                        int(metrics_df["n_classes"].min())
+                        if not metrics_df.empty
                         else 0
                     ),
                     "n_images": (
-                        int(metrics["n_images"].min())
-                        if not metrics.empty
+                        int(metrics_df["n_images"].min())
+                        if not metrics_df.empty
                         else 0
                     ),
                     "class_balance_ratio": (
-                        float(metrics["class_balance_ratio"].min())
-                        if not metrics.empty
+                        float(
+                            metrics_df[
+                                "class_balance_ratio"
+                            ].min()
+                        )
+                        if not metrics_df.empty
                         else np.nan
                     ),
                     "image_balance_ratio": (
-                        float(metrics["image_balance_ratio"].min())
-                        if not metrics.empty
+                        float(
+                            metrics_df[
+                                "image_balance_ratio"
+                            ].min()
+                        )
+                        if not metrics_df.empty
                         else np.nan
                     ),
-                    "selection_stability": _mean_selection_overlap(selection_runs),
+                    "selection_stability": (
+                        _mean_selection_overlap(
+                            selection_runs
+                        )
+                    ),
                     "status": status,
                 }
             )
-    feasibility = pd.DataFrame(rows, columns=BALANCED_SAMPLING_COLUMNS)
+
+    feasibility = pd.DataFrame(
+        rows,
+        columns=BALANCED_SAMPLING_COLUMNS,
+    )
     diagnostics = pd.DataFrame(
         diagnostic_rows,
         columns=PIXEL_SAMPLING_DIAGNOSTIC_COLUMNS,
     )
+
     if return_diagnostics:
         return feasibility, diagnostics
     return feasibility

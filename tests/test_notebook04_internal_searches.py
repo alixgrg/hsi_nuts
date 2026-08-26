@@ -298,10 +298,16 @@ def test_notebooks_04_use_only_internal_calibration_contract():
             for cell in notebook["cells"]
         )
         assert "build_calibration_domain_from_03b" not in source
-        assert "calibration_domain" in source or "grid_configurations" in source
+        if filename.startswith("04A"):
+            assert "selected_models" in source
+            assert "threshold_metrics" in source
+            assert "calibration_domain" not in source
+        else:
+            assert "model_metrics" in source
+            assert "model_reference" in source
+            assert "calibration_domain" not in source
+            assert "grid_configurations" not in source
         assert "sha256_file(" in source
-        assert "INTERNAL_CALIBRATION_BATCHES" in source
-        assert "INTERNAL_CALIBRATION_FORBIDDEN_BATCHES" in source
         assert "SIMCA_VALIDATION_BATCHES" not in source
         assert "run_simca_rule_variant_grid" not in source
         assert "OBJECT_THRESHOLDS =" not in source
@@ -315,8 +321,9 @@ def test_notebooks_04_use_only_internal_calibration_contract():
                 if not line.lstrip().startswith(("%", "!"))
             )
             ast.parse(cell_source, filename=f"{filename}:cell-{cell_index}")
-            assert cell.get("execution_count") is None
-            assert not cell.get("outputs")
+            if filename.startswith("04B"):
+                assert cell.get("execution_count") is None
+                assert not cell.get("outputs")
 
     grid_source = Path("notebooks/04A_simca_grid_search.ipynb").read_text(
         encoding="utf-8"
@@ -325,36 +332,32 @@ def test_notebooks_04_use_only_internal_calibration_contract():
         "notebooks/04B_simca_optuna_search.ipynb"
     ).read_text(encoding="utf-8")
     assert "run_internal_calibration" not in grid_source
-    assert "run_exhaustive_locked_grid_evaluation" in grid_source
-    assert "oof_object_predictions" in grid_source
-    assert "oof_pixel_predictions" in grid_source
-    assert "unsupported_tracks_retained" in grid_source
+    assert "run_selected_model_reference_audit" in grid_source
+    assert "oof_object_predictions" not in grid_source
+    assert "oof_pixel_predictions" not in grid_source
+    assert "03B_selected_models" in grid_source
+    assert "retained_as_diagnostic_only" in grid_source
     assert "weighted_score_used" in grid_source
-    assert "make_optuna_binary_pareto_objective" in optuna_source
-    assert "precomputed_metrics=grid_threshold_metrics_df" in optuna_source
+    assert "run_categorical_tpe_coverage_benchmark" in optuna_source
+    assert "SIMCA_OPTUNA_BENCHMARK_ROLE" in optuna_source
+    assert "make_optuna_binary_pareto_objective" not in optuna_source
+    assert "grid_threshold_metrics_df" not in optuna_source
 
 
 def test_search_output_contracts_stay_compact():
-    assert len(expcfg.SIMCA_GRID_FOLD_METRIC_COLUMNS) <= 26
-    assert len(expcfg.SIMCA_GRID_THRESHOLD_METRIC_COLUMNS) <= 30
-    assert len(expcfg.SIMCA_OPTUNA_TRIAL_COLUMNS) <= 26
+    assert len(expcfg.SIMCA_GRID_SELECTED_FOLD_METRIC_COLUMNS) == 17
+    assert len(expcfg.SIMCA_GRID_MODEL_REFERENCE_COLUMNS) == 7
+    assert len(expcfg.SIMCA_OPTUNA_BENCHMARK_SAMPLE_COLUMNS) == 5
+    assert len(expcfg.SIMCA_OPTUNA_BENCHMARK_SUMMARY_COLUMNS) == 12
     assert set(expcfg.SIMCA_GRID_SEARCH_OUTPUT_FILENAMES) == {
-        "configurations",
+        "model_reference",
         "fold_metrics",
-        "threshold_metrics",
-        "pareto_reference",
-        "technical_audit",
-        "duplicate_groups",
-        "calculable_not_acceptable",
-        "protocol",
+        "audit_manifest",
     }
     assert set(expcfg.SIMCA_OPTUNA_OUTPUT_FILENAMES) == {
-        "trials",
-        "pareto_candidates",
+        "sampled_models",
         "search_efficiency",
-        "errors",
-        "ablation_plan",
-        "protocol",
+        "audit_manifest",
     }
 
 
@@ -399,7 +402,10 @@ def test_active_notebooks_have_no_local_uppercase_scientific_literals():
                 ):
                     continue
                 for target in targets:
-                    provenance_literals = {"REVIEWED_PDF_SHA256"}
+                    provenance_literals = {
+                        "CHECKPOINT_PATHS",
+                        "REVIEWED_PDF_SHA256",
+                    }
                     if (
                         isinstance(target, ast.Name)
                         and target.id.isupper()
@@ -417,14 +423,19 @@ def test_protocol_choices_are_centralized_and_score_free():
     assert expcfg.INTERNAL_CALIBRATION_OBJECT_THRESHOLDS == (0.75, 0.80)
     assert expcfg.INTERNAL_CALIBRATION_DIRECT_2WAY_THRESHOLD == 0.0
     assert expcfg.INTERNAL_CALIBRATION_THRESHOLD_CROSSFIT is True
-    assert expcfg.INTERNAL_CALIBRATION_THREE_WAY_LOWER_THRESHOLDS == ()
-    assert expcfg.INTERNAL_CALIBRATION_THREE_WAY_UPPER_THRESHOLDS == ()
+    assert expcfg.INTERNAL_CALIBRATION_THREE_WAY_LOWER_QUANTILES == (
+        0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0
+    )
+    assert expcfg.INTERNAL_CALIBRATION_THREE_WAY_UPPER_QUANTILES == (
+        0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0
+    )
     for columns in (
-        expcfg.INTERNAL_CALIBRATION_THRESHOLD_2WAY_COLUMNS,
-        expcfg.INTERNAL_CALIBRATION_THRESHOLD_3WAY_COLUMNS,
-        expcfg.SIMCA_GRID_THRESHOLD_METRIC_COLUMNS,
-        expcfg.SIMCA_OPTUNA_TRIAL_COLUMNS,
-        expcfg.SIMCA_OPTUNA_PARETO_COLUMNS,
+        expcfg.INTERNAL_CALIBRATION_SELECTED_THRESHOLD_COLUMNS,
+        expcfg.INTERNAL_CALIBRATION_THRESHOLD_METRIC_COLUMNS,
+        expcfg.SIMCA_GRID_SELECTED_FOLD_METRIC_COLUMNS,
+        expcfg.SIMCA_GRID_MODEL_REFERENCE_COLUMNS,
+        expcfg.SIMCA_OPTUNA_BENCHMARK_SAMPLE_COLUMNS,
+        expcfg.SIMCA_OPTUNA_BENCHMARK_SUMMARY_COLUMNS,
     ):
         assert not set(columns).intersection(
             expcfg.ACTIVE_PROTOCOL_FORBIDDEN_SCORE_COLUMNS

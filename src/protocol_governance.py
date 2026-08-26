@@ -68,6 +68,122 @@ class ProtocolValidationError(RuntimeError):
     """Raised when the frozen scientific protocol is internally inconsistent."""
 
 
+def validate_selection_only_protocol_lineage(
+    *,
+    current_protocol_hash: str,
+    execution_protocol_hash: str,
+    expected_parent_protocol_hash: str,
+    amendment_scope: str,
+    selection_profile_id: str,
+    selection_parent_profile_id: str,
+    checkpoint_manifest: Mapping[str, Any],
+    expected_execution_context: Mapping[str, str],
+    strict: bool = True,
+) -> pd.DataFrame:
+    """Validate reuse of immutable fits under a selection-only amendment.
+
+    The current frozen protocol owns the amended selection, while PCA and the
+    completed OOF fits retain the hash under which they were executed. Reuse is
+    accepted only when every execution-defining fingerprint still matches the
+    parent checkpoint exactly.
+    """
+    current_hash = str(current_protocol_hash)
+    execution_hash = str(execution_protocol_hash)
+    parent_hash = str(expected_parent_protocol_hash)
+    scope = str(amendment_scope)
+    profile_id = str(selection_profile_id)
+    parent_profile_id = str(selection_parent_profile_id)
+    context = {
+        str(key): str(value)
+        for key, value in dict(expected_execution_context).items()
+    }
+    manifest = dict(checkpoint_manifest)
+    checks: list[dict[str, Any]] = []
+
+    def add(check: str, passed: bool, detail: str) -> None:
+        checks.append(
+            {
+                "check": str(check),
+                "passed": bool(passed),
+                "detail": str(detail),
+            }
+        )
+
+    add(
+        "protocol_amendment_scope_is_selection_only",
+        scope == "selection_only",
+        f"scope={scope}",
+    )
+    add(
+        "selection_amendment_has_distinct_current_protocol",
+        bool(current_hash) and current_hash != execution_hash,
+        f"current={current_hash}, execution_parent={execution_hash}",
+    )
+    add(
+        "execution_protocol_matches_declared_parent",
+        bool(parent_hash) and execution_hash == parent_hash,
+        f"expected={parent_hash}, observed={execution_hash}",
+    )
+    add(
+        "selection_profile_has_declared_parent",
+        bool(profile_id)
+        and bool(parent_profile_id)
+        and profile_id != parent_profile_id,
+        f"profile={profile_id}, parent_profile={parent_profile_id}",
+    )
+    add(
+        "checkpoint_protocol_matches_execution_parent",
+        str(manifest.get("protocol_hash", "")) == execution_hash,
+        (
+            f"expected={execution_hash}, "
+            f"observed={manifest.get('protocol_hash')}"
+        ),
+    )
+    add(
+        "checkpoint_protocol_version_matches_current",
+        str(manifest.get("protocol_version", ""))
+        == str(expcfg.PROTOCOL_VERSION),
+        (
+            f"expected={expcfg.PROTOCOL_VERSION}, "
+            f"observed={manifest.get('protocol_version')}"
+        ),
+    )
+    add(
+        "checkpoint_schema_version_matches_current",
+        str(manifest.get("schema_version", ""))
+        == str(expcfg.RESULTS_SCHEMA_VERSION),
+        (
+            f"expected={expcfg.RESULTS_SCHEMA_VERSION}, "
+            f"observed={manifest.get('schema_version')}"
+        ),
+    )
+
+    required_context = (
+        "protocol_hash",
+        "pca_selection_fingerprint",
+        "track_contract_hash",
+        "fold_contract_hash",
+        "configuration_hash",
+    )
+    for key in required_context:
+        expected = context.get(key, "")
+        observed = str(manifest.get(key, ""))
+        add(
+            f"checkpoint_{key}_matches_current_execution_context",
+            bool(expected) and observed == expected,
+            f"expected={expected}, observed={observed}",
+        )
+
+    result = pd.DataFrame(checks, columns=PROTOCOL_CHECK_COLUMNS)
+    if strict and not bool(result["passed"].all()):
+        failed = result.loc[~result["passed"]].to_dict(orient="records")
+        raise ProtocolValidationError(
+            "Selection-only protocol lineage validation failed: "
+            f"{failed}"
+        )
+    return result
+
+
 def _jsonable(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {
@@ -514,6 +630,36 @@ def build_inference_plan(
             ),
         },
         "hypotheses": _jsonable(expcfg.PROTOCOL_PRIMARY_HYPOTHESES),
+        "spectral_data_validity": {
+            "raw_spectral_range_nm": [
+                expcfg.SPECTRAL_START_NM,
+                expcfg.SPECTRAL_END_NM,
+            ],
+            "raw_band_count": expcfg.N_BANDS_RAW,
+            "n_remove_start": expcfg.N_REMOVE_START,
+            "n_stop_end": expcfg.N_STOP_END,
+            "terminal_band_policy": _jsonable(
+                expcfg.TERMINAL_BAND_QC_POLICY
+            ),
+            "pixel_validity_policy": _jsonable(
+                expcfg.SPECTRAL_PIXEL_VALIDITY_POLICY
+            ),
+            "invalid_pixel_stage": (
+                "identified during QC and excluded before "
+                "matrix representation construction"
+            ),
+            "object_aggregation_policy": (
+                "object mean and median spectra are recomputed "
+                "from analysis-valid pixels only"
+            ),
+            "balanced_pixel_sampling_policy": (
+                "sampling occurs only after pixel validity filtering"
+            ),
+            "absorbance_domain_policy": (
+                "R must remain strictly positive; clipping and "
+                "imputation are forbidden"
+            ),
+        },
         "primary_inference_unit": expcfg.PROTOCOL_BOOTSTRAP_GROUP_COL,
         "bootstrap": {
             "method": "clustered_nonparametric_bootstrap",
@@ -652,19 +798,38 @@ def validate_protocol_contract(
     )
 
     threshold_tracks = {
-        spec["track_id"]
+        str(spec["track_id"])
         for spec in expcfg.SIMCA_EVALUATION_TRACK_SPECS.values()
         if tuple(spec["secondary_object_aggregation_thresholds"])
     }
-    threshold_values_ok = all(
-        tuple(spec["secondary_object_aggregation_thresholds"])
-        in {(), (0.75, 0.80)}
+    configured_vote_thresholds = tuple(map(float, expcfg.SIMCA_OBJECT_THRESHOLDS))
+    threshold_values_are_valid = (
+        len(configured_vote_thresholds) > 0
+        and all(0.0 <= value <= 1.0 for value in configured_vote_thresholds)
+        and all(
+            left < right
+            for left, right in zip(
+                configured_vote_thresholds[:-1],
+                configured_vote_thresholds[1:],
+            )
+        )
+    )
+    threshold_specs_are_consistent = all(
+        tuple(map(float, spec["secondary_object_aggregation_thresholds"]))
+        in {(), configured_vote_thresholds}
         for spec in expcfg.SIMCA_EVALUATION_TRACK_SPECS.values()
     )
     add(
         "fixed_2way_vote_only_on_pixel_projection_tracks",
-        threshold_tracks == {"E3", "E7"} and threshold_values_ok,
-        f"tracks={sorted(threshold_tracks)}",
+        (
+            threshold_tracks == {"E3", "E7"}
+            and threshold_values_are_valid
+            and threshold_specs_are_consistent
+        ),
+        (
+            f"tracks={sorted(threshold_tracks)}, "
+            f"thresholds={configured_vote_thresholds}"
+        ),
     )
     direct_scores = {
         spec["decision_score_type"]
@@ -762,6 +927,51 @@ def validate_protocol_contract(
             f"policy={expcfg.SPATIAL_GT_DOUBLE_ANNOTATION_POLICY}, "
             f"fraction={expcfg.SPATIAL_GT_DOUBLE_ANNOTATION_FRACTION}"
         ),
+    )
+    spectral_stop = expcfg.N_STOP_END
+    valid_stop = (
+        spectral_stop is not None
+        and int(expcfg.N_REMOVE_START)
+        < int(spectral_stop)
+        <= int(expcfg.N_BANDS_RAW)
+    )
+    add(
+        "spectral_retained_interval_is_valid",
+        valid_stop,
+        (
+            f"N_REMOVE_START={expcfg.N_REMOVE_START}, "
+            f"N_STOP_END={expcfg.N_STOP_END}, "
+            f"N_BANDS_RAW={expcfg.N_BANDS_RAW}"
+        ),
+    )
+    pixel_policy = expcfg.SPECTRAL_PIXEL_VALIDITY_POLICY
+    add(
+        "all_zero_pixels_are_excluded",
+        bool(pixel_policy["exclude_all_zero"]),
+        str(pixel_policy),
+    )
+    add(
+        "common_preprocessing_population_requires_positive_reflectance",
+        (
+            bool(pixel_policy["require_strictly_positive"])
+            and
+            expcfg.PREPROCESSING_ABSORBANCE_NONPOSITIVE_POLICY
+            == "error"
+        ),
+        (
+            f"pixel_policy={pixel_policy}, "
+            "absorbance_policy="
+            f"{expcfg.PREPROCESSING_ABSORBANCE_NONPOSITIVE_POLICY}"
+        ),
+    )
+    expected_n_bands = (
+        int(expcfg.N_STOP_END)
+        - int(expcfg.N_REMOVE_START)
+    )
+    add(
+        "retained_band_count_is_61",
+        expected_n_bands == 61,
+        f"retained_n_bands={expected_n_bands}",
     )
     add(
         "configuration_key_list_is_complete",
@@ -941,6 +1151,50 @@ def verify_frozen_protocol(
     return result
 
 
+def make_selection_id(
+    entity_type: str,
+    payload: Mapping,
+    *,
+    length: int = 20,
+) -> str:
+    """Build one deterministic scientific entity identifier."""
+    entity_type = str(entity_type)
+
+    if entity_type not in expcfg.SELECTION_ID_PREFIXES:
+        raise KeyError(
+            f"Unknown selection entity type: {entity_type!r}. "
+            f"Allowed={sorted(expcfg.SELECTION_ID_PREFIXES)}"
+        )
+
+    prefix = expcfg.SELECTION_ID_PREFIXES[entity_type]
+    return f"{prefix}_{sha256_payload(dict(payload))[:int(length)]}"
+
+
+def make_audit_id(
+    *,
+    stage: str,
+    substage: str,
+    entity_type: str,
+    entity_id: str,
+    metric: str = "",
+    related_entity_id: str = "",
+    ordinal: int = 0,
+) -> str:
+    """Build one deterministic audit-event identifier."""
+    return make_selection_id(
+        "audit_event",
+        {
+            "stage": str(stage),
+            "substage": str(substage),
+            "entity_type": str(entity_type),
+            "entity_id": str(entity_id),
+            "metric": str(metric),
+            "related_entity_id": str(related_entity_id),
+            "ordinal": int(ordinal),
+        },
+    )
+
+
 __all__ = [
     "PLANNED_CONTRAST_COLUMNS",
     "PROTOCOL_CHECK_COLUMNS",
@@ -958,5 +1212,8 @@ __all__ = [
     "sha256_dataframe",
     "sha256_file",
     "validate_protocol_contract",
+    "validate_selection_only_protocol_lineage",
     "verify_frozen_protocol",
+    "make_selection_id",
+    "make_audit_id",
 ]

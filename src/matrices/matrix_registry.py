@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from src.matrices.redim_matrix import object_db_to_matrix
-
+from src import experiment_config as expcfg
 
 @dataclass(frozen=True)
 class MatrixSpec:
@@ -166,6 +166,16 @@ MATRIX_REGISTRY: dict[str, MatrixSpec] = {
 }
 
 
+def matrix_family_from_method(matrix_method: str) -> str:
+    """Map a matrix method to a compact matrix family label."""
+    matrix_method = str(matrix_method)
+    if matrix_method in {"object_mean", "object_median"}:
+        return "object_matrix"
+    if matrix_method in {"balanced_pixels", "all_pixels", "pixel"}:
+        return "pixel_matrix"
+    return "unknown_matrix_family"
+
+
 def available_matrix_methods() -> list[str]:
     """Return available matrix method names."""
     return sorted(MATRIX_REGISTRY.keys())
@@ -234,6 +244,7 @@ def build_matrix_output(
     expected_classes=None,
     expected_object_ids=None,
     require_two_classes: bool = False,
+    pixel_validity_policy=expcfg.SPECTRAL_PIXEL_VALIDITY_POLICY,
 ):
     """Build a MatrixOutput object from object_db using a registered matrix method."""
     spec = get_matrix_spec(matrix_method)
@@ -247,6 +258,7 @@ def build_matrix_output(
         replace=replace,
         balanced_pixel_strategy=balanced_pixel_strategy,
         under_m_policy=under_m_policy,
+        pixel_validity_policy=pixel_validity_policy,
     )
     output = MatrixOutput(
         X=np.asarray(X, dtype=float),
@@ -278,6 +290,7 @@ def build_matrix(
     expected_classes=None,
     expected_object_ids=None,
     require_two_classes: bool = False,
+    pixel_validity_policy=expcfg.SPECTRAL_PIXEL_VALIDITY_POLICY,
 ):
     """
     Build X, y, metadata from object_db using a registered matrix method.
@@ -308,5 +321,6 @@ def build_matrix(
         expected_classes=expected_classes,
         expected_object_ids=expected_object_ids,
         require_two_classes=require_two_classes,
+        pixel_validity_policy=pixel_validity_policy,
     )
     return output.as_tuple(include_wavelengths=return_wavelengths)

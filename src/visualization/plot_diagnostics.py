@@ -241,6 +241,9 @@ def plot_metric_heatmap(
         raise KeyError(f"Missing columns for heatmap: {missing}")
 
     d = df.copy()
+    d = d.dropna(subset=required)
+    if d.empty:
+        raise ValueError(f"plot_metric_heatmap received no usable row after filtering. columns: {required}")
     if facet_col is None:
         pivot = _ordered_pivot(
             d,
@@ -281,6 +284,8 @@ def plot_metric_heatmap(
         return show_or_return(fig, show)
 
     facets = ordered_unique(d[facet_col].astype(str))
+    if not facets:
+        raise ValueError(f"plot_metric_heatmap cannot create facets: {facet_col!r} is empty.")
     n_cols = max(1, min(int(facet_col_wrap), len(facets)))
     n_rows = ceil(len(facets) / n_cols)
     fig = make_subplots(

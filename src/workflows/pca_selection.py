@@ -10,7 +10,7 @@ score, relative-quantile filter, projection target, or diversity filter is used.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -18,30 +18,42 @@ import numpy as np
 import pandas as pd
 
 from src import experiment_config as expcfg
-from src.protocol_governance import sha256_file, sha256_payload
+from src.protocol_governance import sha256_file, sha256_payload, make_selection_id
 
 
-PCA_TECHNICAL_FLAG_COLUMNS = (
-    "matrix_nonempty",
-    "finite_values",
-    "sg_valid",
-    "variance_valid",
-    "pca_fit_valid",
-    "projection_valid",
-    "residuals_valid",
-    "stability_valid",
-)
-
-PCA_ARTIFACT_COLUMNS = ("critical_artifact",)
-PCA_REQUIRED_REVIEW_STATUS = "reviewed"
-PCA_ALLOWED_REVIEW_DECISIONS = ("accept", "warning", "reject")
-PCA_REVIEW_METADATA_COLUMNS = (
-    "review_decision",
-    "artifact_codes",
-    "reviewer",
-    "review_date",
-    "review_evidence",
-    "run_fingerprint",
+_PCA_SCIENTIFIC_METRICS = (
+    "n_observations",
+    "n_bands",
+    "ncomp_90",
+    "ncomp_95",
+    "ncomp_99",
+    "centroid_distance_pc1_pc2_pc3",
+    "mahalanobis_pc1_pc2_pc3",
+    "class_trace_ratio",
+    "within_class_trace",
+    "mean_distance_to_class_centroid",
+    "q95_distance_to_class_centroid",
+    "batch_trace_ratio",
+    "mean_batch_centroid_shift_norm",
+    "max_batch_centroid_shift_norm",
+    "object_class_trace_ratio",
+    "object_batch_trace_ratio",
+    "mean_intra_object_trace",
+    "object_over_intra_ratio",
+    "train_q_mean",
+    "train_q_q95",
+    "projection_q_mean",
+    "projection_q_q95",
+    "projection_q_deviation",
+    "mean_train_projection_shift_norm",
+    "loading_abs_correlation_mean",
+    "loading_angle_mean_deg",
+    "group_fold_subspace_instability",
+    "seed_subspace_instability",
+    "bootstrap_subspace_instability",
+    "group_fold_projection_shift_std",
+    "score_stability_std",
+    "instability_metric",
 )
 
 
@@ -53,48 +65,50 @@ class PCASelectionProfile:
     minimize_metrics: tuple[str, ...] = ()
 
 
-def _default_profiles() -> dict[str, PCASelectionProfile]:
-    return {
-        "object_matrix": PCASelectionProfile(
-            maximize_metrics=("class_trace_ratio",),
-            minimize_metrics=(
-                "batch_trace_ratio",
-                "instability_metric",
-                "ncomp_95",
-            ),
-        ),
-        "pixel_matrix": PCASelectionProfile(
-            maximize_metrics=("object_class_trace_ratio",),
-            minimize_metrics=(
-                "object_batch_trace_ratio",
-                "instability_metric",
-                "ncomp_95",
-            ),
-        ),
-    }
-
-
 @dataclass(frozen=True)
 class PCASelectionConfig:
-    """Configuration for candidate review and preprocessing-level Pareto."""
+    """Candidate-review and preprocessing-level Pareto configuration."""
 
-    profiles: Mapping[str, PCASelectionProfile] = field(default_factory=_default_profiles)
+    profiles: Mapping[str, PCASelectionProfile] = field(
+        default_factory=lambda: {
+            family: PCASelectionProfile(
+                maximize_metrics=tuple(
+                    profile["maximize_metrics"]
+                ),
+                minimize_metrics=tuple(
+                    profile["minimize_metrics"]
+                ),
+            )
+            for family, profile
+            in expcfg.PCA_SELECTION_PROFILES.items()
+        }
+    )
     family_col: str = "matrix_family"
     variant_col: str = "matrix_variant"
     matrix_method_col: str = "matrix_method"
     preprocessing_col: str = "preprocessing"
     preprocessing_steps_col: str = "preprocessing_steps"
-    expected_families: tuple[str, ...] = ("object_matrix", "pixel_matrix")
-    strict_variant_coverage: bool = True
-    max_preprocessings_per_family: int | None = None
+    expected_families: tuple[str, ...] = tuple(
+        expcfg.PCA_SELECTION_EXPECTED_FAMILIES
+    )
+    strict_variant_coverage: bool = (
+        expcfg.PCA_SELECTION_STRICT_VARIANT_COVERAGE
+    )
+    max_preprocessings_per_family: int | None = (
+        expcfg.MAX_PCA_PREPROCESSINGS_PER_FAMILY
+    )
 
 
-DEFAULT_PCA_SELECTION_CONFIG = PCASelectionConfig()
+def make_pca_selection_config(
+    **overrides,
+) -> PCASelectionConfig:
+    """Build a selection configuration while preserving the public API."""
+    return PCASelectionConfig(**overrides)
 
 
-def make_pca_selection_config(**overrides) -> PCASelectionConfig:
-    """Return a PCA selection configuration without weighted score settings."""
-    return replace(DEFAULT_PCA_SELECTION_CONFIG, **overrides)
+DEFAULT_PCA_SELECTION_CONFIG = (
+    make_pca_selection_config()
+)
 
 
 def _profile_for_family(
@@ -245,7 +259,7 @@ def apply_pca_artifact_review_decisions(
         raise ValueError(
             "reviewer, review_date and default_review_comment are required."
         )
-    if str(default_decision) not in PCA_ALLOWED_REVIEW_DECISIONS:
+    if str(default_decision) not in expcfg.PCA_ARTIFACT_REVIEW_ALLOWED_DECISIONS:
         raise ValueError(f"Invalid default PCA review decision: {default_decision!r}")
 
     required_group_columns = {
@@ -298,7 +312,7 @@ def apply_pca_artifact_review_decisions(
             f"{duplicated}"
         )
     invalid_decisions = ~decisions["review_decision"].isin(
-        PCA_ALLOWED_REVIEW_DECISIONS
+        expcfg.PCA_ARTIFACT_REVIEW_ALLOWED_DECISIONS
     )
     if invalid_decisions.any():
         raise ValueError(
@@ -318,7 +332,7 @@ def apply_pca_artifact_review_decisions(
         )
 
     out = review.copy()
-    out["review_status"] = PCA_REQUIRED_REVIEW_STATUS
+    out["review_status"] = expcfg.PCA_ARTIFACT_REVIEW_REQUIRED_STATUS
     out["review_decision"] = str(default_decision)
     out["artifact_codes"] = str(default_artifact_codes)
     out["critical_artifact"] = bool(default_critical_artifact)
@@ -355,18 +369,7 @@ def validate_pca_artifact_review(
     expected_run_fingerprint: str | None = None,
 ) -> None:
     """Block pending, stale, undocumented or logically invalid reviews."""
-    required = {
-        "candidate_id",
-        "review_status",
-        "review_decision",
-        "artifact_codes",
-        "critical_artifact",
-        "review_comment",
-        "reviewer",
-        "review_date",
-        "review_evidence",
-        "run_fingerprint",
-    }
+    required = set(expcfg.PCA_ARTIFACT_REVIEW_COLUMNS)
     missing = sorted(required.difference(review.columns))
     if missing:
         raise KeyError(f"PCA artifact review is missing columns: {missing}")
@@ -380,12 +383,18 @@ def validate_pca_artifact_review(
                 "PCA artifact review candidate mismatch: "
                 f"missing={sorted(expected-observed)}, extra={sorted(observed-expected)}"
             )
-    if not review["review_status"].astype(str).eq(
-        PCA_REQUIRED_REVIEW_STATUS
-    ).all():
-        raise RuntimeError("PCA artifact review is pending for at least one candidate.")
+    review_complete = (
+        review["review_status"]
+        .fillna("")
+        .astype(str)
+        .eq(expcfg.PCA_ARTIFACT_REVIEW_REQUIRED_STATUS)
+    )
+    if not review_complete.all():
+        raise RuntimeError(
+            "PCA artifact review is pending for at least one candidate."
+        )
     decisions = review["review_decision"].astype(str)
-    invalid = ~decisions.isin(PCA_ALLOWED_REVIEW_DECISIONS)
+    invalid = ~decisions.isin(expcfg.PCA_ARTIFACT_REVIEW_ALLOWED_DECISIONS)
     if invalid.any():
         raise RuntimeError(
             "Invalid PCA review decisions: "
@@ -438,13 +447,13 @@ def _merge_artifact_review(
         raise KeyError("PCA artifact review has no identifier columns in common.")
     review_cols = [
         *keys,
-        *[column for column in PCA_ARTIFACT_COLUMNS if column in artifact_review],
+        *[column for column in expcfg.PCA_ARTIFACT_COLUMNS if column in artifact_review],
         *[
             column
             for column in (
                 "review_status",
                 "review_comment",
-                *PCA_REVIEW_METADATA_COLUMNS,
+                *expcfg.PCA_REVIEW_METADATA_COLUMNS,
             )
             if column in artifact_review
         ],
@@ -453,10 +462,10 @@ def _merge_artifact_review(
         columns=[
             column
             for column in (
-                *PCA_ARTIFACT_COLUMNS,
+                *expcfg.PCA_ARTIFACT_COLUMNS,
                 "review_status",
                 "review_comment",
-                *PCA_REVIEW_METADATA_COLUMNS,
+                *expcfg.PCA_REVIEW_METADATA_COLUMNS,
             )
             if column in out
         ],
@@ -468,7 +477,7 @@ def _merge_artifact_review(
         how="left",
         validate="many_to_one",
     )
-    for column in PCA_ARTIFACT_COLUMNS:
+    for column in expcfg.PCA_ARTIFACT_COLUMNS:
         if column not in out:
             out[column] = False
         out[column] = out[column].fillna(False).astype(bool)
@@ -480,7 +489,7 @@ def _merge_artifact_review(
         out["review_comment"] = ""
     else:
         out["review_comment"] = out["review_comment"].fillna("")
-    for column in PCA_REVIEW_METADATA_COLUMNS:
+    for column in expcfg.PCA_REVIEW_METADATA_COLUMNS:
         if column not in out:
             out[column] = ""
         else:
@@ -488,39 +497,95 @@ def _merge_artifact_review(
     return out
 
 
+def _pareto_dominance_matrix(
+    df: pd.DataFrame,
+    *,
+    maximize_metrics: Sequence[str],
+    minimize_metrics: Sequence[str],
+) -> tuple[pd.Index, np.ndarray]:
+    """Return valid row indices and competitor-by-candidate dominance."""
+    metrics = [
+        *maximize_metrics,
+        *minimize_metrics,
+    ]
+    missing = [
+        metric
+        for metric in metrics
+        if metric not in df
+    ]
+    if missing:
+        raise KeyError(
+            f"Missing Pareto metric columns: {missing}"
+        )
+
+    if df.empty:
+        return (
+            df.index[:0],
+            np.zeros((0, 0), dtype=bool),
+        )
+
+    numeric = df.loc[:, metrics].apply(
+        pd.to_numeric,
+        errors="coerce",
+    )
+    valid_mask = np.isfinite(
+        numeric.to_numpy(dtype=float)
+    ).all(axis=1)
+    valid_index = df.index[valid_mask]
+
+    values = numeric.loc[
+        valid_index
+    ].to_numpy(dtype=float)
+    directions = np.asarray(
+        [1.0] * len(maximize_metrics)
+        + [-1.0] * len(minimize_metrics),
+        dtype=float,
+    )
+    utilities = values * directions
+
+    greater_or_equal = (
+        utilities[:, None, :]
+        >= utilities[None, :, :]
+    )
+    strictly_greater = (
+        utilities[:, None, :]
+        > utilities[None, :, :]
+    )
+    dominates = (
+        greater_or_equal.all(axis=2)
+        & strictly_greater.any(axis=2)
+    )
+    np.fill_diagonal(dominates, False)
+
+    return valid_index, dominates
+
+
 def select_pca_pareto_front(
     diagnostics: pd.DataFrame,
     maximize_metrics: Sequence[str],
     minimize_metrics: Sequence[str],
 ) -> pd.DataFrame:
-    """Return candidates not dominated across the requested objectives."""
-    metrics = [*maximize_metrics, *minimize_metrics]
-    missing = [column for column in metrics if column not in diagnostics]
-    if missing:
-        raise KeyError(f"Missing Pareto metric columns: {missing}")
-    if len(diagnostics) == 0:
-        return diagnostics.copy()
-
-    values = diagnostics[metrics].apply(pd.to_numeric, errors="coerce")
-    valid = np.isfinite(values.to_numpy()).all(axis=1)
-    candidates = diagnostics.loc[valid].copy()
-    numeric = values.loc[valid].to_numpy(dtype=float)
-    directions = np.asarray(
-        [1.0] * len(maximize_metrics) + [-1.0] * len(minimize_metrics)
+    """Return rows not dominated across the requested objectives."""
+    valid_index, dominates = _pareto_dominance_matrix(
+        diagnostics,
+        maximize_metrics=maximize_metrics,
+        minimize_metrics=minimize_metrics,
     )
-    utilities = numeric * directions
-    # competitor x candidate x objective; this is the complete vectorized
-    # non-domination relation and contains no weighted aggregation.
-    greater_or_equal = utilities[:, None, :] >= utilities[None, :, :]
-    strictly_greater = utilities[:, None, :] > utilities[None, :, :]
-    dominates = greater_or_equal.all(axis=2) & strictly_greater.any(axis=2)
-    np.fill_diagonal(dominates, False)
-    return candidates.loc[~dominates.any(axis=0)].copy()
+    front_mask = ~dominates.any(axis=0)
+    return diagnostics.loc[valid_index[front_mask]].copy()
 
 
-def _technical_validity(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+def _base_technical_validity(
+    df: pd.DataFrame,
+) -> tuple[pd.Series, pd.Series]:
+    """Return pre-review technical validity and exact failing flag names.
+
+    Artifact review is intentionally excluded here. Candidates that fail a
+    technical check are never sent to human review, so ``review_status=pending``
+    must not be reported as an additional reason for their rejection.
+    """
     flags: dict[str, pd.Series] = {}
-    for column in PCA_TECHNICAL_FLAG_COLUMNS:
+    for column in expcfg.PCA_TECHNICAL_FLAG_COLUMNS:
         if column == "stability_valid" and column not in df:
             flags[column] = (
                 _finite_numeric(df["instability_metric"])
@@ -540,41 +605,79 @@ def _technical_validity(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
         reasons.loc[failed] = reasons.loc[failed].map(
             lambda value, name=column: f"{value};{name}" if value else name
         )
-    review_complete = df.get(
-        "review_status",
-        pd.Series("pending", index=df.index),
-    ).eq(PCA_REQUIRED_REVIEW_STATUS)
-    review_decision = df.get(
-        "review_decision",
-        pd.Series("", index=df.index),
-    ).astype(str)
-    review_accepted = review_complete & review_decision.isin(
-        {"accept", "warning"}
-    )
-    valid &= review_accepted
-    reasons.loc[~review_complete] = reasons.loc[~review_complete].map(
-        lambda value: (
-            f"{value};artifact_review_pending"
-            if value
-            else "artifact_review_pending"
+    return valid, reasons
+
+
+def _technical_validity(
+    df: pd.DataFrame,
+) -> tuple[pd.Series, pd.Series]:
+    """Return final admissibility after technical and visual review."""
+    base_valid, reasons = _base_technical_validity(df)
+
+    review_complete = (
+        df.get(
+            "review_status",
+            pd.Series("pending", index=df.index),
         )
+        .fillna("")
+        .astype(str)
+        .eq(expcfg.PCA_ARTIFACT_REVIEW_REQUIRED_STATUS)
     )
-    rejected = review_complete & review_decision.eq("reject")
-    reasons.loc[rejected] = reasons.loc[rejected].map(
-        lambda value: f"{value};artifact_review_reject" if value else "artifact_review_reject"
-    )
-    invalid_decision = review_complete & ~review_decision.isin(
-        PCA_ALLOWED_REVIEW_DECISIONS
-    )
-    reasons.loc[invalid_decision] = reasons.loc[invalid_decision].map(
-        lambda value: f"{value};artifact_review_invalid" if value else "artifact_review_invalid"
-    )
-    if "critical_artifact" in df:
-        critical = df["critical_artifact"].fillna(False).astype(bool)
-        valid &= ~critical
-        reasons.loc[critical] = reasons.loc[critical].map(
-            lambda value: f"{value};critical_artifact" if value else "critical_artifact"
+    review_decision = (
+        df.get(
+            "review_decision",
+            pd.Series("", index=df.index),
         )
+        .fillna("")
+        .astype(str)
+    )
+    valid_decision = review_decision.isin(
+        expcfg.PCA_ARTIFACT_REVIEW_ALLOWED_DECISIONS
+    )
+
+    needs_review = base_valid
+    review_accepted = (
+        review_complete
+        & valid_decision
+        & review_decision.isin({"accept", "warning"})
+    )
+    valid = base_valid & (~needs_review | review_accepted)
+
+    pending = needs_review & ~review_complete
+    invalid_decision = (
+        needs_review
+        & review_complete
+        & ~valid_decision
+    )
+    rejected = (
+        needs_review
+        & review_complete
+        & review_decision.eq("reject")
+    )
+    critical = (
+        needs_review
+        & df.get(
+            "critical_artifact",
+            pd.Series(False, index=df.index),
+        )
+        .fillna(False)
+        .astype(bool)
+    )
+
+    reason_updates = (
+        (pending, "artifact_review_pending"),
+        (invalid_decision, "artifact_review_invalid"),
+        (rejected, "artifact_review_reject"),
+        (critical, "critical_artifact"),
+    )
+    for mask, reason in reason_updates:
+        reasons.loc[mask] = np.where(
+            reasons.loc[mask].astype(str).ne(""),
+            reasons.loc[mask].astype(str) + ";" + reason,
+            reason,
+        )
+
+    valid &= ~critical
     return valid, reasons
 
 
@@ -602,6 +705,10 @@ def build_pca_selection_diagnostics(
         raise KeyError(f"Missing PCA diagnostic identifier columns: {missing}")
 
     out = _merge_artifact_review(summary_df, artifact_review_df)
+    (
+        out["technical_fit_valid"],
+        out["technical_fit_blocking_reason"],
+    ) = _base_technical_validity(out)
     out["technical_valid"], out["blocking_reason"] = _technical_validity(out)
     out["selection_status"] = np.where(
         out["technical_valid"],
@@ -620,143 +727,359 @@ def _json_values(values: Sequence[object]) -> str:
     return json.dumps(sorted({str(value) for value in values}), ensure_ascii=False)
 
 
+def _validate_pca_selection_unit_identity(
+    diagnostics: pd.DataFrame,
+    *,
+    config: PCASelectionConfig,
+) -> None:
+    identity_columns = [
+        config.family_col,
+        config.preprocessing_col,
+        config.preprocessing_steps_col,
+        "sg_window_length",
+        "sg_polyorder",
+        "wavelength_axis_id",
+    ]
+    missing = [
+        column
+        for column in identity_columns
+        if column not in diagnostics
+    ]
+    if missing:
+        raise KeyError(
+            "Missing PCA selection-unit identity columns: "
+            f"{missing}"
+        )
+
+    counts = diagnostics.groupby(
+        "selection_unit_id",
+        dropna=False,
+        sort=True,
+    )[identity_columns].nunique(dropna=False)
+
+    ambiguous = counts.gt(1)
+    if ambiguous.any(axis=None):
+        violations = [
+            {
+                "selection_unit_id": str(unit_id),
+                "column": str(column),
+                "n_unique": int(counts.loc[unit_id, column]),
+            }
+            for unit_id, column
+            in ambiguous.stack()[
+                lambda values: values
+            ].index
+        ]
+        raise RuntimeError(
+            "A selection_unit_id maps to inconsistent scientific "
+            f"parameters: {violations[:20]}"
+        )
+
+
+def _aggregate_pca_family_diagnostics(
+    family_df: pd.DataFrame,
+    *,
+    family: str,
+    config: PCASelectionConfig,
+) -> pd.DataFrame:
+    profile = _profile_for_family(family, config)
+    maximize = tuple(profile.maximize_metrics)
+    minimize = tuple(profile.minimize_metrics)
+    metrics = (*maximize, *minimize)
+
+    missing_metrics = [
+        metric
+        for metric in metrics
+        if metric not in family_df
+    ]
+    if missing_metrics:
+        raise KeyError(
+            f"Missing Pareto source metrics for {family!r}: "
+            f"{missing_metrics}"
+        )
+
+    unit_key = family_df["selection_unit_id"]
+    grouped = family_df.groupby(
+        "selection_unit_id",
+        dropna=False,
+        sort=True,
+    )
+
+    identity_columns = [
+        config.family_col,
+        config.preprocessing_col,
+        config.preprocessing_steps_col,
+        "sg_window_length",
+        "sg_polyorder",
+        "wavelength_axis_id",
+    ]
+    out = grouped[identity_columns].first()
+
+    expected_variants = tuple(
+        sorted(
+            family_df[config.variant_col]
+            .astype(str)
+            .unique()
+        )
+    )
+    expected_set = set(expected_variants)
+
+    observed_variants = grouped[
+        config.variant_col
+    ].agg(
+        lambda values: tuple(
+            sorted(values.astype(str).unique())
+        )
+    )
+    missing_variants = observed_variants.map(
+        lambda values: sorted(
+            expected_set.difference(values)
+        )
+    )
+    extra_variants = observed_variants.map(
+        lambda values: sorted(
+            set(values).difference(expected_set)
+        )
+    )
+
+    technical = (
+        family_df["technical_valid"]
+        .fillna(False)
+        .astype(bool)
+    )
+    technical_grouped = technical.groupby(
+        unit_key,
+        dropna=False,
+        sort=True,
+    )
+
+    review_decisions = (
+        family_df.get(
+            "review_decision",
+            pd.Series("", index=family_df.index),
+        )
+        .fillna("")
+        .astype(str)
+    )
+    review_grouped = review_decisions.groupby(
+        unit_key,
+        dropna=False,
+        sort=True,
+    )
+
+    candidate_ids = family_df.get(
+        "candidate_id",
+        pd.Series(
+            family_df.index.astype(str),
+            index=family_df.index,
+        ),
+    )
+
+    numeric = family_df.loc[:, metrics].apply(
+        pd.to_numeric,
+        errors="coerce",
+    )
+    numeric["selection_unit_id"] = unit_key.to_numpy()
+    numeric_grouped = numeric.groupby(
+        "selection_unit_id",
+        dropna=False,
+        sort=True,
+    )
+
+    minimum = numeric_grouped[list(metrics)].min()
+    median = numeric_grouped[list(metrics)].median()
+    maximum = numeric_grouped[list(metrics)].max()
+    q25 = numeric_grouped[list(metrics)].quantile(0.25)
+    q75 = numeric_grouped[list(metrics)].quantile(0.75)
+
+    finite_rows = pd.Series(
+        np.isfinite(
+            numeric.loc[:, metrics].to_numpy(dtype=float)
+        ).all(axis=1),
+        index=family_df.index,
+    )
+    metrics_complete = finite_rows.groupby(
+        unit_key,
+        dropna=False,
+        sort=True,
+    ).all()
+
+    out["n_candidates"] = grouped.size()
+    out["n_expected_variants"] = len(expected_variants)
+    out["n_observed_variants"] = observed_variants.map(len)
+    out["expected_variants_json"] = _json_values(
+        expected_variants
+    )
+    out["observed_variants_json"] = (
+        observed_variants.map(_json_values)
+    )
+    out["missing_variants_json"] = (
+        missing_variants.map(_json_values)
+    )
+    out["extra_variants_json"] = (
+        extra_variants.map(_json_values)
+    )
+    out["candidate_ids_json"] = (
+        candidate_ids.groupby(
+            unit_key,
+            dropna=False,
+            sort=True,
+        ).agg(_json_values)
+    )
+
+    out["n_accept"] = review_grouped.apply(
+        lambda values: int(values.eq("accept").sum())
+    )
+    out["n_warning"] = review_grouped.apply(
+        lambda values: int(values.eq("warning").sum())
+    )
+    out["n_reject"] = review_grouped.apply(
+        lambda values: int(values.eq("reject").sum())
+    )
+
+    out["n_blocked_candidates"] = (
+        (~technical).groupby(
+            unit_key,
+            dropna=False,
+            sort=True,
+        ).sum().astype(int)
+    )
+    out["coverage_complete"] = (
+        missing_variants.map(len).eq(0)
+        & extra_variants.map(len).eq(0)
+    )
+    out["all_candidates_admissible"] = (
+        technical_grouped.all()
+    )
+
+    if config.strict_variant_coverage:
+        out["strict_coverage_pass"] = (
+            out["coverage_complete"]
+            & out["all_candidates_admissible"]
+        )
+    else:
+        out["strict_coverage_pass"] = (
+            technical_grouped.any()
+        )
+
+    out["objective_metrics_complete"] = metrics_complete
+    out["preprocessing_eligible"] = (
+        out["strict_coverage_pass"]
+        & out["objective_metrics_complete"]
+    )
+    out["pareto_front"] = False
+    out["dominated_by"] = ""
+
+    out["selection_status"] = np.select(
+        [
+            out["preprocessing_eligible"],
+            out["strict_coverage_pass"],
+        ],
+        [
+            "pareto_eligible",
+            "ineligible_incomplete_metrics",
+        ],
+        default="ineligible_strict_coverage",
+    )
+
+    for metric in metrics:
+        out[f"{metric}_min"] = minimum[metric]
+        out[f"{metric}_median"] = median[metric]
+        out[f"{metric}_max"] = maximum[metric]
+        out[f"{metric}_iqr"] = q75[metric] - q25[metric]
+        out[f"{metric}_worst"] = (
+            minimum[metric]
+            if metric in maximize
+            else maximum[metric]
+        )
+
+    return out.reset_index()
+
+
 def aggregate_pca_preprocessing_diagnostics(
     candidate_diagnostics_df: pd.DataFrame,
     config: PCASelectionConfig | None = None,
 ) -> pd.DataFrame:
-    """Aggregate candidate diagnostics into robust preprocessing decisions.
+    """Aggregate candidate diagnostics at selection-unit level."""
+    config = (
+        DEFAULT_PCA_SELECTION_CONFIG
+        if config is None
+        else config
+    )
 
-    The expected variant universe is inferred once per matrix family from the
-    complete candidate plan. A preprocessing is eligible only when it covers
-    that universe, every candidate is admissible, and every Pareto source metric
-    is finite. Pareto objectives are aggregated in the least favourable
-    direction; medians and ranges are retained for audit only.
-    """
-    config = DEFAULT_PCA_SELECTION_CONFIG if config is None else config
-    group_cols = [
+    required = [
+        "selection_unit_id",
         config.family_col,
+        config.variant_col,
         config.preprocessing_col,
         config.preprocessing_steps_col,
+        "technical_valid",
     ]
-    required = [*group_cols, config.variant_col, "technical_valid"]
-    missing = [column for column in required if column not in candidate_diagnostics_df]
+    missing = [
+        column
+        for column in required
+        if column not in candidate_diagnostics_df
+    ]
     if missing:
-        raise KeyError(f"Missing preprocessing aggregation columns: {missing}")
-
-    step_counts = candidate_diagnostics_df.groupby(
-        [config.family_col, config.preprocessing_col],
-        dropna=False,
-    )[config.preprocessing_steps_col].nunique(dropna=False)
-    ambiguous = step_counts[step_counts > 1]
-    if len(ambiguous):
-        raise RuntimeError(
-            "A preprocessing name maps to multiple step definitions within a family: "
-            f"{ambiguous.index.tolist()}"
+        raise KeyError(
+            f"Missing preprocessing aggregation columns: {missing}"
         )
 
-    expected_variants = {
-        str(family): tuple(sorted(group[config.variant_col].astype(str).unique()))
-        for family, group in candidate_diagnostics_df.groupby(
-            config.family_col,
-            dropna=False,
-            sort=True,
-        )
-    }
-    rows: list[dict[str, object]] = []
-    for keys, group in candidate_diagnostics_df.groupby(
-        group_cols,
+    _validate_pca_selection_unit_identity(
+        candidate_diagnostics_df,
+        config=config,
+    )
+
+    frames = []
+    for family, family_df in candidate_diagnostics_df.groupby(
+        config.family_col,
         dropna=False,
         sort=True,
     ):
-        family, preprocessing, preprocessing_steps = keys
-        profile = _profile_for_family(str(family), config)
-        maximize = tuple(profile.maximize_metrics)
-        minimize = tuple(profile.minimize_metrics)
-        objective_metrics = (*maximize, *minimize)
-        missing_metrics = [metric for metric in objective_metrics if metric not in group]
-        if missing_metrics:
-            raise KeyError(
-                f"Missing Pareto source metrics for {family!r}: {missing_metrics}"
+        frames.append(
+            _aggregate_pca_family_diagnostics(
+                family_df,
+                family=str(family),
+                config=config,
             )
+        )
 
-        family_expected = expected_variants[str(family)]
-        observed = tuple(sorted(group[config.variant_col].astype(str).unique()))
-        missing_variants = sorted(set(family_expected).difference(observed))
-        extra_variants = sorted(set(observed).difference(family_expected))
-        coverage_complete = not missing_variants and not extra_variants
-        candidate_admissible = group["technical_valid"].fillna(False).astype(bool)
-        all_candidates_admissible = bool(candidate_admissible.all())
-        review_decisions = group.get(
-            "review_decision",
-            pd.Series("", index=group.index),
-        ).fillna("").astype(str)
+    if not frames:
+        return pd.DataFrame()
 
-        numeric_metrics = group.loc[:, list(objective_metrics)].apply(
-            pd.to_numeric,
-            errors="coerce",
-        )
-        objective_metrics_complete = bool(
-            np.isfinite(numeric_metrics.to_numpy(dtype=float)).all()
-        )
-        strict_coverage_pass = (
-            coverage_complete and all_candidates_admissible
-            if config.strict_variant_coverage
-            else bool(candidate_admissible.any())
-        )
-        eligible = strict_coverage_pass and objective_metrics_complete
-        row: dict[str, object] = {
-            config.family_col: family,
-            config.preprocessing_col: preprocessing,
-            config.preprocessing_steps_col: preprocessing_steps,
-            "n_candidates": int(len(group)),
-            "n_expected_variants": int(len(family_expected)),
-            "n_observed_variants": int(len(observed)),
-            "expected_variants_json": _json_values(family_expected),
-            "observed_variants_json": _json_values(observed),
-            "missing_variants_json": _json_values(missing_variants),
-            "extra_variants_json": _json_values(extra_variants),
-            "candidate_ids_json": _json_values(
-                group.get("candidate_id", pd.Series(group.index, index=group.index))
-            ),
-            "n_accept": int(review_decisions.eq("accept").sum()),
-            "n_warning": int(review_decisions.eq("warning").sum()),
-            "n_reject": int(review_decisions.eq("reject").sum()),
-            "n_blocked_candidates": int((~candidate_admissible).sum()),
-            "coverage_complete": bool(coverage_complete),
-            "all_candidates_admissible": all_candidates_admissible,
-            "strict_coverage_pass": bool(strict_coverage_pass),
-            "objective_metrics_complete": objective_metrics_complete,
-            "preprocessing_eligible": bool(eligible),
-            "pareto_front": False,
-            "dominated_by": "",
-            "selection_status": (
-                "pareto_eligible"
-                if eligible
-                else (
-                    "ineligible_incomplete_metrics"
-                    if strict_coverage_pass
-                    else "ineligible_strict_coverage"
-                )
-            ),
-        }
-        for metric in objective_metrics:
-            values = pd.to_numeric(group[metric], errors="coerce")
-            finite = values[np.isfinite(values)]
-            row[f"{metric}_min"] = float(finite.min()) if len(finite) else np.nan
-            row[f"{metric}_median"] = (
-                float(finite.median()) if len(finite) else np.nan
+    return pd.concat(
+        frames,
+        ignore_index=True,
+    )
+
+
+def _resolved_pca_technical_flags(
+    diagnostics: pd.DataFrame,
+) -> pd.DataFrame:
+    flags = pd.DataFrame(index=diagnostics.index)
+
+    for flag in expcfg.PCA_TECHNICAL_FLAG_COLUMNS:
+        if flag in diagnostics:
+            flags[flag] = (
+                diagnostics[flag]
+                .fillna(False)
+                .astype(bool)
             )
-            row[f"{metric}_max"] = float(finite.max()) if len(finite) else np.nan
-            row[f"{metric}_iqr"] = (
-                float(finite.quantile(0.75) - finite.quantile(0.25))
-                if len(finite)
-                else np.nan
+        elif (
+            flag == "stability_valid"
+            and "instability_metric" in diagnostics
+        ):
+            values = pd.to_numeric(
+                diagnostics["instability_metric"],
+                errors="coerce",
             )
-            row[f"{metric}_worst"] = (
-                row[f"{metric}_min"] if metric in maximize else row[f"{metric}_max"]
+            flags[flag] = np.isfinite(
+                values.to_numpy(dtype=float)
             )
-        rows.append(row)
-    return pd.DataFrame(rows)
+        else:
+            flags[flag] = False
+
+    return flags
 
 
 def build_pca_scoring_diagnostics(
@@ -765,220 +1088,329 @@ def build_pca_scoring_diagnostics(
     *,
     preprocessing_summary_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Return candidate metrics and their preprocessing-level Pareto outcome."""
-    config = DEFAULT_PCA_SELECTION_CONFIG if config is None else config
-    diagnostics_df = diagnostics_df.copy()
+    """Return long-form scientific, technical, review and selection diagnostics."""
+    config = (
+        DEFAULT_PCA_SELECTION_CONFIG
+        if config is None
+        else config
+    )
+    diagnostics = diagnostics_df.copy()
+
     if preprocessing_summary_df is not None:
-        merge_keys = [config.family_col, config.preprocessing_col]
         selection_columns = [
-            *merge_keys,
+            "selection_unit_id",
             "selection_status",
             "selection_reason",
             "pareto_front",
         ]
         missing = [
-            column for column in selection_columns if column not in preprocessing_summary_df
+            column
+            for column in selection_columns
+            if column not in preprocessing_summary_df
         ]
         if missing:
-            raise KeyError(f"Missing preprocessing selection columns: {missing}")
-        diagnostics_df = diagnostics_df.drop(
-            columns=["selection_status", "selection_reason", "pareto_front"],
+            raise KeyError(
+                f"Missing preprocessing selection columns: {missing}"
+            )
+
+        diagnostics = diagnostics.drop(
+            columns=[
+                "selection_status",
+                "selection_reason",
+                "pareto_front",
+            ],
             errors="ignore",
         ).merge(
-            preprocessing_summary_df.loc[:, selection_columns],
-            on=merge_keys,
+            preprocessing_summary_df.loc[
+                :,
+                selection_columns,
+            ],
+            on="selection_unit_id",
             how="left",
             validate="many_to_one",
         )
-    id_columns = [
-        "candidate_id",
-        "training_matrix_id",
-        "wavelength_axis_id",
-        config.family_col,
-        config.variant_col,
-        config.matrix_method_col,
-        "m",
-        "balanced_pixel_strategy",
-        config.preprocessing_col,
-        config.preprocessing_steps_col,
-    ]
-    scientific_metrics = [
-        "n_observations",
-        "n_bands",
-        "ncomp_90",
-        "ncomp_95",
-        "ncomp_99",
-        "centroid_distance_pc1_pc2_pc3",
-        "mahalanobis_pc1_pc2_pc3",
-        "class_trace_ratio",
-        "within_class_trace",
-        "mean_distance_to_class_centroid",
-        "q95_distance_to_class_centroid",
-        "batch_trace_ratio",
-        "mean_batch_centroid_shift_norm",
-        "max_batch_centroid_shift_norm",
-        "object_class_trace_ratio",
-        "object_batch_trace_ratio",
-        "mean_intra_object_trace",
-        "object_over_intra_ratio",
-        "train_q_mean",
-        "train_q_q95",
-        "projection_q_mean",
-        "projection_q_q95",
-        "projection_q_deviation",
-        "mean_train_projection_shift_norm",
-        "loading_abs_correlation_mean",
-        "loading_angle_mean_deg",
-        "group_fold_subspace_instability",
-        "seed_subspace_instability",
-        "bootstrap_subspace_instability",
-        "group_fold_projection_shift_std",
-        "score_stability_std",
-        "instability_metric",
-    ]
-    output_columns = [
-        *id_columns,
-        "diagnostic_group",
-        "metric",
-        "value",
-        "threshold",
-        "constraint",
-        "passed",
-        "pareto_goal",
-        "selection_status",
-        "detail",
-    ]
-    output_rows = []
 
-    def numeric_value(value):
-        if value is None or pd.isna(value):
-            return np.nan
-        if isinstance(value, (bool, np.bool_)):
-            return float(bool(value))
-        try:
-            converted = float(value)
-        except (TypeError, ValueError):
-            return np.nan
-        return converted if np.isfinite(converted) else np.nan
+    id_columns = list(
+        expcfg.PCA_DIAGNOSTIC_ID_COLUMNS
+    )
+    for column in id_columns:
+        if column not in diagnostics:
+            diagnostics[column] = "not_applicable"
 
-    for _, candidate in diagnostics_df.iterrows():
-        identifiers = {
-            column: candidate.get(column, "not_applicable")
-            for column in id_columns
-        }
-        family = str(candidate.get(config.family_col))
-        profile = _profile_for_family(family, config)
-        pareto_goals = {
-            **{metric: "maximize" for metric in profile.maximize_metrics},
-            **{metric: "minimize" for metric in profile.minimize_metrics},
-        }
-        metrics = list(dict.fromkeys(
-            [
-                *scientific_metrics,
-                *profile.maximize_metrics,
-                *profile.minimize_metrics,
-            ]
-        ))
-        for metric in metrics:
-            if metric not in candidate:
-                continue
-            threshold = np.nan
-            constraint = ""
-            passed = None
-            diagnostic_group = (
-                "preprocessing_pareto_source_metric"
-                if metric in pareto_goals
-                else "scientific_metric"
-            )
-            output_rows.append(
-                {
-                    **identifiers,
-                    "diagnostic_group": diagnostic_group,
-                    "metric": metric,
-                    "value": numeric_value(candidate.get(metric)),
-                    "threshold": threshold,
-                    "constraint": constraint,
-                    "passed": passed,
-                    "pareto_goal": pareto_goals.get(metric, ""),
-                    "selection_status": candidate.get(
-                        "selection_status",
-                        "not_evaluated",
-                    ),
-                    "detail": "",
-                }
-            )
-
-        for metric in (*PCA_TECHNICAL_FLAG_COLUMNS, "technical_valid"):
-            passed = bool(candidate.get(metric, False))
-            output_rows.append(
-                {
-                    **identifiers,
-                    "diagnostic_group": "technical_blocker",
-                    "metric": metric,
-                    "value": float(passed),
-                    "threshold": 1.0,
-                    "constraint": "==",
-                    "passed": passed,
-                    "pareto_goal": "",
-                    "selection_status": candidate.get(
-                        "selection_status",
-                        "not_evaluated",
-                    ),
-                    "detail": (
-                        str(candidate.get("blocking_reason", ""))
-                        if metric == "technical_valid"
-                        else ""
-                    ),
-                }
-            )
-
-        for metric in PCA_ARTIFACT_COLUMNS:
-            value = bool(candidate.get(metric, False))
-            output_rows.append(
-                {
-                    **identifiers,
-                    "diagnostic_group": "artifact_review",
-                    "metric": metric,
-                    "value": float(value),
-                    "threshold": 0.0,
-                    "constraint": "==",
-                    "passed": not value,
-                    "pareto_goal": "",
-                    "selection_status": candidate.get(
-                        "selection_status",
-                        "not_evaluated",
-                    ),
-                    "detail": (
-                        f"{candidate.get('review_status', 'pending')}: "
-                        f"{candidate.get('review_decision', '')}; "
-                        f"{candidate.get('review_comment', '')}".strip()
-                    ),
-                }
-            )
-
-        retained = candidate.get("selection_status") in {
-            "selected",
-        }
-        output_rows.append(
-            {
-                **identifiers,
-                "diagnostic_group": "selection",
-                "metric": "candidate_retained_after_pareto",
-                "value": float(retained),
-                "threshold": np.nan,
-                "constraint": "",
-                "passed": retained,
-                "pareto_goal": "",
-                "selection_status": candidate.get(
-                    "selection_status",
-                    "not_evaluated",
-                ),
-                "detail": str(candidate.get("selection_reason", "")),
-            }
+    if "selection_status" not in diagnostics:
+        diagnostics["selection_status"] = "not_evaluated"
+    else:
+        diagnostics["selection_status"] = (
+            diagnostics["selection_status"]
+            .fillna("not_evaluated")
+            .astype(str)
         )
 
-    return pd.DataFrame(output_rows, columns=output_columns)
+    if "selection_reason" not in diagnostics:
+        diagnostics["selection_reason"] = ""
+    if "blocking_reason" not in diagnostics:
+        diagnostics["blocking_reason"] = ""
 
+    goal_rows = []
+    for family, profile in config.profiles.items():
+        goal_rows.extend(
+            {
+                config.family_col: str(family),
+                "metric": metric,
+                "pareto_goal": "maximize",
+            }
+            for metric in profile.maximize_metrics
+        )
+        goal_rows.extend(
+            {
+                config.family_col: str(family),
+                "metric": metric,
+                "pareto_goal": "minimize",
+            }
+            for metric in profile.minimize_metrics
+        )
+    goal_table = pd.DataFrame(
+        goal_rows,
+        columns=(
+            config.family_col,
+            "metric",
+            "pareto_goal",
+        ),
+    )
+
+    profile_metrics = tuple(
+        dict.fromkeys(
+            metric
+            for profile in config.profiles.values()
+            for metric in (
+                *profile.maximize_metrics,
+                *profile.minimize_metrics,
+            )
+        )
+    )
+    scientific_columns = [
+        metric
+        for metric in dict.fromkeys(
+            (
+                *_PCA_SCIENTIFIC_METRICS,
+                *profile_metrics,
+            )
+        )
+        if metric in diagnostics
+    ]
+
+    scientific = diagnostics.melt(
+        id_vars=[
+            *id_columns,
+            "selection_status",
+        ],
+        value_vars=scientific_columns,
+        var_name="metric",
+        value_name="value",
+    )
+    if len(goal_table):
+        scientific = scientific.merge(
+            goal_table,
+            on=[
+                config.family_col,
+                "metric",
+            ],
+            how="left",
+            validate="many_to_one",
+        )
+    else:
+        scientific["pareto_goal"] = ""
+
+    scientific["pareto_goal"] = (
+        scientific["pareto_goal"]
+        .fillna("")
+        .astype(str)
+    )
+    scientific["diagnostic_group"] = np.where(
+        scientific["pareto_goal"].ne(""),
+        "preprocessing_pareto_source_metric",
+        "scientific_metric",
+    )
+    scientific["value"] = pd.to_numeric(
+        scientific["value"],
+        errors="coerce",
+    )
+    scientific["value"] = scientific["value"].where(
+        np.isfinite(scientific["value"]),
+        np.nan,
+    )
+    scientific["threshold"] = np.nan
+    scientific["constraint"] = ""
+    scientific["passed"] = pd.NA
+    scientific["detail"] = ""
+
+    technical_source = diagnostics.loc[
+        :,
+        [
+            *id_columns,
+            "selection_status",
+            "blocking_reason",
+        ],
+    ].copy()
+    technical_flags = _resolved_pca_technical_flags(
+        diagnostics
+    )
+    technical_source = pd.concat(
+        [
+            technical_source,
+            technical_flags,
+        ],
+        axis=1,
+    )
+    technical_source["technical_valid"] = (
+        diagnostics.get(
+            "technical_valid",
+            pd.Series(False, index=diagnostics.index),
+        )
+        .fillna(False)
+        .astype(bool)
+    )
+
+    technical = technical_source.melt(
+        id_vars=[
+            *id_columns,
+            "selection_status",
+            "blocking_reason",
+        ],
+        value_vars=[
+            *expcfg.PCA_TECHNICAL_FLAG_COLUMNS,
+            "technical_valid",
+        ],
+        var_name="metric",
+        value_name="passed",
+    )
+    technical["passed"] = (
+        technical["passed"]
+        .fillna(False)
+        .astype(bool)
+    )
+    technical["diagnostic_group"] = "technical_blocker"
+    technical["value"] = technical["passed"].astype(float)
+    technical["threshold"] = 1.0
+    technical["constraint"] = "=="
+    technical["pareto_goal"] = ""
+    technical["detail"] = np.where(
+        technical["metric"].eq("technical_valid"),
+        technical["blocking_reason"].fillna("").astype(str),
+        "",
+    )
+    technical = technical.drop(
+        columns="blocking_reason"
+    )
+
+    artifact_source = diagnostics.loc[
+        :,
+        [
+            *id_columns,
+            "selection_status",
+        ],
+    ].copy()
+    for column in expcfg.PCA_ARTIFACT_COLUMNS:
+        artifact_source[column] = (
+            diagnostics.get(
+                column,
+                pd.Series(False, index=diagnostics.index),
+            )
+            .fillna(False)
+            .astype(bool)
+        )
+
+    review_status = diagnostics.get(
+        "review_status",
+        pd.Series("pending", index=diagnostics.index),
+    ).fillna("pending").astype(str)
+    review_decision = diagnostics.get(
+        "review_decision",
+        pd.Series("", index=diagnostics.index),
+    ).fillna("").astype(str)
+    review_comment = diagnostics.get(
+        "review_comment",
+        pd.Series("", index=diagnostics.index),
+    ).fillna("").astype(str)
+
+    artifact_source["_detail"] = (
+        review_status
+        + ": "
+        + review_decision
+        + "; "
+        + review_comment
+    ).str.strip()
+
+    artifact = artifact_source.melt(
+        id_vars=[
+            *id_columns,
+            "selection_status",
+            "_detail",
+        ],
+        value_vars=list(expcfg.PCA_ARTIFACT_COLUMNS),
+        var_name="metric",
+        value_name="_artifact_present",
+    )
+    artifact["_artifact_present"] = (
+        artifact["_artifact_present"]
+        .fillna(False)
+        .astype(bool)
+    )
+    artifact["diagnostic_group"] = "artifact_review"
+    artifact["value"] = (
+        artifact["_artifact_present"].astype(float)
+    )
+    artifact["threshold"] = 0.0
+    artifact["constraint"] = "=="
+    artifact["passed"] = ~artifact["_artifact_present"]
+    artifact["pareto_goal"] = ""
+    artifact["detail"] = artifact["_detail"]
+    artifact = artifact.drop(
+        columns=[
+            "_detail",
+            "_artifact_present",
+        ]
+    )
+
+    selection = diagnostics.loc[
+        :,
+        [
+            *id_columns,
+            "selection_status",
+            "selection_reason",
+        ],
+    ].copy()
+    selection["diagnostic_group"] = "selection"
+    selection["metric"] = (
+        "candidate_retained_after_pareto"
+    )
+    selection["passed"] = (
+        selection["selection_status"].eq("selected")
+    )
+    selection["value"] = selection["passed"].astype(float)
+    selection["threshold"] = np.nan
+    selection["constraint"] = ""
+    selection["pareto_goal"] = ""
+    selection["detail"] = (
+        selection["selection_reason"]
+        .fillna("")
+        .astype(str)
+    )
+    selection = selection.drop(
+        columns="selection_reason"
+    )
+
+    output = pd.concat(
+        [
+            scientific,
+            technical,
+            artifact,
+            selection,
+        ],
+        ignore_index=True,
+        sort=False,
+    )
+    return output.loc[:,list(expcfg.PCA_SCORING_DIAGNOSTIC_COLUMNS)]
 
 def build_pca_selection_flow_tables(
     diagnostics_df: pd.DataFrame,
@@ -1090,6 +1522,1268 @@ def build_pca_selection_flow_tables(
         ),
         pd.DataFrame(outcome_rows),
     )
+
+
+def _new_selection_events(
+    source: pd.DataFrame,
+    *,
+    substage: str,
+    entity_type: str,
+    entity_col: str,
+    related_col: str | None = None,
+) -> pd.DataFrame:
+    out = pd.DataFrame(index=source.index)
+
+    out["stage"] = expcfg.PCA_AUDIT_STAGE
+    out["substage"] = str(substage)
+    out["entity_type"] = str(entity_type)
+    out["entity_id"] = (
+        source[entity_col]
+        .fillna("")
+        .astype(str)
+    )
+    out["related_entity_id"] = (
+        ""
+        if related_col is None
+        else source[related_col]
+        .fillna("")
+        .astype(str)
+    )
+    out["track_id"] = ""
+    out["decision"] = ""
+    out["reason_code"] = ""
+    out["metric"] = ""
+    out["observed_value"] = np.nan
+    out["operator"] = ""
+    out["reference_value"] = np.nan
+    out["reference_source"] = ""
+    out["mechanism"] = ""
+    out["detail"] = ""
+
+    return out
+
+
+def _validate_pca_selection_audit_inputs(
+    candidate_registry: pd.DataFrame,
+    diagnostics: pd.DataFrame,
+    preprocessing_summary: pd.DataFrame,
+    *,
+    config: PCASelectionConfig,
+) -> None:
+    contracts = {
+        "candidate_registry_df": (
+            candidate_registry,
+            {
+                "candidate_id",
+                "selection_unit_id",
+            },
+        ),
+        "candidate_diagnostics_df": (
+            diagnostics,
+            {
+                "candidate_id",
+                "selection_unit_id",
+                "technical_fit_valid",
+                "technical_valid",
+                "blocking_reason",
+            },
+        ),
+        "preprocessing_summary_df": (
+            preprocessing_summary,
+            {
+                "selection_unit_id",
+                config.family_col,
+                config.preprocessing_col,
+                "strict_coverage_pass",
+                "objective_metrics_complete",
+                "pareto_front",
+                "selection_status",
+                "n_expected_variants",
+                "n_observed_variants",
+                "n_blocked_candidates",
+                "expected_variants_json",
+                "observed_variants_json",
+                "missing_variants_json",
+                "dominated_by",
+            },
+        ),
+    }
+
+    for name, (frame, required) in contracts.items():
+        missing = sorted(required.difference(frame.columns))
+        if missing:
+            raise KeyError(
+                f"{name} is missing required columns: {missing}"
+            )
+
+    uniqueness_contracts = (
+        (
+            "candidate registry",
+            candidate_registry,
+            "candidate_id",
+        ),
+        (
+            "candidate diagnostics",
+            diagnostics,
+            "candidate_id",
+        ),
+        (
+            "preprocessing summary",
+            preprocessing_summary,
+            "selection_unit_id",
+        ),
+    )
+    for name, frame, column in uniqueness_contracts:
+        duplicated = frame[column].duplicated(keep=False)
+        if duplicated.any():
+            values = sorted(
+                frame.loc[duplicated, column]
+                .astype(str)
+                .unique()
+            )
+            raise RuntimeError(
+                f"{name} contains duplicate {column} values: "
+                f"{values[:10]}"
+            )
+
+    registry_candidates = set(
+        candidate_registry["candidate_id"].astype(str)
+    )
+    diagnostic_candidates = set(
+        diagnostics["candidate_id"].astype(str)
+    )
+    if registry_candidates != diagnostic_candidates:
+        raise RuntimeError(
+            "Candidate universe mismatch between registry and "
+            "diagnostics: "
+            f"missing_in_diagnostics="
+            f"{sorted(registry_candidates-diagnostic_candidates)}, "
+            f"extra_in_diagnostics="
+            f"{sorted(diagnostic_candidates-registry_candidates)}"
+        )
+
+    registry_units = set(
+        candidate_registry["selection_unit_id"].astype(str)
+    )
+    summary_units = set(
+        preprocessing_summary[
+            "selection_unit_id"
+        ].astype(str)
+    )
+    if registry_units != summary_units:
+        raise RuntimeError(
+            "PCA selection-unit universe mismatch: "
+            f"missing_in_summary="
+            f"{sorted(registry_units-summary_units)}, "
+            f"extra_in_summary="
+            f"{sorted(summary_units-registry_units)}"
+        )
+
+    registry_links = (
+        candidate_registry[
+            ["candidate_id", "selection_unit_id"]
+        ]
+        .astype(str)
+        .set_index("candidate_id")["selection_unit_id"]
+        .sort_index()
+    )
+    diagnostic_links = (
+        diagnostics[
+            ["candidate_id", "selection_unit_id"]
+        ]
+        .astype(str)
+        .set_index("candidate_id")["selection_unit_id"]
+        .sort_index()
+    )
+    if not registry_links.equals(diagnostic_links):
+        raise RuntimeError(
+            "candidate_id -> selection_unit_id mapping differs "
+            "between registry and diagnostics."
+        )
+
+
+def _build_candidate_generation_events(
+    candidate_registry: pd.DataFrame,
+) -> pd.DataFrame:
+    out = _new_selection_events(
+        candidate_registry,
+        substage="candidate_generation",
+        entity_type="pca_candidate",
+        entity_col="candidate_id",
+        related_col="selection_unit_id",
+    )
+    out["decision"] = "entered"
+    out["reason_code"] = "candidate_from_notebook02"
+    out["mechanism"] = "candidate_generation"
+    out["detail"] = (
+        "PCA candidate generated from accepted notebook-02 "
+        "matrix/preprocessing outputs."
+    )
+    return out
+
+
+def _resolve_pca_technical_rule(
+    flag: str,
+) -> dict[str, object]:
+    rule = dict(
+        expcfg.PCA_TECHNICAL_AUDIT_FALLBACK_RULE
+    )
+    rule.update(
+        expcfg.PCA_TECHNICAL_AUDIT_RULES.get(
+            flag,
+            {},
+        )
+    )
+    rule.setdefault("metric", flag)
+    rule.setdefault("reason_code_prefix", flag)
+
+    if "reference_config" in rule:
+        config_name = str(rule["reference_config"])
+        if not hasattr(expcfg, config_name):
+            raise AttributeError(
+                f"Unknown PCA technical reference config: "
+                f"{config_name!r}"
+            )
+        rule["reference_value"] = getattr(
+            expcfg,
+            config_name,
+        )
+
+    return rule
+
+
+def _build_technical_check_events(
+    diagnostics: pd.DataFrame,
+) -> pd.DataFrame:
+    id_columns = [
+        "candidate_id",
+        "selection_unit_id",
+    ]
+    resolved_flags = _resolved_pca_technical_flags(
+        diagnostics
+    )
+
+    special_flags = tuple(
+        flag
+        for flag in expcfg.PCA_TECHNICAL_FLAG_COLUMNS
+        if flag in expcfg.PCA_TECHNICAL_AUDIT_RULES
+    )
+    boolean_flags = tuple(
+        flag
+        for flag in expcfg.PCA_TECHNICAL_FLAG_COLUMNS
+        if flag not in special_flags
+    )
+
+    frames = []
+
+    if boolean_flags:
+        flags = pd.concat(
+            [
+                diagnostics.loc[:, id_columns],
+                resolved_flags.loc[:, boolean_flags],
+            ],
+            axis=1,
+        ).melt(
+            id_vars=id_columns,
+            value_vars=list(boolean_flags),
+            var_name="metric",
+            value_name="passed",
+        )
+        flags["passed"] = (
+            flags["passed"]
+            .fillna(False)
+            .astype(bool)
+        )
+
+        events = _new_selection_events(
+            flags,
+            substage="technical_check",
+            entity_type="pca_candidate",
+            entity_col="candidate_id",
+            related_col="selection_unit_id",
+        )
+        events["decision"] = np.where(
+            flags["passed"],
+            "kept",
+            "eliminated",
+        )
+        events["reason_code"] = (
+            flags["metric"].astype(str)
+            + np.where(
+                flags["passed"],
+                "_pass",
+                "_fail",
+            )
+        )
+        events["metric"] = flags["metric"].astype(str)
+        events["observed_value"] = (
+            flags["passed"].astype(float)
+        )
+        events["operator"] = "=="
+        events["reference_value"] = 1.0
+        events["reference_source"] = (
+            expcfg.PCA_TECHNICAL_AUDIT_FALLBACK_RULE[
+                "reference_source"
+            ]
+        )
+        events["mechanism"] = (
+            expcfg.PCA_TECHNICAL_AUDIT_FALLBACK_RULE[
+                "mechanism"
+            ]
+        )
+        frames.append(events)
+
+    for flag in special_flags:
+        rule = _resolve_pca_technical_rule(flag)
+        source = diagnostics.loc[:, id_columns].copy()
+        source["passed"] = resolved_flags[flag]
+
+        events = _new_selection_events(
+            source,
+            substage="technical_check",
+            entity_type="pca_candidate",
+            entity_col="candidate_id",
+            related_col="selection_unit_id",
+        )
+        passed = source["passed"].astype(bool)
+        metric = str(rule["metric"])
+        prefix = str(rule["reason_code_prefix"])
+
+        observed = (
+            pd.to_numeric(
+                diagnostics[metric],
+                errors="coerce",
+            )
+            if metric in diagnostics
+            else pd.Series(
+                np.nan,
+                index=diagnostics.index,
+            )
+        )
+
+        events["decision"] = np.where(
+            passed,
+            "kept",
+            "eliminated",
+        )
+        events["reason_code"] = (
+            prefix
+            + np.where(
+                passed,
+                "_pass",
+                "_fail",
+            )
+        )
+        events["metric"] = metric
+        events["observed_value"] = observed
+        events["operator"] = str(rule["operator"])
+        events["reference_value"] = float(
+            rule["reference_value"]
+        )
+        events["reference_source"] = str(
+            rule["reference_source"]
+        )
+        events["mechanism"] = str(rule["mechanism"])
+        frames.append(events)
+
+    return pd.concat(
+        frames,
+        ignore_index=True,
+    )
+
+
+def _build_technical_fit_events(
+    diagnostics: pd.DataFrame,
+) -> pd.DataFrame:
+    out = _new_selection_events(
+        diagnostics,
+        substage="technical_fit_outcome",
+        entity_type="pca_candidate",
+        entity_col="candidate_id",
+        related_col="selection_unit_id",
+    )
+    fit_valid = (
+        diagnostics["technical_fit_valid"]
+        .fillna(False)
+        .astype(bool)
+    )
+
+    out["decision"] = np.where(
+        fit_valid,
+        "kept",
+        "eliminated",
+    )
+    out["reason_code"] = np.where(
+        fit_valid,
+        "technical_fit_valid",
+        "technical_fit_blocked",
+    )
+    out["metric"] = "technical_fit_valid"
+    out["observed_value"] = fit_valid.astype(float)
+    out["operator"] = "=="
+    out["reference_value"] = 1.0
+    out["reference_source"] = (
+        "PCA pre-review technical contract"
+    )
+    out["mechanism"] = "technical_eligibility"
+    out["detail"] = (
+        diagnostics.get(
+            "technical_fit_blocking_reason",
+            pd.Series("", index=diagnostics.index),
+        )
+        .fillna("")
+        .astype(str)
+    )
+    return out
+
+
+def _build_artifact_review_events(
+    diagnostics: pd.DataFrame,
+) -> pd.DataFrame:
+    out = _new_selection_events(
+        diagnostics,
+        substage="artifact_review",
+        entity_type="pca_candidate",
+        entity_col="candidate_id",
+        related_col="selection_unit_id",
+    )
+
+    fit_valid = (
+        diagnostics["technical_fit_valid"]
+        .fillna(False)
+        .astype(bool)
+    )
+    review_status = (
+        diagnostics.get(
+            "review_status",
+            pd.Series("pending", index=diagnostics.index),
+        )
+        .fillna("pending")
+        .astype(str)
+    )
+    review_decision = (
+        diagnostics.get(
+            "review_decision",
+            pd.Series("", index=diagnostics.index),
+        )
+        .fillna("")
+        .astype(str)
+    )
+    review_complete = review_status.eq(
+        expcfg.PCA_ARTIFACT_REVIEW_REQUIRED_STATUS
+    )
+    valid_decision = review_decision.isin(
+        expcfg.PCA_ARTIFACT_REVIEW_ALLOWED_DECISIONS
+    )
+    critical = (
+        diagnostics.get(
+            "critical_artifact",
+            pd.Series(False, index=diagnostics.index),
+        )
+        .fillna(False)
+        .astype(bool)
+    )
+
+    conditions = [
+        ~fit_valid,
+        fit_valid & ~review_complete,
+        fit_valid & review_complete & ~valid_decision,
+        fit_valid & critical,
+        fit_valid & review_decision.eq("reject"),
+        fit_valid & review_decision.eq("warning"),
+    ]
+    decisions = [
+        "not_applicable",
+        "eliminated",
+        "eliminated",
+        "eliminated",
+        "eliminated",
+        "warning",
+    ]
+    reasons = [
+        "technical_failure_before_review",
+        "artifact_review_pending",
+        "artifact_review_invalid",
+        "critical_artifact",
+        "artifact_review_reject",
+        "artifact_review_warning",
+    ]
+
+    out["decision"] = np.select(
+        conditions,
+        decisions,
+        default="kept",
+    )
+    out["reason_code"] = np.select(
+        conditions,
+        reasons,
+        default="artifact_review_accept",
+    )
+    out["metric"] = "critical_artifact"
+    out["observed_value"] = (
+        critical.astype(float).where(
+            fit_valid,
+            np.nan,
+        )
+    )
+    out["operator"] = np.where(
+        fit_valid,
+        "==",
+        "",
+    )
+    out["reference_value"] = (
+        pd.Series(0.0, index=diagnostics.index)
+        .where(fit_valid, np.nan)
+    )
+    out["reference_source"] = np.where(
+        fit_valid,
+        "PCA human artifact review protocol",
+        "",
+    )
+    out["mechanism"] = "human_review"
+
+    artifact_codes = diagnostics.get(
+        "artifact_codes",
+        pd.Series("", index=diagnostics.index),
+    ).fillna("").astype(str)
+    review_comment = diagnostics.get(
+        "review_comment",
+        pd.Series("", index=diagnostics.index),
+    ).fillna("").astype(str)
+
+    out["detail"] = [
+        "; ".join(
+            part
+            for part in (
+                f"review_status={status}",
+                f"review_decision={decision}",
+                (
+                    f"artifact_codes={codes}"
+                    if codes
+                    else ""
+                ),
+                (
+                    f"comment={comment}"
+                    if comment
+                    else ""
+                ),
+            )
+            if part
+        )
+        for status, decision, codes, comment
+        in zip(
+            review_status,
+            review_decision,
+            artifact_codes,
+            review_comment,
+        )
+    ]
+    return out
+
+
+def _build_candidate_admissibility_events(
+    diagnostics: pd.DataFrame,
+) -> pd.DataFrame:
+    out = _new_selection_events(
+        diagnostics,
+        substage="candidate_admissibility",
+        entity_type="pca_candidate",
+        entity_col="candidate_id",
+        related_col="selection_unit_id",
+    )
+    admissible = (
+        diagnostics["technical_valid"]
+        .fillna(False)
+        .astype(bool)
+    )
+
+    out["decision"] = np.where(
+        admissible,
+        "kept",
+        "eliminated",
+    )
+    out["reason_code"] = np.where(
+        admissible,
+        "candidate_admissible",
+        "candidate_blocked",
+    )
+    out["metric"] = "technical_valid"
+    out["observed_value"] = admissible.astype(float)
+    out["operator"] = "=="
+    out["reference_value"] = 1.0
+    out["reference_source"] = (
+        "PCA candidate admissibility contract"
+    )
+    out["mechanism"] = "eligibility"
+    out["detail"] = (
+        diagnostics["blocking_reason"]
+        .fillna("")
+        .astype(str)
+    )
+    return out
+
+
+def _build_variant_coverage_events(
+    preprocessing_summary: pd.DataFrame,
+    diagnostics: pd.DataFrame,
+) -> pd.DataFrame:
+    out = _new_selection_events(
+        preprocessing_summary,
+        substage="strict_variant_coverage",
+        entity_type="pca_preprocessing",
+        entity_col="selection_unit_id",
+    )
+    strict_pass = (
+        preprocessing_summary["strict_coverage_pass"]
+        .fillna(False)
+        .astype(bool)
+    )
+    n_expected = pd.to_numeric(
+        preprocessing_summary["n_expected_variants"],
+        errors="coerce",
+    ).fillna(0).astype(int)
+    n_observed = pd.to_numeric(
+        preprocessing_summary["n_observed_variants"],
+        errors="coerce",
+    ).fillna(0).astype(int)
+    n_blocked = pd.to_numeric(
+        preprocessing_summary["n_blocked_candidates"],
+        errors="coerce",
+    ).fillna(0).astype(int)
+    n_admissible = (
+        n_observed - n_blocked
+    ).clip(lower=0)
+
+    blocked = diagnostics.loc[
+        ~diagnostics["technical_valid"]
+        .fillna(False)
+        .astype(bool),
+        [
+            "candidate_id",
+            "selection_unit_id",
+            "blocking_reason",
+        ],
+    ].copy()
+    blocked["_detail"] = (
+        blocked["candidate_id"].astype(str)
+        + ":"
+        + blocked["blocking_reason"]
+        .fillna("")
+        .astype(str)
+    )
+    blocked_by_unit = (
+        blocked.groupby(
+            "selection_unit_id",
+            dropna=False,
+            sort=True,
+        )["_detail"]
+        .agg("|".join)
+    )
+
+    unit_ids = (
+        preprocessing_summary["selection_unit_id"]
+        .astype(str)
+    )
+    blocked_detail = unit_ids.map(
+        blocked_by_unit.rename(
+            index=lambda value: str(value)
+        )
+    ).fillna("")
+
+    expected_text = (
+        preprocessing_summary["expected_variants_json"]
+        .fillna("")
+        .astype(str)
+    )
+    observed_text = (
+        preprocessing_summary["observed_variants_json"]
+        .fillna("")
+        .astype(str)
+    )
+    missing_text = (
+        preprocessing_summary["missing_variants_json"]
+        .fillna("")
+        .astype(str)
+    )
+
+    out["decision"] = np.where(
+        strict_pass,
+        "kept",
+        "eliminated",
+    )
+    out["reason_code"] = np.where(
+        strict_pass,
+        "complete_admissible_variant_coverage",
+        "incomplete_or_blocked_variant_coverage",
+    )
+    out["metric"] = "n_admissible_variants"
+    out["observed_value"] = n_admissible.astype(float)
+    out["operator"] = "=="
+    out["reference_value"] = n_expected.astype(float)
+    out["reference_source"] = (
+        "PCASelectionConfig.strict_variant_coverage"
+    )
+    out["mechanism"] = "hard_constraint"
+    out["detail"] = [
+        "; ".join(
+            [
+                f"expected_variants={expected}",
+                f"observed_variants={observed}",
+                f"missing_variants={missing}",
+                *(
+                    [f"blocked_candidates={blocked_values}"]
+                    if blocked_values
+                    else []
+                ),
+            ]
+        )
+        for expected, observed, missing, blocked_values
+        in zip(
+            expected_text,
+            observed_text,
+            missing_text,
+            blocked_detail,
+        )
+    ]
+    return out
+
+
+def _build_pareto_metric_events(
+    preprocessing_summary: pd.DataFrame,
+    *,
+    config: PCASelectionConfig,
+) -> pd.DataFrame:
+    frames = []
+
+    for family, family_df in preprocessing_summary.groupby(
+        config.family_col,
+        dropna=False,
+        sort=True,
+    ):
+        profile = _profile_for_family(
+            str(family),
+            config,
+        )
+        metrics = (
+            *profile.maximize_metrics,
+            *profile.minimize_metrics,
+        )
+        source_columns = [
+            f"{metric}_worst"
+            for metric in metrics
+        ]
+        numeric = family_df.reindex(
+            columns=source_columns
+        ).apply(
+            pd.to_numeric,
+            errors="coerce",
+        )
+        finite = np.isfinite(
+            numeric.to_numpy(dtype=float)
+        )
+        incomplete = [
+            ",".join(
+                metric
+                for metric, is_finite
+                in zip(metrics, row)
+                if not is_finite
+            )
+            for row in finite
+        ]
+
+        events = _new_selection_events(
+            family_df,
+            substage="pareto_metric_completeness",
+            entity_type="pca_preprocessing",
+            entity_col="selection_unit_id",
+        )
+        complete = (
+            family_df["objective_metrics_complete"]
+            .fillna(False)
+            .astype(bool)
+        )
+
+        events["decision"] = np.where(
+            complete,
+            "kept",
+            "eliminated",
+        )
+        events["reason_code"] = np.where(
+            complete,
+            "pareto_metrics_complete",
+            "non_finite_pareto_source_metric",
+        )
+        events["metric"] = "objective_metrics_complete"
+        events["observed_value"] = complete.astype(float)
+        events["operator"] = "=="
+        events["reference_value"] = 1.0
+        events["reference_source"] = (
+            "PCASelectionProfile objective contract"
+        )
+        events["mechanism"] = "hard_constraint"
+        events["detail"] = np.where(
+            complete,
+            "",
+            "non_finite_metrics="
+            + pd.Series(
+                incomplete,
+                index=family_df.index,
+            ),
+        )
+        frames.append(events)
+
+    return pd.concat(
+        frames,
+        ignore_index=True,
+    )
+
+
+def _build_pareto_objective_events(
+    preprocessing_summary: pd.DataFrame,
+    *,
+    config: PCASelectionConfig,
+) -> pd.DataFrame:
+    frames = []
+
+    for family, family_df in preprocessing_summary.groupby(
+        config.family_col,
+        dropna=False,
+        sort=True,
+    ):
+        profile = _profile_for_family(
+            str(family),
+            config,
+        )
+
+        for goal, metrics in (
+            ("maximize", profile.maximize_metrics),
+            ("minimize", profile.minimize_metrics),
+        ):
+            if not metrics:
+                continue
+
+            source_columns = [
+                f"{metric}_worst"
+                for metric in metrics
+            ]
+            source = family_df[
+                ["selection_unit_id", *source_columns]
+            ].melt(
+                id_vars="selection_unit_id",
+                value_vars=source_columns,
+                var_name="_source_metric",
+                value_name="observed_value",
+            )
+            source["metric"] = source[
+                "_source_metric"
+            ].str.removesuffix("_worst")
+            source["observed_value"] = pd.to_numeric(
+                source["observed_value"],
+                errors="coerce",
+            )
+            finite = np.isfinite(
+                source["observed_value"].to_numpy(dtype=float)
+            )
+
+            events = _new_selection_events(
+                source,
+                substage="pareto_objective",
+                entity_type="pca_preprocessing",
+                entity_col="selection_unit_id",
+            )
+            events["decision"] = np.where(
+                finite,
+                "evaluated",
+                "not_evaluated",
+            )
+            events["reason_code"] = np.where(
+                finite,
+                "pareto_objective",
+                "pareto_objective_non_finite",
+            )
+            events["metric"] = source["metric"]
+            events["observed_value"] = (
+                source["observed_value"]
+            )
+            events["mechanism"] = f"pareto_{goal}"
+            events["detail"] = (
+                "worst_across_matrix_variants"
+            )
+            frames.append(events)
+
+    return pd.concat(
+        frames,
+        ignore_index=True,
+    )
+
+
+def _build_pareto_dominance_events(
+    preprocessing_summary: pd.DataFrame,
+    *,
+    config: PCASelectionConfig,
+) -> pd.DataFrame:
+    summary = preprocessing_summary.copy()
+    summary["selection_unit_id"] = (
+        summary["selection_unit_id"].astype(str)
+    )
+    summary_by_id = summary.set_index(
+        "selection_unit_id",
+        drop=False,
+    )
+    dominated = summary.loc[
+        summary["strict_coverage_pass"]
+        .fillna(False)
+        .astype(bool)
+        & summary["objective_metrics_complete"]
+        .fillna(False)
+        .astype(bool)
+        & ~summary["pareto_front"]
+        .fillna(False)
+        .astype(bool)
+    ].copy()
+    if dominated.empty:
+        return pd.DataFrame(
+            columns=expcfg.SELECTION_AUDIT_COLUMNS
+        )
+    pairs = dominated[
+        ["selection_unit_id", "dominated_by"]
+    ].rename(
+        columns={
+            "selection_unit_id": "entity_id",
+        }
+    )
+    pairs["related_entity_id"] = (
+        pairs["dominated_by"]
+        .fillna("")
+        .astype(str)
+        .str.split(";")
+    )
+    pairs = pairs.explode(
+        "related_entity_id"
+    )
+    pairs["related_entity_id"] = (
+        pairs["related_entity_id"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+    pairs = pairs.loc[
+        pairs["related_entity_id"].ne("")
+    ].drop(
+        columns="dominated_by"
+    ).drop_duplicates()
+    missing_sources = (
+        set(dominated["selection_unit_id"])
+        - set(pairs["entity_id"])
+    )
+    if missing_sources:
+        raise RuntimeError(
+            "Pareto-dominated preprocessings have no recorded "
+            f"dominator: {sorted(missing_sources)}"
+        )
+    unknown = (
+        set(pairs["related_entity_id"])
+        - set(summary_by_id.index)
+    )
+    if unknown:
+        raise RuntimeError(
+            "Unknown Pareto dominator selection_unit_id values: "
+            f"{sorted(unknown)}"
+        )
+    family_by_id = summary_by_id[
+        config.family_col
+    ].astype(str)
+    pairs["_source_family"] = (
+        pairs["entity_id"].map(family_by_id)
+    )
+    pairs["_dominator_family"] = (
+        pairs["related_entity_id"].map(family_by_id)
+    )
+    cross_family = pairs[
+        "_source_family"
+    ].ne(pairs["_dominator_family"])
+    if cross_family.any():
+        raise RuntimeError(
+            "Pareto dominance cannot cross PCA matrix families: "
+            f"{pairs.loc[cross_family].to_dict('records')[:10]}"
+        )
+    frames = []
+    for family, family_pairs in pairs.groupby(
+        "_source_family",
+        sort=True,
+    ):
+        profile = _profile_for_family(
+            str(family),
+            config,
+        )
+        for goal, metrics, operator in (
+            ("maximize", profile.maximize_metrics, "<="),
+            ("minimize", profile.minimize_metrics, ">="),
+        ):
+            for metric in metrics:
+                column = f"{metric}_worst"
+                values_by_id = pd.to_numeric(
+                    summary_by_id[column],
+                    errors="coerce",
+                )
+                source = family_pairs.copy()
+                source["observed_value"] = (
+                    source["entity_id"].map(values_by_id)
+                )
+                source["reference_value"] = (
+                    source["related_entity_id"].map(
+                        values_by_id
+                    )
+                )
+                finite = (
+                    np.isfinite(
+                        source["observed_value"]
+                        .to_numpy(dtype=float)
+                    )
+                    & np.isfinite(
+                        source["reference_value"]
+                        .to_numpy(dtype=float)
+                    )
+                )
+                if not finite.all():
+                    raise RuntimeError(
+                        "Pareto dominance contains non-finite "
+                        f"{metric!r} values."
+                    )
+                strict = (
+                    source["reference_value"]
+                    > source["observed_value"]
+                    if goal == "maximize"
+                    else source["reference_value"]
+                    < source["observed_value"]
+                )
+                events = _new_selection_events(
+                    source,
+                    substage="pareto_dominance",
+                    entity_type="pca_preprocessing",
+                    entity_col="entity_id",
+                    related_col="related_entity_id",
+                )
+                events["decision"] = "eliminated"
+                events["reason_code"] = (
+                    "pareto_dominated_by"
+                )
+                events["metric"] = metric
+                events["observed_value"] = (
+                    source["observed_value"]
+                )
+                events["operator"] = operator
+                events["reference_value"] = (
+                    source["reference_value"]
+                )
+                events["reference_source"] = (
+                    source["related_entity_id"]
+                )
+                events["mechanism"] = "pareto"
+                events["detail"] = (
+                    f"goal={goal}; strict_improvement="
+                    + strict.astype(str)
+                )
+                frames.append(events)
+    return pd.concat(
+        frames,
+        ignore_index=True,
+    )
+
+
+def _build_pareto_selection_events(
+    preprocessing_summary: pd.DataFrame,
+) -> pd.DataFrame:
+    out = _new_selection_events(
+        preprocessing_summary,
+        substage="pareto_selection",
+        entity_type="pca_preprocessing",
+        entity_col="selection_unit_id",
+    )
+    strict_pass = (
+        preprocessing_summary["strict_coverage_pass"]
+        .fillna(False)
+        .astype(bool)
+    )
+    metrics_complete = (
+        preprocessing_summary["objective_metrics_complete"]
+        .fillna(False)
+        .astype(bool)
+    )
+    pareto_front = (
+        preprocessing_summary["pareto_front"]
+        .fillna(False)
+        .astype(bool)
+    )
+    dominated_by = (
+        preprocessing_summary["dominated_by"]
+        .fillna("")
+        .astype(str)
+    )
+    selection_reason = (
+        preprocessing_summary.get(
+            "selection_reason",
+            pd.Series(
+                "",
+                index=preprocessing_summary.index,
+            ),
+        )
+        .fillna("")
+        .astype(str)
+    )
+    out["decision"] = np.where(
+        pareto_front,
+        "kept",
+        "eliminated",
+    )
+    out["reason_code"] = np.select(
+        [
+            pareto_front,
+            ~strict_pass,
+            ~metrics_complete,
+        ],
+        [
+            "pareto_non_dominated",
+            "not_pareto_eligible_strict_coverage",
+            "not_pareto_eligible_incomplete_metrics",
+        ],
+        default="pareto_dominated",
+    )
+    out["mechanism"] = "pareto"
+    out["detail"] = np.select(
+        [
+            pareto_front,
+            ~strict_pass,
+            ~metrics_complete,
+        ],
+        [
+            "",
+            selection_reason,
+            selection_reason,
+        ],
+        default="dominated_by=" + dominated_by,
+    )
+    return out
+
+
+def _finalize_selection_audit(
+    audit: pd.DataFrame,
+) -> pd.DataFrame:
+    expected_columns = list(
+        expcfg.SELECTION_AUDIT_COLUMNS
+    )
+    missing = [
+        column
+        for column in expected_columns
+        if column not in audit
+    ]
+    if missing:
+        raise RuntimeError(
+            "PCA selection audit builder did not produce the "
+            f"complete schema: {missing}"
+        )
+    out = audit.loc[:, expected_columns].copy()
+    out["observed_value"] = pd.to_numeric(
+        out["observed_value"],
+        errors="coerce",
+    ).astype(float)
+    out["reference_value"] = pd.to_numeric(
+        out["reference_value"],
+        errors="coerce",
+    ).astype(float)
+    text_columns = [
+        column
+        for column in expected_columns
+        if column not in {
+            "observed_value",
+            "reference_value",
+        }
+    ]
+    for column in text_columns:
+        out[column] = (
+            out[column]
+            .fillna("")
+            .astype(str)
+        )
+    audit_key = [
+        "stage",
+        "substage",
+        "entity_type",
+        "entity_id",
+        "related_entity_id",
+        "metric",
+    ]
+    duplicated = out.duplicated(audit_key, keep=False)
+    if duplicated.any():
+        raise RuntimeError(
+            "Duplicate PCA audit events for their natural key."
+        )
+    return out.reset_index(drop=True)
+
+
+def build_pca_selection_audit(
+    candidate_registry_df: pd.DataFrame,
+    candidate_diagnostics_df: pd.DataFrame,
+    preprocessing_summary_df: pd.DataFrame,
+    *,
+    config: PCASelectionConfig | None = None,
+) -> pd.DataFrame:
+    """Build notebook-03's normalized longitudinal selection audit."""
+    config = (
+        DEFAULT_PCA_SELECTION_CONFIG
+        if config is None
+        else config
+    )
+
+    _validate_pca_selection_audit_inputs(
+        candidate_registry_df,
+        candidate_diagnostics_df,
+        preprocessing_summary_df,
+        config=config,
+    )
+
+    frames = [
+        _build_candidate_generation_events(
+            candidate_registry_df
+        ),
+        _build_technical_check_events(
+            candidate_diagnostics_df
+        ),
+        _build_technical_fit_events(
+            candidate_diagnostics_df
+        ),
+        _build_artifact_review_events(
+            candidate_diagnostics_df
+        ),
+        _build_candidate_admissibility_events(
+            candidate_diagnostics_df
+        ),
+        _build_variant_coverage_events(
+            preprocessing_summary_df,
+            candidate_diagnostics_df,
+        ),
+        _build_pareto_metric_events(
+            preprocessing_summary_df,
+            config=config,
+        ),
+        _build_pareto_objective_events(
+            preprocessing_summary_df,
+            config=config,
+        ),
+        _build_pareto_dominance_events(
+            preprocessing_summary_df,
+            config=config,
+        ),
+        _build_pareto_selection_events(
+            preprocessing_summary_df
+        ),
+    ]
+
+    audit = pd.concat(
+        frames,
+        ignore_index=True,
+    )
+    return _finalize_selection_audit(audit)
 
 
 def _canonical_frame_records(
@@ -1230,29 +2924,21 @@ def freeze_pca_shortlist(
     review_hash: str,
     input_hashes: Mapping[str, str],
 ) -> pd.DataFrame:
-    """Attach one immutable shortlist identity and all upstream hashes."""
+    """Attach provenance hashes without creating a redundant set ID."""
     out = shortlist.copy()
-    input_fingerprint = pca_input_fingerprint(input_hashes)
-    payload = {
-        "protocol_hash": str(protocol_hash),
-        "review_hash": str(review_hash),
-        "input_fingerprint": input_fingerprint,
-        "selection": _canonical_frame_records(
-            out,
-            (
-                "candidate_id",
-                "matrix_family",
-                "preprocessing",
-                "preprocessing_steps",
-            ),
-        ),
-    }
-    out["shortlist_id"] = "pca_shortlist_" + sha256_payload(payload)[:20]
     out["protocol_hash"] = str(protocol_hash)
-    out["input_fingerprint"] = input_fingerprint
+    out["input_fingerprint"] = pca_input_fingerprint(input_hashes)
     out["review_hash"] = str(review_hash)
     out["selection_status"] = "selected"
-    return out
+
+    if out["selection_unit_id"].astype(str).duplicated().any():
+        raise RuntimeError(
+            "The PCA shortlist contains duplicate selection_unit_id values."
+        )
+
+    return out.reindex(
+        columns=expcfg.PCA_SELECTED_PREPROCESSING_COLUMNS
+    )
 
 
 def validate_pca_preprocessing_shortlist(
@@ -1269,7 +2955,7 @@ def validate_pca_preprocessing_shortlist(
     """Validate a preprocessing shortlist and an optional family limit."""
     if df is None or len(df) == 0:
         raise RuntimeError(f"{context}: PCA selection is empty.")
-    required = (family_col, "preprocessing", "preprocessing_steps")
+    required = ("selection_unit_id", family_col, "preprocessing", "preprocessing_steps")
     missing = [column for column in required if column not in df]
     if missing:
         raise KeyError(f"{context}: missing columns: {missing}")
@@ -1283,7 +2969,7 @@ def validate_pca_preprocessing_shortlist(
                 f"{context}: max {max_per_family} rows per {family_col}, "
                 f"got {overflow.to_dict()}"
             )
-    duplicates = df.duplicated([family_col, "preprocessing"], keep=False)
+    duplicates = df['selection_unit_id'].duplicated(keep=False)
     if duplicates.any():
         raise RuntimeError(
             f"{context}: duplicate preprocessing within a matrix family."
@@ -1296,8 +2982,6 @@ def validate_pca_preprocessing_shortlist(
             raise RuntimeError(
                 f"{context}: missing expected matrix families: {missing_families}"
             )
-    if "shortlist_id" in df and df["shortlist_id"].astype(str).nunique() != 1:
-        raise RuntimeError(f"{context}: expected exactly one shortlist_id.")
     for column, expected in (
         ("protocol_hash", expected_protocol_hash),
         ("input_fingerprint", expected_input_fingerprint),
@@ -1314,7 +2998,11 @@ def select_pca_preprocessing_shortlist(
     diagnostics_df: pd.DataFrame,
     config: PCASelectionConfig | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Select every non-dominated preprocessing after strict variant coverage."""
+    """Select every non-dominated preprocessing after strict variant coverage.
+
+    The returned preprocessing diagnostics contain the exact Pareto dominator
+    set and an objective-wise JSON comparison for every dominated unit.
+    """
     config = DEFAULT_PCA_SELECTION_CONFIG if config is None else config
     if "preprocessing_eligible" in diagnostics_df:
         diagnostics = diagnostics_df.copy()
@@ -1332,46 +3020,81 @@ def select_pca_preprocessing_shortlist(
     diagnostics["pareto_front"] = False
     diagnostics["dominated_by"] = ""
     retained_indices: list[object] = []
-    for family, family_indices in diagnostics.groupby(
-        config.family_col,
-        dropna=False,
-        sort=True,
-    ).groups.items():
-        profile = _profile_for_family(str(family), config)
-        maximize = tuple(f"{metric}_worst" for metric in profile.maximize_metrics)
-        minimize = tuple(f"{metric}_worst" for metric in profile.minimize_metrics)
+
+    for family, family_indices in diagnostics.groupby(config.family_col, dropna=False, sort=True).groups.items():
+        profile = _profile_for_family(str(family),config)
+        maximize = tuple(
+            f"{metric}_worst"
+            for metric in profile.maximize_metrics
+        )
+        minimize = tuple(
+            f"{metric}_worst"
+            for metric in profile.minimize_metrics
+        )
         eligible = diagnostics.loc[family_indices]
-        eligible = eligible.loc[eligible["preprocessing_eligible"]].copy()
+        eligible = eligible.loc[
+            eligible["preprocessing_eligible"]
+            .fillna(False)
+            .astype(bool)
+        ].copy()
         if eligible.empty:
             continue
-        front = select_pca_pareto_front(
+        valid_index, dominates = _pareto_dominance_matrix(
             eligible,
             maximize_metrics=maximize,
             minimize_metrics=minimize,
         )
-        retained_indices.extend(front.index.tolist())
-        diagnostics.loc[eligible.index, "selection_status"] = "pareto_dominated"
-        diagnostics.loc[front.index, "pareto_front"] = True
-        diagnostics.loc[front.index, "selection_status"] = "selected"
-
-        metric_columns = [*maximize, *minimize]
-        numeric = eligible[metric_columns].apply(pd.to_numeric, errors="coerce")
-        directions = np.asarray([1.0] * len(maximize) + [-1.0] * len(minimize))
-        utilities = numeric.to_numpy(dtype=float) * directions
-        greater_or_equal = utilities[:, None, :] >= utilities[None, :, :]
-        strictly_greater = utilities[:, None, :] > utilities[None, :, :]
-        dominates = greater_or_equal.all(axis=2) & strictly_greater.any(axis=2)
-        np.fill_diagonal(dominates, False)
-        labels = eligible[config.preprocessing_col].astype(str).to_numpy()
-        for position, index in enumerate(eligible.index):
-            if diagnostics.at[index, "pareto_front"]:
-                continue
-            diagnostics.at[index, "dominated_by"] = ";".join(
-                sorted(labels[dominates[:, position]].tolist())
+        if len(valid_index) != len(eligible):
+            raise RuntimeError(
+                "A preprocessing marked Pareto-eligible contains "
+                "non-finite objective values."
             )
+
+        front_mask = ~dominates.any(axis=0)
+        front_index = valid_index[front_mask]
+        retained_indices.extend(front_index.tolist())
+        labels = (
+            diagnostics.loc[
+                valid_index,
+                "selection_unit_id",
+            ]
+            .astype(str)
+            .to_numpy()
+        )
+        dominated_by = [
+            ";".join(
+                sorted(
+                    labels[
+                        np.flatnonzero(
+                            dominates[:, candidate_position]
+                        )
+                    ].tolist()
+                )
+            )
+            for candidate_position
+            in range(len(valid_index))
+        ]
+
+        diagnostics.loc[
+            valid_index,
+            "selection_status",
+        ] = "pareto_dominated"
+        diagnostics.loc[
+            valid_index,
+            "dominated_by",
+        ] = dominated_by
+        diagnostics.loc[
+            front_index,
+            "pareto_front",
+        ] = True
+        diagnostics.loc[
+            front_index,
+            "selection_status",
+        ] = "selected"
 
     if not retained_indices:
         raise RuntimeError("PCA Pareto selection is empty.")
+
     diagnostics["selection_reason"] = np.select(
         [
             diagnostics["pareto_front"].fillna(False),

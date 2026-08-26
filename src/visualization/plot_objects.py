@@ -132,6 +132,7 @@ def plot_object_grid(
     source_image: str | None = None,
     nut_type: str | None = None,
     title: str = "Object grid",
+    subtitle_by_id: Mapping[str, str] | None = None,
     max_objects: int = 40,
     n_cols: int = 5,
     height_per_row: int = 220,
@@ -166,8 +167,10 @@ def plot_object_grid(
         rows=n_rows,
         cols=n_cols,
         subplot_titles=[
-            f"{object_id}<br>area={obj.get('area_pixels')}"
-            for object_id, obj in selected
+            subtitle_by_id.get(str(object_id),f"{object_id}<br>area={obj.get('area_pixels')}")
+            if subtitle_by_id is not None
+            else f"{object_id}<br>area={obj.get('area_pixels')}"
+        for object_id, obj in selected
         ],
     )
 

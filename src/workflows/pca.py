@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping, Sequence
 
 import numpy as np
 import pandas as pd
 
-from src.matrices.matrix_registry import build_matrix
+from src.matrices.matrix_registry import build_matrix, matrix_family_from_method
 from src.models.pca import PCAModel
-from src.protocol_governance import sha256_payload
+from src.protocol_governance import make_selection_id
 from src.spectra.preprocessing import SpectralPreprocessor
 from src.spectra.preprocessing_configs import normalize_preprocessing_configs
 
@@ -16,18 +15,6 @@ from src.spectra.preprocessing_configs import normalize_preprocessing_configs
 OBJECT_MATRIX_METHODS = {"object_mean", "object_median"}
 PIXEL_MATRIX_METHODS = {"balanced_pixels", "all_pixels", "pixel"}
 
-
-def pca_matrix_family_from_method(matrix_method: str) -> str:
-    """Return the PCA matrix family used for summaries and selection."""
-    matrix_method = str(matrix_method)
-
-    if matrix_method in OBJECT_MATRIX_METHODS:
-        return "object_matrix"
-
-    if matrix_method in PIXEL_MATRIX_METHODS:
-        return "pixel_matrix"
-
-    return "unknown_matrix_family"
 
 
 def pca_matrix_variant_from_method(
@@ -53,6 +40,31 @@ def pca_matrix_variant_from_method(
         return f"balanced_pixels_{balanced_pixel_strategy}{suffix}"
 
     return matrix_method
+
+
+def _pca_preprocessing_identity_payload(row: Mapping) -> dict:
+    steps = str(row["preprocessing_steps"])
+    has_sg = "sg_" in steps
+
+    sg_window = row.get("sg_window_length")
+    sg_polyorder = row.get("sg_polyorder")
+
+    return {
+        "matrix_family": str(row["matrix_family"]),
+        "preprocessing": str(row["preprocessing"]),
+        "preprocessing_steps": steps,
+        "sg_window_length": (
+            int(sg_window)
+            if has_sg and pd.notna(sg_window)
+            else None
+        ),
+        "sg_polyorder": (
+            int(sg_polyorder)
+            if has_sg and pd.notna(sg_polyorder)
+            else None
+        ),
+        "wavelength_axis_id": str(row["wavelength_axis_id"]),
+    }
 
 
 def build_pca_candidate_plan(
@@ -196,7 +208,7 @@ def build_pca_candidate_plan(
         validate="one_to_many",
     )
     plan["matrix_family"] = plan["matrix_method"].map(
-        pca_matrix_family_from_method
+        matrix_family_from_method
     )
     plan["matrix_variant"] = [
         pca_matrix_variant_from_method(
@@ -210,35 +222,83 @@ def build_pca_candidate_plan(
             plan["m"],
         )
     ]
-    plan["strategy"] = plan["balanced_pixel_strategy"]
-    identity_columns = (
-        "training_matrix_id",
-        "matrix_method",
-        "m",
-        "balanced_pixel_strategy",
+    #plan["strategy"] = plan["balanced_pixel_strategy"]
+    plan["selection_unit_id"] = [
+        make_selection_id(
+            "pca_preprocessing",
+            _pca_preprocessing_identity_payload(row),
+        )
+        for row in plan.to_dict("records")
+    ]
+    selection_unit_identity_cols = [
+        "matrix_family",
         "preprocessing",
         "preprocessing_steps",
         "sg_window_length",
         "sg_polyorder",
         "wavelength_axis_id",
-    )
-    plan["candidate_id"] = [
-        "pca_" + sha256_payload(
-            {
-                key: (
-                    None
-                    if pd.isna(value)
-                    else value.item()
-                    if isinstance(value, np.generic)
-                    else value
-                )
-                for key, value in zip(identity_columns, values)
-            }
-        )[:20]
-        for values in plan.loc[:, identity_columns].itertuples(
-            index=False, name=None
-        )
     ]
+    unit_check = (
+        plan.groupby("selection_unit_id")[selection_unit_identity_cols]
+        .nunique(dropna=False)
+    )
+    if unit_check.gt(1).any(axis=None):
+        raise RuntimeError(
+            "One PCA selection_unit_id maps to multiple scientific identities."
+        )
+
+    def _candidate_payload(row):
+        m_value = row.get("m")
+
+        return {
+            "selection_unit_id": str(row["selection_unit_id"]),
+            "training_matrix_id": str(row["training_matrix_id"]),
+            "matrix_method": str(row["matrix_method"]),
+            "m": (
+                int(m_value)
+                if pd.notna(m_value)
+                else None
+            ),
+            "balanced_pixel_strategy": str(
+                row["balanced_pixel_strategy"]
+            ),
+        }
+
+    plan["candidate_id"] = [
+        make_selection_id(
+            "pca_candidate",
+            _candidate_payload(row),
+        )
+        for row in plan.to_dict("records")
+    ]
+    # identity_columns = (
+    #     "training_matrix_id",
+    #     "matrix_method",
+    #     "m",
+    #     "balanced_pixel_strategy",
+    #     "preprocessing",
+    #     "preprocessing_steps",
+    #     "sg_window_length",
+    #     "sg_polyorder",
+    #     "wavelength_axis_id",
+    # )
+    # plan["candidate_id"] = [
+    #     "pca_" + make_selection_id(
+    #         {
+    #             key: (
+    #                 None
+    #                 if pd.isna(value)
+    #                 else value.item()
+    #                 if isinstance(value, np.generic)
+    #                 else value
+    #             )
+    #             for key, value in zip(identity_columns, values)
+    #         }
+    #     )[:20]
+    #     for values in plan.loc[:, identity_columns].itertuples(
+    #         index=False, name=None
+    #     )
+    # ]
     if plan["candidate_id"].duplicated().any():
         raise RuntimeError("PCA candidate identities are not unique.")
 
@@ -262,13 +322,14 @@ def build_pca_candidate_plan(
         )
     columns = (
         "candidate_id",
+        "selection_unit_id",
         "training_matrix_id",
         "candidate_matrix_id",
         "matrix_family",
         "matrix_variant",
         "matrix_method",
         "m",
-        "strategy",
+        #"strategy",
         "balanced_pixel_strategy",
         "preprocessing",
         "preprocessing_steps",
@@ -890,7 +951,7 @@ def compare_pca_representations(
 
     for matrix_method in matrix_methods:
         matrix_method = str(matrix_method)
-        matrix_family = pca_matrix_family_from_method(matrix_method)
+        matrix_family = matrix_family_from_method(matrix_method)
         balanced_pixel_strategy_effective = str(balanced_pixel_strategy)
         balanced_pixel_strategy_label = (
             balanced_pixel_strategy_effective
@@ -1212,6 +1273,7 @@ def fit_pca_candidate(
         key: spec.get(key)
         for key in (
             "candidate_id",
+            "selection_unit_id",
             "training_matrix_id",
             "wavelength_axis_id",
             "matrix_family",
@@ -1221,6 +1283,8 @@ def fit_pca_candidate(
             "balanced_pixel_strategy",
             "preprocessing",
             "preprocessing_steps",
+            "sg_window_length",
+            "sg_polyorder",
         )
     }
     for key, value in identity.items():
@@ -1511,7 +1575,7 @@ def evaluate_pca_stability(
         )
         if seed != int(reference_seed):
             continue
-        canonical = (X, y, metadata)
+        canonical = (X, y, metadata, X_pre)
 
         if fold_assignments is None:
             from src.workflows.protocol_split import build_grouped_folds
@@ -1610,25 +1674,29 @@ def evaluate_pca_stability(
             )
 
     if canonical is not None and int(n_bootstrap) > 0:
-        X, _, metadata = canonical
+        X, _, metadata, X_pre = canonical
         bootstrap_groups = metadata.get(bootstrap_group_col)
         if bootstrap_groups is None:
             raise KeyError(
                 f"PCA matrix metadata has no {bootstrap_group_col!r} bootstrap group."
             )
         rng = np.random.default_rng(int(reference_seed) + 10_000)
+        preprocessing_is_row_wise = "msc" not in preprocessing_steps
         for bootstrap_id in range(int(n_bootstrap)):
             indices = _bootstrap_group_indices(bootstrap_groups, rng)
             if len(indices) < 2:
                 continue
-            bootstrap_preprocessor = SpectralPreprocessor(
-                preprocessing_steps,
-                sg_window_length=sg_window_length,
-                sg_polyorder=sg_polyorder,
-            )
-            X_boot = bootstrap_preprocessor.fit_transform(
-                X[indices], wavelengths=wavelengths
-            )
+            if preprocessing_is_row_wise:
+                X_boot = X_pre[indices]
+            else:
+                bootstrap_preprocessor = SpectralPreprocessor(
+                    preprocessing_steps,
+                    sg_window_length=sg_window_length,
+                    sg_polyorder=sg_polyorder,
+                )
+                X_boot = bootstrap_preprocessor.fit_transform(
+                    X[indices], wavelengths=wavelengths
+                )
             n_fit = min(
                 int(n_components), X_boot.shape[1], max(len(X_boot) - 1, 1)
             )

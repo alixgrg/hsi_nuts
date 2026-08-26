@@ -305,6 +305,30 @@ def make_dataframe_parquet_safe(df):
 
         return x
 
+    def _scalar_family(x):
+        if x is None:
+            return None
+        try:
+            if pd.isna(x):
+                return None
+        except Exception:
+            pass
+        if isinstance(x, (str, Path)):
+            return "string"
+        if isinstance(x, (bool, np.bool_)):
+            return "boolean"
+        if isinstance(
+            x,
+            (
+                int,
+                float,
+                np.integer,
+                np.floating,
+            ),
+        ):
+            return "numeric"
+        return type(x).__name__
+
     out = df.copy()
     complex_types = (dict, list, tuple, set, np.ndarray, Path)
 
@@ -321,7 +345,18 @@ def make_dataframe_parquet_safe(df):
                 lambda x: isinstance(x, complex_types)
             ).any()
 
+            families = {
+                family
+                for family in s_obj.map(_scalar_family)
+                if family is not None
+            }
+
+            has_mixed_scalar_families = len(families) > 1
+
             if has_complex_values:
+                out[col] = s_obj.map(_safe_value).astype("string")
+
+            elif has_mixed_scalar_families:
                 out[col] = s_obj.map(_safe_value).astype("string")
 
     return out
@@ -611,3 +646,235 @@ def merge_config_metadata(
     # Only merge columns not already present.
     right = right[[column for column in right.columns if column == id_col or column not in results_df.columns]]
     return results_df.merge(right, on=id_col, how="left", validate=validate)
+
+
+def audit_numeric(value) -> float:
+    """Return a finite float or NaN without creating mixed parquet columns."""
+    if value is None:
+        return np.nan
+    if isinstance(value, (bool, np.bool_)):
+        return float(bool(value))
+    try:
+        converted = float(value)
+    except (TypeError, ValueError):
+        return np.nan
+    return converted if np.isfinite(converted) else np.nan
+
+
+def single_unique_value(
+    df: pd.DataFrame,
+    column: str,
+    *,
+    context: str = "",
+):
+    values = df[column].drop_duplicates()
+
+    if len(values) != 1:
+        raise RuntimeError(
+            f"{context}: expected one unique value "
+            f"for {column!r}, got {values.tolist()}."
+        )
+
+    return values.iloc[0]
+
+
+# ---------------------------------------------------------------------------
+# Small internal helpers
+# ---------------------------------------------------------------------------
+
+
+def clean_text_series(values) -> pd.Series:
+    """Return strings with missing values represented by an empty string."""
+    if isinstance(values, pd.Series):
+        series = values.copy()
+    else:
+        try:
+            series = pd.Series(values)
+        except (TypeError, ValueError):
+            series = pd.Series([values])
+    return (
+        series.astype("string")
+        .fillna("")
+        .str.strip()
+        .astype(str)
+    )
+
+
+def numeric_comparison_mask(
+    observed: float,
+    operator: str,
+    reference: float,
+    *,
+    atol: float = 1e-12,
+) -> bool:
+    """Evaluate vectorized numeric audit relations."""
+
+    def as_series(values) -> pd.Series:
+        if isinstance(values, pd.Series):
+            return values
+        try:
+            return pd.Series(values)
+        except (TypeError, ValueError):
+            return pd.Series([values])
+        
+    observed_values = np.asarray(
+        pd.to_numeric(
+            as_series(observed),
+            errors="coerce",
+        ),
+        dtype=float,
+    )
+    reference_values = np.asarray(
+        pd.to_numeric(
+            as_series(reference),
+            errors="coerce",
+        ),
+        dtype=float,
+    )
+    operators = np.asarray(
+        clean_text_series(as_series(operator)),
+        dtype=str,
+    )
+
+    if not (
+        observed_values.shape
+        == reference_values.shape
+        == operators.shape
+    ):
+        raise ValueError(
+            "observed, operator and reference must have the same length."
+        )
+
+    valid = (
+        np.isfinite(observed_values)
+        & np.isfinite(reference_values)
+    )
+    equal = np.isclose(
+        observed_values,
+        reference_values,
+        atol=float(atol),
+        rtol=0.0,
+    )
+
+    result = np.zeros(
+        observed_values.shape,
+        dtype=bool,
+    )
+    result |= (
+        valid
+        & (operators == "==")
+        & equal
+    )
+    result |= (
+        valid
+        & (operators == "<=")
+        & ((observed_values < reference_values) | equal)
+    )
+    result |= (
+        valid
+        & (operators == ">=")
+        & ((observed_values > reference_values) | equal)
+    )
+    result |= (
+        valid
+        & (operators == "<")
+        & (observed_values < reference_values)
+        & ~equal
+    )
+    result |= (
+        valid
+        & (operators == ">")
+        & (observed_values > reference_values)
+        & ~equal
+    )
+
+    return result
+
+
+def finalize_checks(
+    checks,
+    *,
+    strict: bool,
+    context: str,
+) -> pd.DataFrame:
+    """Normalize a check table and optionally raise on failed checks."""
+    if isinstance(checks, pd.DataFrame):
+        result = checks.copy()
+    else:
+        result = pd.DataFrame(
+            list(checks),
+            columns=("check", "passed", "detail"),
+        )
+
+    required = ("check", "passed", "detail")
+    missing = [
+        column
+        for column in required
+        if column not in result
+    ]
+    if missing:
+        raise KeyError(
+            f"{context}: check table is missing columns {missing}."
+        )
+
+    result = result.loc[:, required].copy()
+    result["check"] = clean_text_series(result["check"])
+    result["passed"] = (
+        result["passed"]
+        .fillna(False)
+        .astype(bool)
+    )
+    result["detail"] = clean_text_series(result["detail"])
+
+    failures = result.loc[~result["passed"]]
+    if strict and len(failures):
+        raise RuntimeError(
+            f"{context} consistency failed: "
+            f"{failures.to_dict('records')}"
+        )
+
+    return result.reset_index(drop=True)
+
+def require_columns(
+    frame: pd.DataFrame,
+    columns: Sequence[str],
+    name: str,
+) -> None:
+    missing = sorted(set(columns) - set(frame.columns))
+    if missing:
+        raise KeyError(f"{name} is missing columns: {missing}")
+
+
+def normalize_integer_sequence(
+    values: Sequence[int],
+    *,
+    name: str,
+    allow_empty: bool = False,
+) -> tuple[int, ...]:
+    """Normalize a sequence of unique finite integer values."""
+    raw = pd.Series(list(values), dtype="object")
+
+    if raw.empty:
+        if allow_empty:
+            return ()
+        raise ValueError(f"{name} cannot be empty.")
+
+    numeric = pd.to_numeric(raw, errors="raise")
+    array = numeric.to_numpy(dtype=float)
+
+    if (
+        not np.isfinite(array).all()
+        or not np.equal(array, np.floor(array)).all()
+    ):
+        raise ValueError(
+            f"{name} must contain finite integer values."
+        )
+
+    result = tuple(map(int, array))
+
+    if len(result) != len(set(result)):
+        raise ValueError(
+            f"{name} contains duplicate values."
+        )
+
+    return result

@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from src import experiment_config as expcfg
 
 def _find_reference_wavelengths(object_db: dict, image_db: dict):
     """
@@ -160,3 +161,94 @@ def wavelength_selection_summary(info: dict) -> pd.DataFrame:
     out["selected_band_indices"] = ",".join(map(str, out["selected_band_indices"]))
     out["selected_wavelengths"] = ",".join(f"{w:.3f}" for w in out["selected_wavelengths"])
     return pd.DataFrame([out])
+
+
+def spectral_pixel_validity_report(
+    X,
+    *,
+    policy=expcfg.SPECTRAL_PIXEL_VALIDITY_POLICY,
+) -> dict:
+    """
+    Evaluate row-wise validity of raw reflectance spectra.
+
+    Parameters
+    ----------
+    X : array-like, shape (n_pixels, n_bands)
+        Raw reflectance spectra.
+
+    require_finite : bool
+        Reject spectra containing NaN or Inf.
+
+    exclude_all_zero : bool
+        Reject spectra whose complete spectral vector is zero.
+
+    all_zero_atol : float
+        Absolute tolerance used to define an all-zero spectrum.
+
+    require_strictly_positive : bool
+        Reject spectra containing R <= 0.
+        Appropriate when all compared preprocessing chains must remain
+        compatible with absorbance.
+
+    Returns
+    -------
+    report : dict
+        Row-wise masks and diagnostics.
+    """
+    require_finite = policy.get("require_finite")
+    exclude_all_zero = policy.get("exclude_all_zero")
+    all_zero_atol = policy.get("all_zero_atol")
+    require_strictly_positive = policy.get("require_strictly_positive")
+
+    X = np.asarray(X, dtype=float)
+
+    if X.ndim != 2:
+        raise ValueError(
+            f"X must be 2D (n_pixels, n_bands), got shape={X.shape}."
+        )
+    if X.shape[1] == 0:
+        raise ValueError(
+            "X must contain at least one spectral band."
+        )
+
+    n_rows = X.shape[0]
+    finite = np.isfinite(X).all(axis=1)
+    all_zero = np.all(
+        np.abs(X) <= float(all_zero_atol),
+        axis=1,
+    )
+    has_nonpositive = np.any(X <= 0.0, axis=1)
+    n_zero = np.count_nonzero(X == 0.0, axis=1)
+    n_nonpositive = np.count_nonzero(X <= 0.0, axis=1)
+    valid = np.ones(n_rows, dtype=bool)
+
+    if require_finite:
+        valid &= finite
+    if exclude_all_zero:
+        valid &= ~all_zero
+    if require_strictly_positive:
+        valid &= ~has_nonpositive
+
+    reason = np.full(n_rows, "valid", dtype=object)
+
+    if require_finite:
+        reason[~finite] = "non_finite_spectrum"
+    if exclude_all_zero:
+        mask = finite & all_zero
+        reason[mask] = "all_zero_spectrum"
+    if require_strictly_positive:
+        mask = finite & ~all_zero & has_nonpositive
+        reason[mask] = "nonpositive_reflectance"
+
+    return {
+        "valid_mask": valid,
+        "finite": finite,
+        "all_zero": all_zero,
+        "has_nonpositive": has_nonpositive,
+        "n_zero": n_zero,
+        "n_nonpositive": n_nonpositive,
+        "reason": reason,
+        "n_rows": int(X.shape[0]),
+        "n_valid": int(valid.sum()),
+        "n_invalid": int((~valid).sum()),
+    }

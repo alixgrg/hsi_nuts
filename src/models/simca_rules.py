@@ -306,19 +306,14 @@ def compute_rule_variant_stat_limit(
     raise ValueError(f"Unknown rule variant: {variant_name}")
 
 
-def accept_rule_variant(
-    H,
-    Q,
-    model,
-    variant_name: str,
-    cv_thresholds: dict | None = None,
-):
-    """Return boolean acceptance for a rule variant."""
-    stat, limit = compute_rule_variant_stat_limit(
-        H=H,
-        Q=Q,
-        model=model,
-        variant_name=variant_name,
-        cv_thresholds=cv_thresholds,
-    )
-    return stat < limit
+def rule_family_from_variant(rule_variant: str) -> str:
+    token = str(rule_variant)
+    if token.startswith("simple_"):
+        return "simple"
+    if token.startswith("alternative_"):
+        return "alternative"
+    if token.startswith("combined_index_"):
+        return "combined_index"
+    if token.startswith("data_driven_"):
+        return "data_driven"
+    raise ValueError(f"Unknown SIMCA rule variant: {rule_variant!r}")

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 import json
 
 import numpy as np
@@ -91,8 +91,7 @@ def summarize_projection_shift(
     projection_margin=None,
     *,
     group_keys: Sequence[str] = (
-        "projection_config_id",
-        "fit_config_id",
+        "projection_id",
         "projection_level",
         "projection_matrix_method",
         "fold_id",
@@ -243,70 +242,105 @@ def _standardize_against_reference(
 def _projection_rows_with_references(
     oof_objects: pd.DataFrame,
     oof_pixels: pd.DataFrame,
-    calibration_domain: pd.DataFrame,
+    selected_executions: pd.DataFrame,
     projection_shift: pd.DataFrame,
     *,
     object_db: dict | None,
     border_width: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    mapping_columns = [
-        "evaluation_track",
-        "track_id",
-        "projection_config_id",
-        "fit_config_id",
-        "projection_level",
-        "projection_matrix_method",
-    ]
-    missing = sorted(set(mapping_columns) - set(calibration_domain.columns))
+    mapping_columns = list(expcfg.DOMAIN_SPATIAL_SELECTED_EXECUTION_COLUMNS)
+    missing = sorted(set(mapping_columns) - set(selected_executions.columns))
     if missing:
-        raise KeyError(f"Missing calibration-domain columns: {missing}")
-    mapping = calibration_domain[mapping_columns].drop_duplicates()
-    duplicated = mapping.duplicated(
-        ["evaluation_track", "projection_config_id"], keep=False
+        raise KeyError(f"Missing selected-execution columns: {missing}")
+    mapping = selected_executions[mapping_columns].copy()
+    execution_keys = ["model_id", "random_state"]
+    if mapping.duplicated(execution_keys).any():
+        raise RuntimeError("Selected (model_id, random_state) keys must be unique.")
+    if mapping.empty:
+        raise RuntimeError("03C received no selected execution from 03B.")
+    allowed_levels = {"object_projection", "pixel_projection"}
+    unknown_levels = sorted(
+        set(mapping["projection_level"].astype(str)) - allowed_levels
     )
-    if duplicated.any():
-        raise RuntimeError(
-            "A projection configuration has conflicting 03B domain metadata."
-        )
+    if unknown_levels:
+        raise RuntimeError(f"Unknown selected projection levels: {unknown_levels}")
+
+    level_by_projection = mapping[
+        ["projection_id", "projection_level"]
+    ].drop_duplicates()
+    if level_by_projection["projection_id"].astype(str).duplicated().any():
+        raise RuntimeError("A projection_id maps to several projection levels.")
+    object_projection_ids = set(
+        level_by_projection.loc[
+            level_by_projection["projection_level"].astype(str).eq(
+                "object_projection"
+            ),
+            "projection_id",
+        ].astype(str)
+    )
+    pixel_projection_ids = set(
+        level_by_projection.loc[
+            level_by_projection["projection_level"].astype(str).eq(
+                "pixel_projection"
+            ),
+            "projection_id",
+        ].astype(str)
+    )
 
     tables = []
+    observed_projection_ids: set[str] = set()
     if oof_objects is not None and not oof_objects.empty:
-        objects = oof_objects.copy()
-        objects["border_core"] = "not_applicable"
-        tables.append(objects)
+        if "projection_id" not in oof_objects:
+            raise KeyError("OOF object predictions are missing projection_id.")
+        objects = oof_objects.loc[
+            oof_objects["projection_id"].astype(str).isin(object_projection_ids)
+        ].copy()
+        if not objects.empty:
+            objects["border_core"] = "not_applicable"
+            tables.append(objects)
+            observed_projection_ids.update(objects["projection_id"].astype(str))
     if oof_pixels is not None and not oof_pixels.empty:
-        if object_db is None:
-            raise ValueError("object_db is required for border/core diagnostics.")
-        pixels = add_border_flags_to_pixel_df(
-            oof_pixels,
-            object_db,
-            border_width=int(border_width),
-        )
-        pixels["border_core"] = np.select(
-            [pixels["is_border_pixel"], pixels["is_core_pixel"]],
-            ["border", "core"],
-            default="unresolved",
-        )
-        tables.append(pixels)
+        if "projection_id" not in oof_pixels:
+            raise KeyError("OOF pixel predictions are missing projection_id.")
+        pixels = oof_pixels.loc[
+            oof_pixels["projection_id"].astype(str).isin(pixel_projection_ids)
+        ].copy()
+        if not pixels.empty:
+            if object_db is None:
+                raise ValueError("object_db is required for border/core diagnostics.")
+            pixels = add_border_flags_to_pixel_df(
+                pixels,
+                object_db,
+                border_width=int(border_width),
+            )
+            pixels["border_core"] = np.select(
+                [pixels["is_border_pixel"], pixels["is_core_pixel"]],
+                ["border", "core"],
+                default="unresolved",
+            )
+            tables.append(pixels)
+            observed_projection_ids.update(pixels["projection_id"].astype(str))
     if not tables:
-        raise RuntimeError("03C received no OOF prediction row from 03B.")
+        raise RuntimeError("03C received no selected OOF prediction row from 03B.")
+    expected_projection_ids = set(mapping["projection_id"].astype(str))
+    missing_predictions = sorted(expected_projection_ids - observed_projection_ids)
+    if missing_predictions:
+        raise RuntimeError(
+            "Selected 03B executions have no matching OOF predictions: "
+            f"{missing_predictions[:10]}"
+        )
+
     oof = pd.concat(tables, ignore_index=True, sort=False)
     oof = oof.merge(
         mapping,
-        on=[
-            "projection_config_id",
-            "fit_config_id",
-            "projection_level",
-            "projection_matrix_method",
-        ],
+        on="projection_id",
         how="inner",
         validate="many_to_many",
     )
     if oof.empty:
-        raise RuntimeError(
-            "No calibrated 03B projection has matching OOF predictions."
-        )
-    reference_keys = ["projection_config_id", "fit_config_id", "fold_id"]
+        raise RuntimeError("No selected 03B execution has matching OOF predictions.")
+
+    reference_keys = ["projection_id", "fold_id"]
     reference_numeric_columns = [
         "train_pc1_mean",
         "train_pc1_std",
@@ -327,20 +361,20 @@ def _projection_rows_with_references(
     missing_reference = sorted(required_reference - set(projection_shift.columns))
     if missing_reference:
         raise RuntimeError(
-            "projection_shift.parquet predates the 03C contract; rerun 03B. "
-            f"Missing columns: {missing_reference}"
+            "projection_shift.parquet predates the selected-run 03C contract; "
+            f"rerun 03B. Missing columns: {missing_reference}"
         )
-    references = projection_shift[
-        reference_keys + reference_numeric_columns
+    references = projection_shift.loc[
+        projection_shift["projection_id"].astype(str).isin(expected_projection_ids),
+        reference_keys + reference_numeric_columns,
     ].drop_duplicates()
-    conflicting_references = references.duplicated(reference_keys, keep=False)
-    if conflicting_references.any():
+    if references.duplicated(reference_keys).any():
         raise RuntimeError(
             "Conflicting train references exist for one projection/fold crossing."
         )
     out = oof.merge(
         references,
-        on=["projection_config_id", "fit_config_id", "fold_id"],
+        on=reference_keys,
         how="left",
         validate="many_to_one",
     )
@@ -348,7 +382,9 @@ def _projection_rows_with_references(
         pd.to_numeric, errors="coerce"
     )
     if not np.isfinite(reference_values.to_numpy(dtype=float)).all():
-        raise RuntimeError("At least one OOF crossing has a missing/non-finite train reference.")
+        raise RuntimeError(
+            "At least one selected OOF crossing has a missing/non-finite train reference."
+        )
     reference_scales = [
         column for column in reference_numeric_columns if column.endswith("_std")
     ]
@@ -402,12 +438,10 @@ def _projection_rows_with_references(
         ),
     }
     for output, (value, mean, scale) in standardizations.items():
-        out[output] = _standardize_against_reference(
-            out[value], out[mean], out[scale]
-        )
+        out[output] = _standardize_against_reference(out[value], out[mean], out[scale])
     out["target_margin_delta"] = (
-        pd.to_numeric(out["simca_margin"], errors="coerce")
-        - pd.to_numeric(out["train_margin_mean"], errors="coerce")
+        out["simca_margin"].to_numpy(dtype=float)
+        - reference_values["train_margin_mean"].to_numpy(dtype=float)
     )
     return out, mapping
 
@@ -415,7 +449,7 @@ def _projection_rows_with_references(
 def build_projection_shift_diagnostics(
     oof_objects: pd.DataFrame,
     oof_pixels: pd.DataFrame,
-    calibration_domain: pd.DataFrame,
+    selected_executions: pd.DataFrame,
     projection_shift: pd.DataFrame,
     *,
     object_db: dict | None,
@@ -426,11 +460,11 @@ def build_projection_shift_diagnostics(
         expcfg.PROJECTION_DOMAIN_AUDIT_ALLOWED_BATCHES
     ),
 ) -> pd.DataFrame:
-    """Build compact, explainable task-25 diagnostics for every crossing."""
+    """Build vectorized diagnostics for every selected 03B execution."""
     rows, _ = _projection_rows_with_references(
         oof_objects,
         oof_pixels,
-        calibration_domain,
+        selected_executions,
         projection_shift,
         object_db=object_db,
         border_width=int(border_width),
@@ -439,125 +473,171 @@ def build_projection_shift_diagnostics(
     if not batches.issubset(set(map(int, allowed_batches))):
         raise RuntimeError(f"Forbidden batch in 03C domain audit: {sorted(batches)}")
 
-    identifiers = [
-        "evaluation_track",
-        "track_id",
-        "projection_config_id",
-        "fit_config_id",
-        "projection_level",
-        "projection_matrix_method",
+    identifiers = ["model_id", "random_state", "track_id"]
+    dimension_columns = {
+        "overall": None,
+        "fold": "fold_id",
+        "size_bin": "size_bin",
+        "border_core": "border_core",
+        "truth_class": "truth_class",
+        "source_image": "source_image",
+    }
+    dimensions = tuple(map(str, expcfg.PROJECTION_DOMAIN_DIAGNOSTIC_DIMENSIONS))
+    unknown_dimensions = sorted(set(dimensions) - set(dimension_columns))
+    if unknown_dimensions:
+        raise ValueError(f"Unknown projection diagnostic dimensions: {unknown_dimensions}")
+
+    rows = rows[
+        [
+            *identifiers,
+            "fold_id",
+            "size_bin",
+            "border_core",
+            "truth_class",
+            "source_image",
+            "truth",
+            "pc1_z",
+            "pc2_z",
+            "t2_z",
+            "q_z",
+            "rule_limit_z",
+            "ratio_z",
+            "margin_z",
+            "normalized_ratio",
+            "simca_margin",
+            "target_margin_delta",
+        ]
+    ].copy()
+    rows["__out_of_domain"] = rows["normalized_ratio"].ge(1.0).astype(float)
+    rows["__target_rejected"] = np.where(
+        rows["truth"].to_numpy(dtype=bool),
+        rows["simca_margin"].lt(0.0).to_numpy(dtype=bool).astype(float),
+        np.nan,
+    )
+    rows["__target_margin_delta"] = np.where(
+        rows["truth"].to_numpy(dtype=bool),
+        rows["target_margin_delta"].to_numpy(dtype=float),
+        np.nan,
+    )
+
+    parts: list[pd.DataFrame] = []
+    eligibility_dimensions = set(
+        map(str, expcfg.PROJECTION_DOMAIN_ELIGIBILITY_DIMENSIONS)
+    )
+    for dimension in dimensions:
+        column = dimension_columns[dimension]
+        dimension_rows = rows.copy()
+        dimension_rows["stratum_type"] = dimension
+        dimension_rows["stratum_value"] = (
+            "all"
+            if column is None
+            else dimension_rows[column].astype("string").fillna("<missing>")
+        )
+        dimension_rows["__diagnostic_fold_id"] = (
+            pd.to_numeric(dimension_rows["fold_id"], errors="raise").astype(int)
+            if dimension == "fold"
+            else -1
+        )
+        group_columns = [
+            *identifiers,
+            "__diagnostic_fold_id",
+            "stratum_type",
+            "stratum_value",
+        ]
+        skeleton = dimension_rows[group_columns].drop_duplicates()
+        population = (
+            dimension_rows.loc[dimension_rows["truth"].astype(bool)]
+            if dimension in eligibility_dimensions
+            else dimension_rows
+        )
+        aggregate = population.groupby(
+            group_columns,
+            dropna=False,
+            sort=False,
+            as_index=False,
+        ).agg(
+            n_observations=("truth", "size"),
+            n_target=("truth", "sum"),
+            __pc1_shift=("pc1_z", _mean_preserving_unbounded),
+            __pc2_shift=("pc2_z", _mean_preserving_unbounded),
+            t2_standardized_shift=("t2_z", _mean_preserving_unbounded),
+            q_standardized_shift=("q_z", _mean_preserving_unbounded),
+            rule_limit_standardized_shift=(
+                "rule_limit_z",
+                _mean_preserving_unbounded,
+            ),
+            normalized_ratio_standardized_shift=(
+                "ratio_z",
+                _mean_preserving_unbounded,
+            ),
+            simca_margin_standardized_shift=(
+                "margin_z",
+                _mean_preserving_unbounded,
+            ),
+            out_of_domain_rate=("__out_of_domain", "mean"),
+            target_rejection_rate=("__target_rejected", "mean"),
+            target_margin_displacement=(
+                "__target_margin_delta",
+                _mean_preserving_unbounded,
+            ),
+        )
+        part = skeleton.merge(
+            aggregate,
+            on=group_columns,
+            how="left",
+            validate="one_to_one",
+        )
+        part[["n_observations", "n_target"]] = part[
+            ["n_observations", "n_target"]
+        ].fillna(0).astype(int)
+        pc_values = part[["__pc1_shift", "__pc2_shift"]].to_numpy(dtype=float)
+        part["pca_centroid_shift"] = np.where(
+            np.isnan(pc_values).any(axis=1),
+            np.nan,
+            np.hypot(pc_values[:, 0], pc_values[:, 1]),
+        )
+        supported = part["n_observations"].ge(int(min_stratum_n))
+        eligibility_population = dimension in eligibility_dimensions
+        part["diagnostic_status"] = np.where(
+            supported,
+            "ok",
+            (
+                "insufficient_target_support"
+                if eligibility_population
+                else "descriptive_small_n"
+            ),
+        )
+        part["fold_id"] = part.pop("__diagnostic_fold_id").astype(int)
+        part["protocol_version"] = expcfg.PROTOCOL_VERSION
+        part["protocol_hash"] = str(protocol_hash)
+        parts.append(part)
+
+    result = pd.concat(parts, ignore_index=True, sort=False)
+    result = result.reindex(columns=expcfg.PROJECTION_SHIFT_DIAGNOSTIC_COLUMNS)
+    diagnostic_keys = [
+        "model_id",
+        "random_state",
+        "fold_id",
+        "stratum_type",
+        "stratum_value",
     ]
-    dimensions: list[tuple[str, str | None]] = [
-        ("overall", None),
-        ("fold", "fold_id"),
-        ("size_bin", "size_bin"),
-        ("border_core", "border_core"),
-        ("truth_class", "truth_class"),
-        ("source_image", "source_image"),
-    ]
-    diagnostics: list[dict] = []
-    for dimension, column in dimensions:
-        group_columns = identifiers + ([] if column is None else [column])
-        for key, group in rows.groupby(group_columns, dropna=False, sort=False):
-            if not isinstance(key, tuple):
-                key = (key,)
-            base = dict(zip(group_columns, key))
-            # Train references describe the SIMCA target class. Eligibility
-            # therefore compares target OOF projections with target training;
-            # including intentional non-target rejections would mechanically
-            # make every useful classifier look out of domain. Other strata
-            # remain fully descriptive, including truth_class=non_target.
-            eligibility_population = dimension in set(
-                expcfg.PROJECTION_DOMAIN_ELIGIBILITY_DIMENSIONS
-            )
-            target_all = group["truth"].to_numpy(dtype=bool)
-            diagnostic_group = (
-                group.loc[target_all] if eligibility_population else group
-            )
-            target = diagnostic_group["truth"].to_numpy(dtype=bool)
-            pc_means = np.asarray(
-                [
-                    _mean_preserving_unbounded(diagnostic_group["pc1_z"]),
-                    _mean_preserving_unbounded(diagnostic_group["pc2_z"]),
-                ],
-                dtype=float,
-            )
-            diagnostics.append(
-                {
-                    **{name: base[name] for name in identifiers},
-                    "fold_id": int(base["fold_id"]) if dimension == "fold" else -1,
-                    "stratum_type": dimension,
-                    "stratum_value": "all" if column is None else str(base[column]),
-                    "n_observations": int(len(diagnostic_group)),
-                    "n_target": int(target.sum()),
-                    "pca_centroid_shift": _pca_shift_norm(pc_means),
-                    "t2_standardized_shift": _mean_preserving_unbounded(
-                        diagnostic_group["t2_z"]
-                    ),
-                    "q_standardized_shift": _mean_preserving_unbounded(
-                        diagnostic_group["q_z"]
-                    ),
-                    "rule_limit_standardized_shift": _mean_preserving_unbounded(
-                        diagnostic_group["rule_limit_z"]
-                    ),
-                    "normalized_ratio_standardized_shift": _mean_preserving_unbounded(
-                        diagnostic_group["ratio_z"]
-                    ),
-                    "simca_margin_standardized_shift": _mean_preserving_unbounded(
-                        diagnostic_group["margin_z"]
-                    ),
-                    "out_of_domain_rate": float(
-                        pd.to_numeric(
-                            diagnostic_group["normalized_ratio"], errors="coerce"
-                        )
-                        .ge(1.0)
-                        .mean()
-                    ) if len(diagnostic_group) else np.nan,
-                    "target_rejection_rate": (
-                        float(
-                            diagnostic_group.loc[
-                                target, "simca_margin"
-                            ].lt(0.0).mean()
-                        )
-                        if target.any()
-                        else np.nan
-                    ),
-                    "target_margin_displacement": (
-                        _mean_preserving_unbounded(
-                            diagnostic_group.loc[target, "target_margin_delta"]
-                        )
-                        if target.any()
-                        else np.nan
-                    ),
-                    "diagnostic_status": (
-                        "ok"
-                        if len(diagnostic_group) >= int(min_stratum_n)
-                        else "missing_target_support"
-                        if eligibility_population and not len(diagnostic_group)
-                        else "descriptive_small_n"
-                    ),
-                    "protocol_version": expcfg.PROTOCOL_VERSION,
-                    "protocol_hash": str(protocol_hash),
-                }
-            )
-    result = pd.DataFrame(diagnostics)
-    return result.reindex(columns=expcfg.PROJECTION_SHIFT_DIAGNOSTIC_COLUMNS)
+    if result.duplicated(diagnostic_keys).any():
+        raise RuntimeError("Projection diagnostic natural keys are not unique.")
+    return result.sort_values(
+        ["track_id", "model_id", "random_state", "stratum_type", "stratum_value"],
+        kind="mergesort",
+    ).reset_index(drop=True)
 
 
 def build_projection_eligibility(
     diagnostics: pd.DataFrame,
-    calibration_domain: pd.DataFrame,
+    selected_executions: pd.DataFrame,
     *,
     protocol_hash: str,
-    expected_tracks: Sequence[str] | None = None,
-    unsupported_tracks: Mapping[str, str] | None = None,
+    expected_track_ids: Sequence[str] | None = None,
     thresholds: dict | None = None,
 ) -> pd.DataFrame:
-    """Assign one explicit status per calibrated or unsupported track."""
-    unsupported_tracks = {
-        str(track): str(reason)
-        for track, reason in dict(unsupported_tracks or {}).items()
-    }
+    """Assign one auditable status per track from selected natural run keys."""
     thresholds = dict(
         expcfg.PROJECTION_DOMAIN_ELIGIBILITY_THRESHOLDS
         if thresholds is None
@@ -567,43 +647,38 @@ def build_projection_eligibility(
     missing = sorted(required - set(diagnostics.columns))
     if missing:
         raise KeyError(f"Missing projection diagnostics: {missing}")
-    mapping = calibration_domain[
-        ["evaluation_track", "track_id", "projection_config_id"]
-    ].drop_duplicates()
-    tracks = sorted(
-        set(mapping["evaluation_track"].astype(str))
-        if expected_tracks is None
-        else set(map(str, expected_tracks))
+    mapping_columns = ["model_id", "random_state", "track_id"]
+    missing_mapping = sorted(set(mapping_columns) - set(selected_executions.columns))
+    if missing_mapping:
+        raise KeyError(f"Missing selected-execution columns: {missing_mapping}")
+    mapping = selected_executions[mapping_columns].drop_duplicates()
+    if mapping.duplicated(["model_id", "random_state"]).any():
+        raise RuntimeError("Selected execution keys must be unique.")
+    tracks = (
+        list(dict.fromkeys(mapping["track_id"].astype(str)))
+        if expected_track_ids is None
+        else list(dict.fromkeys(map(str, expected_track_ids)))
     )
-    unknown_unsupported = sorted(set(unsupported_tracks) - set(tracks))
-    if unknown_unsupported:
-        raise ValueError(
-            "Unsupported tracks are absent from the expected track contract: "
-            f"{unknown_unsupported}"
-        )
-    missing_tracks = sorted(
-        set(tracks)
-        - set(diagnostics["evaluation_track"].astype(str))
-        - set(unsupported_tracks)
+    unknown_observed = sorted(
+        set(mapping["track_id"].astype(str)) - set(tracks)
     )
-    if missing_tracks:
+    if unknown_observed:
         raise RuntimeError(
-            "A track cannot be accepted without a domain diagnostic: "
-            f"{missing_tracks}"
+            f"Selected executions contain tracks outside the contract: {unknown_observed}"
         )
     observed_pairs = diagnostics[
-        ["evaluation_track", "projection_config_id"]
+        ["model_id", "random_state"]
     ].drop_duplicates()
     missing_pairs = mapping.merge(
         observed_pairs,
-        on=["evaluation_track", "projection_config_id"],
+        on=["model_id", "random_state"],
         how="left",
         indicator=True,
     )
     missing_pairs = missing_pairs.loc[missing_pairs["_merge"].eq("left_only")]
     if not missing_pairs.empty:
         raise RuntimeError(
-            "A calibrated crossing has no domain diagnostic: "
+            "A selected execution has no projection diagnostic: "
             f"{missing_pairs.drop(columns='_merge').to_dict('records')[:10]}"
         )
 
@@ -620,16 +695,15 @@ def build_projection_eligibility(
         "normalized_ratio_standardized_shift",
         "simca_margin_standardized_shift",
     ]
-    rows_out = []
-    for track in tracks:
-        if track in unsupported_tracks:
+    rows_out: list[dict] = []
+    for track_id in tracks:
+        track_mapping = mapping.loc[mapping["track_id"].astype(str).eq(track_id)]
+        if track_mapping.empty:
             rows_out.append(
                 {
-                    "evaluation_track": str(track),
-                    "track_id": str(
-                        expcfg.SIMCA_EVALUATION_TRACK_IDS[str(track)]
-                    ),
-                    "n_projection_configurations": 0,
+                    "track_id": track_id,
+                    "n_selected_models": 0,
+                    "n_selected_runs": 0,
                     "n_diagnostics": 0,
                     "max_abs_standardized_shift": np.nan,
                     "max_out_of_domain_rate": np.nan,
@@ -637,7 +711,7 @@ def build_projection_eligibility(
                     "eligibility_status": (
                         "unsupported_internal_calibration"
                     ),
-                    "eligibility_reason": unsupported_tracks[track],
+                    "eligibility_reason": "no_selected_model_in_03b",
                     "rule_version": (
                         expcfg.PROJECTION_DOMAIN_AUDIT_RULE_VERSION
                     ),
@@ -650,10 +724,10 @@ def build_projection_eligibility(
             )
             continue
         group_all = eligibility.loc[
-            eligibility["evaluation_track"].astype(str).eq(str(track))
+            eligibility["track_id"].astype(str).eq(track_id)
         ]
         if group_all.empty:
-            raise RuntimeError(f"Track {track} has no eligibility diagnostic.")
+            raise RuntimeError(f"Track {track_id} has no eligibility diagnostic.")
         incomplete_target_support = not group_all["diagnostic_status"].eq("ok").all()
         group = group_all.loc[group_all["diagnostic_status"].eq("ok")]
         shift_values = group[shift_columns].apply(pd.to_numeric, errors="coerce")
@@ -707,16 +781,11 @@ def build_projection_eligibility(
         else:
             status = "eligible"
             reasons = ["all_predeclared_limits_satisfied"]
-        track_mapping = mapping.loc[
-            mapping["evaluation_track"].astype(str).eq(str(track))
-        ]
         rows_out.append(
             {
-                "evaluation_track": str(track),
-                "track_id": str(track_mapping["track_id"].iloc[0]),
-                "n_projection_configurations": int(
-                    track_mapping["projection_config_id"].nunique()
-                ),
+                "track_id": track_id,
+                "n_selected_models": int(track_mapping["model_id"].nunique()),
+                "n_selected_runs": int(len(track_mapping)),
                 "n_diagnostics": int(len(group_all)),
                 "max_abs_standardized_shift": max_shift,
                 "max_out_of_domain_rate": max_ood,

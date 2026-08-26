@@ -70,6 +70,16 @@ from src.visualization.plot_simca import (
     plot_decision_counts,
 )
 
+from src.visualization.plot_model_selection import (
+    plot_detection_pareto,
+    plot_model_metric_ranking,
+    plot_parameter_tendencies,
+    plot_selection_reasons,
+    plot_three_way_tradeoff,
+    plot_threshold_tradeoff,
+    plot_validation_test_shift,
+)
+
 from src.visualization.plot_decision import (
     plot_object_decision_map,
     plot_object_error_overlay,
@@ -92,6 +102,7 @@ __all__ = [
     "plot_biplot",
     "plot_counts_by_group",
     "plot_decision_counts",
+    "plot_detection_pareto",
     "plot_distribution_with_curve",
     "plot_explained_variance",
     "plot_hypercube_band_slider",
@@ -102,6 +113,7 @@ __all__ = [
     "plot_loadings",
     "plot_metric_by_index",
     "plot_metric_heatmap",
+    "plot_model_metric_ranking",
     "plot_object_decision_map",
     "plot_object_error_overlay",
     "plot_object_fp_fn_overlay",
@@ -109,6 +121,7 @@ __all__ = [
     "plot_object_score_summary",
     "plot_object_spectra",
     "plot_object_view",
+    "plot_parameter_tendencies",
     "plot_pca_diagnostic",
     "plot_pca_metric_heatmap",
     "plot_pca_metric_q",
@@ -122,10 +135,14 @@ __all__ = [
     "plot_scores",
     "plot_scores_density",
     "plot_scores_distribution",
+    "plot_selection_reasons",
     "plot_simca_distance",
     "plot_simca_rule_metric",
     "plot_spectra",
     "plot_spectral_distribution",
+    "plot_three_way_tradeoff",
+    "plot_threshold_tradeoff",
+    "plot_validation_test_shift",
     "plot_xy_diagnostic",
     "sample_scores_dataframe",
     "show_or_return",

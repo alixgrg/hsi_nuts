@@ -124,7 +124,6 @@ def evaluate_three_way_object_decision(
             "non_target_auto_reject_rate": np.nan,
             "decided_accuracy": np.nan,
             "decided_balanced_accuracy": np.nan,
-            "three_way_score": np.nan,
         }
 
     true_target_s = coerce_binary_series(
@@ -218,27 +217,6 @@ def evaluate_three_way_object_decision(
         decided_accuracy = np.nan
         decided_balanced_accuracy = np.nan
 
-    # High score = few missed targets, few false accepts, not too many uncertain.
-    three_way_score = (
-        -20.0 * (target_miss_rate if np.isfinite(target_miss_rate) else 1.0)
-        -3.0 * (
-            non_target_false_accept_rate
-            if np.isfinite(non_target_false_accept_rate)
-            else 1.0
-        )
-        -0.5 * (uncertain_rate if np.isfinite(uncertain_rate) else 1.0)
-        +1.0 * (
-            screening_sensitivity
-            if np.isfinite(screening_sensitivity)
-            else 0.0
-        )
-        +0.25 * (
-            non_target_auto_reject_rate
-            if np.isfinite(non_target_auto_reject_rate)
-            else 0.0
-        )
-    )
-
     return {
         "n": n,
         "n_target": n_target,
@@ -259,7 +237,6 @@ def evaluate_three_way_object_decision(
         "decided_tn": tn,
         "decided_accuracy": decided_accuracy,
         "decided_balanced_accuracy": decided_balanced_accuracy,
-        "three_way_score": float(three_way_score),
     }
 
 
@@ -316,9 +293,8 @@ def three_way_object_threshold_grid(
                 "target_miss_rate",
                 "non_target_false_accept_rate",
                 "uncertain_rate",
-                "three_way_score",
             ],
-            ascending=[True, True, True, False],
+            ascending=[True, True, True],
         )
         .reset_index(drop=True)
     )
@@ -377,9 +353,8 @@ def three_way_object_threshold_grid_by_group(
                 "target_miss_rate",
                 "non_target_false_accept_rate",
                 "uncertain_rate",
-                "three_way_score",
             ],
-            ascending=[True, True, True, False],
+            ascending=[True, True, True],
         )
         .reset_index(drop=True)
     )
@@ -408,9 +383,8 @@ def select_three_way_threshold_one_config(
                 "target_miss_rate",
                 "non_target_false_accept_rate",
                 "uncertain_rate",
-                "three_way_score",
             ],
-            ascending=[True, True, True, False],
+            ascending=[True, True, True],
         )
         .iloc[0]
     )

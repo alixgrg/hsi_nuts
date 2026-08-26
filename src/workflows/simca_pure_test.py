@@ -27,10 +27,7 @@ from src.workflows.simca_candidates import (
     validate_simca_evaluation_contract,
 )
 from src.workflows.simca_robustness import validate_no_pure_test_inputs
-from src.workflows.simca_selection_utils import (
-    add_detection_selection_score,
-    materialize_selection_metrics,
-)
+from src.workflows.simca_selection_utils import materialize_selection_metrics
 from src.workflows.simca_tables import (
     concat_nonempty_tables,
     iter_dataframe_batches,
@@ -233,14 +230,16 @@ def select_pure_test_candidate_panel(
                 "selection_track",
                 "review_rank_in_track",
                 "review_flag_count",
-                "robustness_score",
                 "selected_config_id",
             ]
             if col in ranked.columns
         ]
         if sort_cols:
-            ascending = [False if col == "robustness_score" else True for col in sort_cols]
-            ranked = ranked.sort_values(sort_cols, ascending=ascending)
+            ranked = ranked.sort_values(
+                sort_cols,
+                ascending=True,
+                kind="mergesort",
+            )
         limited_ids = (
             ranked.groupby("selection_track", dropna=False, group_keys=False)
             .head(int(max_candidates_per_track))["selected_config_id"]
@@ -320,7 +319,6 @@ def finalize_simca_metric_table(
     decision_mode: str,
     metric_level: str,
     evaluation_stage: str = DEFAULT_PURE_TEST_EVALUATION_STAGE,
-    add_score: bool = True,
 ) -> pd.DataFrame:
     """Attach standard SIMCA metric metadata and validate the evaluation contract."""
     if df is None or len(df) == 0:
@@ -331,8 +329,14 @@ def finalize_simca_metric_table(
     out["evaluation_split"] = evaluation_stage
     out["metric_level"] = metric_level
     out = add_selection_track(out)
-    if add_score:
-        out = add_detection_selection_score(out)
+    out = materialize_selection_metrics(
+        out,
+        keep_source_columns=False,
+    )
+    out = out.drop(
+        columns=expcfg.ACTIVE_PROTOCOL_FORBIDDEN_SCORE_COLUMNS,
+        errors="ignore",
+    )
     validate_simca_evaluation_contract(out)
     return out
 

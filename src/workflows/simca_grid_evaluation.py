@@ -23,7 +23,9 @@ from src.workflows.simca_selection_utils import pareto_front_by_group
 from src.workflows.spatial_postprocessing_calibration import (
     apply_spatial_postprocessing,
 )
-
+from src.workflows.simca_thresholds_calibration import (
+    build_pixel_vote_table,
+)
 
 def _json_list(values: Sequence) -> str:
     return json.dumps(sorted({str(value) for value in values}), ensure_ascii=False)
@@ -459,16 +461,74 @@ def _weighted_rate(frame: pd.DataFrame, rate: str, weight: str) -> float:
     return float(np.average(values[valid], weights=weights[valid])) if valid.any() else np.nan
 
 
-def _finite_mean(series: pd.Series) -> float:
-    values = pd.to_numeric(series, errors="coerce").to_numpy(dtype=float)
-    values = values[np.isfinite(values)]
-    return float(values.mean()) if values.size else np.nan
+def _finite_values(values) -> np.ndarray:
+    """Return only finite numeric values from an arbitrary 1D input."""
+    numeric = pd.to_numeric(
+        pd.Series(values),
+        errors="coerce",
+    ).to_numpy(dtype=float)
+
+    return numeric[
+        np.isfinite(numeric)
+    ]
 
 
-def _finite_max(series: pd.Series) -> float:
-    values = pd.to_numeric(series, errors="coerce").to_numpy(dtype=float)
-    values = values[np.isfinite(values)]
-    return float(values.max()) if values.size else np.nan
+def finite_mean(values) -> float:
+    """Finite-value mean shared by 04A/04C and notebook 05."""
+    numeric = _finite_values(values)
+
+    return (
+        float(numeric.mean())
+        if numeric.size
+        else np.nan
+    )
+
+
+def finite_min(values) -> float:
+    """Finite-value minimum; NaN when no finite value exists."""
+    numeric = _finite_values(values)
+
+    return (
+        float(numeric.min())
+        if numeric.size
+        else np.nan
+    )
+
+
+def finite_max(values) -> float:
+    """Finite-value maximum; NaN when no finite value exists."""
+    numeric = _finite_values(values)
+
+    return (
+        float(numeric.max())
+        if numeric.size
+        else np.nan
+    )
+
+
+def finite_std(
+    values,
+    *,
+    ddof: int = 1,
+) -> float:
+    """Finite-value standard deviation with explicit degrees of freedom."""
+    ddof = int(ddof)
+
+    if ddof < 0:
+        raise ValueError(
+            "ddof must be non-negative."
+        )
+
+    numeric = _finite_values(values)
+
+    if numeric.size <= ddof:
+        return np.nan
+
+    return float(
+        numeric.std(
+            ddof=ddof
+        )
+    )
 
 
 def _constraint_status(metrics: Mapping) -> tuple[str, str]:
@@ -554,8 +614,8 @@ def aggregate_grid_metrics(
             and np.isfinite(decided_specificity)
             else np.nan
         )
-        macro_image_miss = _finite_mean(images["target_miss_rate"])
-        macro_image_false = _finite_mean(images["false_accept_rate"])
+        macro_image_miss = finite_mean(images["target_miss_rate"])
+        macro_image_false = finite_mean(images["false_accept_rate"])
         macro_image_balanced = (
             1.0 - 0.5 * (macro_image_miss + macro_image_false)
             if np.isfinite(macro_image_miss) and np.isfinite(macro_image_false)
@@ -596,8 +656,8 @@ def aggregate_grid_metrics(
             "macro_image_false_accept_rate": macro_image_false,
             "macro_image_balanced_accuracy": macro_image_balanced,
             "macro_object_target_miss_rate": macro_object_miss,
-            "worst_fold_target_miss_rate": _finite_max(folds["target_miss_rate"]),
-            "worst_fold_false_accept_rate": _finite_max(folds["false_accept_rate"]),
+            "worst_fold_target_miss_rate": finite_max(folds["target_miss_rate"]),
+            "worst_fold_false_accept_rate": finite_max(folds["false_accept_rate"]),
             "fold_metric_std": float(stability.std(ddof=0)) if stability.notna().any() else np.nan,
             "technical_status": "calculable",
         }
@@ -1098,69 +1158,145 @@ def _equivalence_group_ids(
 
 
 def evaluate_locked_validation_predictions(
-    candidate_pool: pd.DataFrame,
+    validation_executions: pd.DataFrame,
+    selected_thresholds: pd.DataFrame,
     object_predictions: pd.DataFrame,
     pixel_predictions: pd.DataFrame,
     *,
-    technical_errors: pd.DataFrame | None = None,
+    technical_events: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Apply frozen decisions and compute task-31 batch-3 metrics.
+    """Apply frozen 03B policies to batch-3 projections and return long metrics.
 
-    Every candidate yields overall and per-image rows, or one explicit error
-    row. Equivalent predictions and decisions are tagged but never removed.
+    The function never creates a validation-specific scientific identifier.
+    Continuous predictions are addressed by ``projection_id`` and decision
+    policies by ``(model_id, random_state, decision_scope)``.
     """
-    required_candidates = {
-        "validation_candidate_id",
-        "calibration_id",
-        "domain_config_id",
-        "projection_config_id",
-        "evaluation_track",
-        "track_id",
-        "projection_level",
-        "decision_mode",
-        "random_state",
-        "direct_2way_threshold",
-        "three_way_lower_threshold",
-        "three_way_upper_threshold",
-    }
-    missing = sorted(required_candidates - set(candidate_pool.columns))
-    if missing:
-        raise KeyError(f"Missing validation-candidate columns: {missing}")
-    error_lookup: dict[str, list[dict]] = {}
-    if technical_errors is not None and len(technical_errors):
-        for projection_id, group in technical_errors.groupby(
-            "projection_config_id", sort=False
-        ):
-            error_lookup[str(projection_id)] = group.to_dict("records")
+    required_executions = set(expcfg.SIMCA_VALIDATION_EXECUTION_COLUMNS)
+    required_thresholds = set(expcfg.INTERNAL_CALIBRATION_SELECTED_THRESHOLD_COLUMNS)
+    for frame, required, name in (
+        (validation_executions, required_executions, "validation_executions"),
+        (selected_thresholds, required_thresholds, "selected_thresholds"),
+    ):
+        missing = sorted(required - set(frame.columns))
+        if missing:
+            raise KeyError(f"{name} is missing columns: {missing}")
 
-    lookups = {}
+    if validation_executions.empty:
+        return pd.DataFrame(columns=expcfg.SIMCA_VALIDATION_METRIC_COLUMNS)
+    if expcfg.INTERNAL_CALIBRATION_TARGET_UNCERTAIN_POLICY != "safe_reject":
+        raise RuntimeError(
+            "The current grouped-decision metrics implement the frozen "
+            "safe_reject uncertainty policy only."
+        )
+
+    executions = validation_executions.copy()
+    executions["model_id"] = executions["model_id"].astype(str)
+    executions["projection_id"] = executions["projection_id"].astype(str)
+    executions["random_state"] = pd.to_numeric(
+        executions["random_state"], errors="raise"
+    ).astype(int)
+    run_keys = ["model_id", "random_state"]
+    if executions.duplicated(run_keys).any():
+        raise RuntimeError("Validation executions duplicate (model_id, random_state).")
+
+    thresholds = selected_thresholds.loc[
+        :, list(expcfg.INTERNAL_CALIBRATION_SELECTED_THRESHOLD_COLUMNS)
+    ].copy()
+    thresholds["model_id"] = thresholds["model_id"].astype(str)
+    thresholds["random_state"] = pd.to_numeric(
+        thresholds["random_state"], errors="raise"
+    ).astype(int)
+    thresholds["decision_scope"] = thresholds["decision_scope"].astype(str)
+    threshold_key = [*run_keys, "decision_scope"]
+    if thresholds.duplicated(threshold_key).any():
+        raise RuntimeError("Selected validation thresholds duplicate a natural key.")
+
+    expected_scope_rows = []
+    for row in executions.itertuples(index=False):
+        expected_scope_rows.append(
+            {
+                "model_id": str(row.model_id),
+                "random_state": int(row.random_state),
+                "decision_scope": "direct",
+            }
+        )
+        if str(row.projection_level) == "pixel_projection":
+            expected_scope_rows.append(
+                {
+                    "model_id": str(row.model_id),
+                    "random_state": int(row.random_state),
+                    "decision_scope": "pixel_to_object",
+                }
+            )
+    expected_scopes = pd.DataFrame(expected_scope_rows).drop_duplicates()
+    scope_coverage = expected_scopes.merge(
+        thresholds[threshold_key].drop_duplicates().assign(_present=True),
+        on=threshold_key,
+        how="outer",
+        indicator=True,
+    )
+    if not scope_coverage["_merge"].eq("both").all():
+        missing_scopes = scope_coverage.loc[
+            scope_coverage["_merge"].eq("left_only"), threshold_key
+        ].to_dict("records")
+        extra_scopes = scope_coverage.loc[
+            scope_coverage["_merge"].eq("right_only"), threshold_key
+        ].to_dict("records")
+        raise RuntimeError(
+            "Selected threshold scopes do not match the 04C execution registry: "
+            f"missing={missing_scopes[:10]}, extra={extra_scopes[:10]}."
+        )
+
+    threshold_lookup = {
+        (str(row.model_id), int(row.random_state), str(row.decision_scope)): row
+        for row in thresholds.itertuples(index=False)
+    }
+
+    prediction_required = {
+        "projection_id",
+        "source_image",
+        "object_id",
+        "truth",
+        "simca_margin",
+    }
+    prediction_lookups: dict[str, dict[str, np.ndarray]] = {}
     for level, frame in (
         ("object_projection", object_predictions),
         ("pixel_projection", pixel_predictions),
     ):
         if frame.empty:
-            lookups[level] = {}
+            prediction_lookups[level] = {}
             continue
-        required_predictions = {
-            "projection_config_id",
-            "random_state",
-            "source_image",
-            "object_id",
-            "truth",
-            "simca_margin",
-        }
-        missing = sorted(required_predictions - set(frame.columns))
+        missing = sorted(prediction_required - set(frame.columns))
         if missing:
-            raise KeyError(f"Missing {level} validation columns: {missing}")
-        lookups[level] = {
-            (str(key[0]), int(key[1])): np.asarray(indices, dtype=int)
-            for key, indices in frame.groupby(
-                ["projection_config_id", "random_state"], sort=False
+            raise KeyError(f"{level} validation predictions are missing: {missing}")
+        if frame.duplicated(
+            [
+                "projection_id",
+                "source_image",
+                "object_id",
+                *(["row", "col"] if level == "pixel_projection" else []),
+            ]
+        ).any():
+            raise RuntimeError(f"{level} validation predictions contain duplicates.")
+        prediction_lookups[level] = {
+            str(projection_id): np.asarray(indices, dtype=int)
+            for projection_id, indices in frame.groupby(
+                "projection_id", sort=False
             ).indices.items()
         }
 
-    metric_parts: list[pd.DataFrame] = []
-    completed_calibrations: set[str] = set()
+    event_lookup: dict[str, list[dict]] = {}
+    if technical_events is not None and len(technical_events):
+        required_events = set(expcfg.SIMCA_VALIDATION_TECHNICAL_EVENT_COLUMNS)
+        missing = sorted(required_events - set(technical_events.columns))
+        if missing:
+            raise KeyError(f"technical_events is missing columns: {missing}")
+        for projection_id, group in technical_events.groupby(
+            "projection_id", sort=False, dropna=False
+        ):
+            event_lookup[str(projection_id)] = group.to_dict("records")
+
     diagnostic_columns = (
         "pca_score_pc1",
         "pca_score_pc2",
@@ -1171,113 +1307,277 @@ def evaluate_locked_validation_predictions(
         "normalized_ratio",
         "simca_margin",
     )
-    for candidate in candidate_pool.to_dict("records"):
-        calibration_id = str(candidate["calibration_id"])
-        validation_candidate_id = str(candidate["validation_candidate_id"])
-        projection_id = str(candidate["projection_config_id"])
-        base = {
-            "validation_candidate_id": validation_candidate_id,
-            "calibration_id": calibration_id,
-            "domain_config_id": str(candidate["domain_config_id"]),
-            "evaluation_track": str(candidate["evaluation_track"]),
-            "track_id": str(candidate["track_id"]),
-            "decision_mode": str(candidate["decision_mode"]),
-            "projection_level": str(candidate["projection_level"]),
-            "random_state": int(candidate["random_state"]),
-            "map_variant": "raw",
-        }
+    base_metric_names = (
+        "n_observations",
+        "n_target",
+        "n_non_target",
+        "n_target_objects",
+        "n_uncertain",
+        "n_target_uncertain",
+        "n_non_target_uncertain",
+        "tp",
+        "fn",
+        "fp",
+        "tn",
+        "target_miss_rate",
+        "false_accept_rate",
+        "uncertain_rate",
+        "target_uncertain_rate",
+        "non_target_uncertain_rate",
+        "coverage_rate",
+        "balanced_accuracy",
+        "decided_balanced_accuracy",
+        "macro_object_target_miss_rate",
+    )
+    overall_only_metric_names = (
+        "macro_image_target_miss_rate",
+        "macro_image_false_accept_rate",
+        "macro_image_uncertain_rate",
+        "macro_image_coverage_rate",
+        "macro_image_balanced_accuracy",
+        "macro_image_decided_balanced_accuracy",
+    )
+
+    def _technical_rows(
+        execution: Mapping[str, object],
+        scopes: Sequence[str],
+        exc: Exception,
+    ) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "model_id": str(execution["model_id"]),
+                    "random_state": int(execution["random_state"]),
+                    "track_id": str(execution["track_id"]),
+                    "decision_scope": str(scope),
+                    "map_variant": "raw",
+                    "aggregation_level": "overall",
+                    "group_id": "all",
+                    "metric": "technical_calculability",
+                    "value": np.nan,
+                    "ci_low": np.nan,
+                    "ci_high": np.nan,
+                    "status": "technical_failure",
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                }
+                for scope in scopes
+            ]
+        )
+
+    def _wide_to_long(
+        wide: pd.DataFrame,
+        *,
+        model_id: str,
+        random_state: int,
+        track_id: str,
+        decision_scope: str,
+    ) -> pd.DataFrame:
+        rows: list[dict[str, object]] = []
+        for record in wide.to_dict("records"):
+            aggregation_level = str(record["aggregation_level"])
+            metric_names = list(base_metric_names)
+            if aggregation_level == "overall":
+                metric_names.extend(overall_only_metric_names)
+            for metric_name in metric_names:
+                if metric_name not in record:
+                    continue
+                raw_value = record.get(metric_name, np.nan)
+                value = pd.to_numeric(
+                    pd.Series([raw_value]), errors="coerce"
+                ).iloc[0]
+                ci_low = pd.to_numeric(
+                    pd.Series([record.get(f"{metric_name}_ci_low", np.nan)]),
+                    errors="coerce",
+                ).iloc[0]
+                ci_high = pd.to_numeric(
+                    pd.Series([record.get(f"{metric_name}_ci_high", np.nan)]),
+                    errors="coerce",
+                ).iloc[0]
+                rows.append(
+                    {
+                        "model_id": str(model_id),
+                        "random_state": int(random_state),
+                        "track_id": str(track_id),
+                        "decision_scope": str(decision_scope),
+                        "map_variant": "raw",
+                        "aggregation_level": aggregation_level,
+                        "group_id": str(record["group_id"]),
+                        "metric": str(metric_name),
+                        "value": float(value) if pd.notna(value) else np.nan,
+                        "ci_low": float(ci_low) if pd.notna(ci_low) else np.nan,
+                        "ci_high": float(ci_high) if pd.notna(ci_high) else np.nan,
+                        "status": "calculable",
+                        "error_type": "",
+                        "error_message": "",
+                    }
+                )
+        return pd.DataFrame(rows)
+
+    def _evaluate_scope(
+        observations: pd.DataFrame,
+        *,
+        score_col: str,
+        threshold_row,
+        decision_mode: str,
+        model_id: str,
+        random_state: int,
+        track_id: str,
+        decision_scope: str,
+    ) -> pd.DataFrame:
+        scores = pd.to_numeric(observations[score_col], errors="coerce").to_numpy(
+            dtype=float
+        )
+        if not np.isfinite(scores).all():
+            raise RuntimeError(f"{score_col} contains non-finite values.")
+        truth = pd.to_numeric(observations["truth"], errors="coerce")
+        if not truth.isin((0, 1)).all():
+            raise RuntimeError("Validation truth must be binary.")
+        if truth.astype(bool).nunique() != 2:
+            raise RuntimeError(
+                "Batch-3 validation observations do not cover both classes."
+            )
+        lower = float(threshold_row.lower_threshold)
+        upper = float(threshold_row.upper_threshold)
+        if not np.isfinite(lower) or not np.isfinite(upper):
+            raise RuntimeError("A selected decision threshold is non-finite.")
+        if decision_mode == "2way" and not np.isclose(lower, upper):
+            raise RuntimeError("A 2-way selected threshold must have lower == upper.")
+        if decision_mode == "3way" and not lower < upper:
+            raise RuntimeError("A 3-way selected threshold must have lower < upper.")
+        target, uncertain = apply_locked_margin_decision(
+            scores,
+            decision_mode,
+            direct_2way_threshold=lower,
+            three_way_lower_threshold=lower,
+            three_way_upper_threshold=upper,
+        )
+        overall = summarize_grouped_decisions(
+            observations,
+            target,
+            uncertain,
+            group_columns=(),
+        )
+        overall["aggregation_level"] = "overall"
+        overall["group_id"] = "all"
+        by_image = summarize_grouped_decisions(
+            observations,
+            target,
+            uncertain,
+            group_columns=("source_image",),
+        )
+        by_image["aggregation_level"] = "source_image"
+        by_image["group_id"] = by_image.pop("source_image").astype(str)
+        macro_image_metrics = _macro_image_decision_metrics(by_image)
+        for column, value in macro_image_metrics.items():
+            overall[column] = value
+        wide = pd.concat([overall, by_image], ignore_index=True, sort=False)
+        wide = _add_validation_rate_intervals(wide)
+        return _wide_to_long(
+            wide,
+            model_id=model_id,
+            random_state=random_state,
+            track_id=track_id,
+            decision_scope=decision_scope,
+        )
+
+    metric_parts: list[pd.DataFrame] = []
+    for execution in executions.to_dict("records"):
+        model_id = str(execution["model_id"])
+        random_state = int(execution["random_state"])
+        track_id = str(execution["track_id"])
+        projection_id = str(execution["projection_id"])
+        projection_level = str(execution["projection_level"])
+        decision_mode = str(execution["decision_mode"])
+        expected_scopes = (
+            ("direct", "pixel_to_object")
+            if projection_level == "pixel_projection"
+            else ("direct",)
+        )
         try:
-            if projection_id in error_lookup:
-                first = error_lookup[projection_id][0]
+            if projection_id in event_lookup:
+                first = event_lookup[projection_id][0]
                 raise RuntimeError(
                     f"{first.get('stage', 'projection')}: "
                     f"{first.get('error_type', 'technical_error')}: "
                     f"{first.get('error_message', '')}"
                 )
-            level = str(candidate["projection_level"])
+            if projection_level not in prediction_lookups:
+                raise RuntimeError(f"Unknown projection level: {projection_level!r}.")
+            positions = prediction_lookups[projection_level].get(projection_id)
+            if positions is None or not len(positions):
+                raise RuntimeError(
+                    f"No batch-3 predictions for projection_id={projection_id!r}."
+                )
             predictions = (
                 object_predictions
-                if level == "object_projection"
+                if projection_level == "object_projection"
                 else pixel_predictions
             )
-            key = (projection_id, int(candidate["random_state"]))
-            positions = lookups.get(level, {}).get(key)
-            if positions is None or not len(positions):
-                raise RuntimeError(f"No batch-3 predictions for {key}.")
             observations = predictions.iloc[positions].copy()
+            available_diagnostics = [
+                column for column in diagnostic_columns if column in observations.columns
+            ]
+            if len(available_diagnostics) != len(diagnostic_columns):
+                missing = sorted(set(diagnostic_columns) - set(available_diagnostics))
+                raise RuntimeError(f"Validation diagnostics are missing: {missing}")
             numeric = observations[list(diagnostic_columns)].apply(
                 pd.to_numeric, errors="coerce"
             ).to_numpy(dtype=float)
             if not np.isfinite(numeric).all():
                 raise RuntimeError("A validation diagnostic is non-finite.")
-            if observations["truth"].astype(bool).nunique() != 2:
-                raise RuntimeError("Batch-3 predictions do not cover both classes.")
-            target, uncertain = apply_locked_margin_decision(
-                observations["simca_margin"].to_numpy(dtype=float),
-                str(candidate["decision_mode"]),
-                direct_2way_threshold=candidate["direct_2way_threshold"],
-                three_way_lower_threshold=candidate["three_way_lower_threshold"],
-                three_way_upper_threshold=candidate["three_way_upper_threshold"],
-            )
-            overall = summarize_grouped_decisions(
-                observations,
-                target,
-                uncertain,
-                group_columns=(),
-            )
-            overall["aggregation_level"] = "overall"
-            overall["group_id"] = "all"
-            by_image = summarize_grouped_decisions(
-                observations,
-                target,
-                uncertain,
-                group_columns=("source_image",),
-            )
-            by_image["aggregation_level"] = "source_image"
-            by_image["group_id"] = by_image.pop("source_image").astype(str)
-            macro_image_metrics = _macro_image_decision_metrics(by_image)
-            for column, value in macro_image_metrics.items():
-                overall[column] = value
-            metrics = pd.concat([overall, by_image], ignore_index=True, sort=False)
-            for column, value in base.items():
-                metrics[column] = value
-            entities = ["source_image", "object_id"]
-            if level == "pixel_projection":
-                entities.extend(["row", "col"])
-            prediction_signature = stable_frame_signature(
-                observations,
-                [*entities, *diagnostic_columns],
-                sort_columns=entities,
-                round_decimals=expcfg.SIMCA_CONCAT_REFIT_SIGNATURE_ROUND_DECIMALS,
-            )
-            decisions = observations[entities].copy()
-            decisions["target_decision"] = target
-            decisions["uncertain_decision"] = uncertain
-            decision_signature = stable_frame_signature(
-                decisions,
-                [*entities, "target_decision", "uncertain_decision"],
-                sort_columns=entities,
-                round_decimals=None,
-            )
-            metrics["prediction_signature"] = prediction_signature
-            metrics["decision_signature"] = decision_signature
-            metrics["status"] = "calculable"
-            metrics["error_type"] = ""
-            metrics["error_message"] = ""
-            metric_parts.append(_add_validation_rate_intervals(metrics))
-            completed_calibrations.add(calibration_id)
-        except Exception as exc:
+
+            direct_threshold = threshold_lookup[
+                (model_id, random_state, "direct")
+            ]
             metric_parts.append(
-                pd.DataFrame(
-                    [{
-                        **base,
-                        "aggregation_level": "overall",
-                        "group_id": "all",
-                        "status": "technical_failure",
-                        "error_type": type(exc).__name__,
-                        "error_message": str(exc),
-                    }]
+                _evaluate_scope(
+                    observations,
+                    score_col="simca_margin",
+                    threshold_row=direct_threshold,
+                    decision_mode=decision_mode,
+                    model_id=model_id,
+                    random_state=random_state,
+                    track_id=track_id,
+                    decision_scope="direct",
                 )
+            )
+
+            if projection_level == "pixel_projection":
+                object_votes = build_pixel_vote_table(
+                    observations,
+                    group_columns=("source_image", "object_id"),
+                )
+                secondary_threshold = threshold_lookup[
+                    (model_id, random_state, "pixel_to_object")
+                ]
+                metric_parts.append(
+                    _evaluate_scope(
+                        object_votes,
+                        score_col="pixel_target_ratio",
+                        threshold_row=secondary_threshold,
+                        decision_mode=decision_mode,
+                        model_id=model_id,
+                        random_state=random_state,
+                        track_id=track_id,
+                        decision_scope="pixel_to_object",
+                    )
+                )
+        except Exception as exc:
+            # If direct evaluation succeeded but the secondary aggregation failed,
+            # do not duplicate a direct technical-failure row.
+            completed_scopes = {
+                str(part["decision_scope"].iloc[0])
+                for part in metric_parts
+                if len(part)
+                and str(part["model_id"].iloc[0]) == model_id
+                and int(part["random_state"].iloc[0]) == random_state
+            }
+            failed_scopes = [
+                scope for scope in expected_scopes if scope not in completed_scopes
+            ]
+            metric_parts.append(
+                _technical_rows(execution, failed_scopes or expected_scopes, exc)
             )
 
     metrics = (
@@ -1285,54 +1585,481 @@ def evaluate_locked_validation_predictions(
         if metric_parts
         else pd.DataFrame(columns=expcfg.SIMCA_VALIDATION_METRIC_COLUMNS)
     )
-    metrics["prediction_signature"] = metrics.get(
-        "prediction_signature", pd.Series("", index=metrics.index)
-    ).fillna("").astype(str)
-    metrics["decision_signature"] = metrics.get(
-        "decision_signature", pd.Series("", index=metrics.index)
-    ).fillna("").astype(str)
-    metrics["prediction_equivalence_group_id"] = _equivalence_group_ids(
-        metrics["evaluation_track"],
-        metrics["prediction_signature"],
-        prefix="pred_eq",
-    )
-    metrics["decision_equivalence_group_id"] = _equivalence_group_ids(
-        metrics["evaluation_track"],
-        metrics["decision_signature"],
-        prefix="decision_eq",
-    )
-
-    missing_tracks = sorted(
-        set(expcfg.SIMCA_EVALUATION_TRACKS)
-        - set(candidate_pool["evaluation_track"].astype(str))
-    )
-    if missing_tracks:
-        missing_rows = []
-        for track in missing_tracks:
-            spec = expcfg.SIMCA_EVALUATION_TRACK_SPECS[track]
-            missing_rows.append(
-                {
-                    "calibration_id": "",
-                    "validation_candidate_id": "",
-                    "domain_config_id": "",
-                    "evaluation_track": track,
-                    "track_id": spec["track_id"],
-                    "decision_mode": spec["decision_mode"],
-                    "projection_level": spec["projection_level"],
-                    "map_variant": "raw",
-                    "aggregation_level": "overall",
-                    "group_id": "all",
-                    "status": "not_evaluable_no_calibrated_candidate",
-                    "error_type": "EmptyCalibratedDomain",
-                    "error_message": (
-                        "No frozen 03B/04A candidate is available for this track."
-                    ),
-                }
-            )
-        metrics = pd.concat(
-            [metrics, pd.DataFrame(missing_rows)], ignore_index=True, sort=False
+    metrics = metrics.reindex(columns=expcfg.SIMCA_VALIDATION_METRIC_COLUMNS)
+    natural_key = [
+        "model_id",
+        "random_state",
+        "decision_scope",
+        "map_variant",
+        "aggregation_level",
+        "group_id",
+        "metric",
+    ]
+    if len(metrics) and metrics.duplicated(natural_key).any():
+        duplicate_rows = metrics.loc[
+            metrics.duplicated(natural_key, keep=False), natural_key
+        ].head(20)
+        raise RuntimeError(
+            "Duplicate natural keys in validation_metrics: "
+            f"{duplicate_rows.to_dict('records')}"
         )
-    return metrics.reindex(columns=expcfg.SIMCA_VALIDATION_METRIC_COLUMNS)
+    return metrics.sort_values(natural_key, kind="mergesort").reset_index(drop=True)
+
+
+def build_validation_guardrails(
+    validation_executions: pd.DataFrame,
+    validation_metrics: pd.DataFrame,
+    *,
+    spatial_component_metrics: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Apply the frozen 04C guardrails to each execution/decision scope.
+
+    Supported 04A models receive blocking checks. ``diagnostic_only`` models
+    receive exactly the same diagnostics, but those checks cannot eliminate a
+    model from the protocol-supported path.
+    """
+    required_executions = set(expcfg.SIMCA_VALIDATION_EXECUTION_COLUMNS)
+    required_metrics = set(expcfg.SIMCA_VALIDATION_METRIC_COLUMNS)
+    for frame, required, name in (
+        (validation_executions, required_executions, "validation_executions"),
+        (validation_metrics, required_metrics, "validation_metrics"),
+    ):
+        missing = sorted(required - set(frame.columns))
+        if missing:
+            raise KeyError(f"{name} is missing columns: {missing}")
+
+    executions = validation_executions.copy()
+    executions["model_id"] = executions["model_id"].astype(str)
+    executions["random_state"] = pd.to_numeric(
+        executions["random_state"], errors="raise"
+    ).astype(int)
+    run_keys = ["model_id", "random_state"]
+    if executions.duplicated(run_keys).any():
+        raise RuntimeError("Validation executions duplicate (model_id, random_state).")
+
+    metrics = validation_metrics.copy()
+    metrics["model_id"] = metrics["model_id"].astype(str)
+    metrics["random_state"] = pd.to_numeric(
+        metrics["random_state"], errors="raise"
+    ).astype(int)
+    metrics["decision_scope"] = metrics["decision_scope"].astype(str)
+    metric_key = [
+        "model_id",
+        "random_state",
+        "decision_scope",
+        "map_variant",
+        "aggregation_level",
+        "group_id",
+        "metric",
+    ]
+    if metrics.duplicated(metric_key).any():
+        raise RuntimeError("validation_metrics duplicates its natural metric key.")
+
+    # Exact identity check: metrics may not introduce an execution that is absent
+    # from the canonical 04C registry.
+    metric_runs = metrics[run_keys].drop_duplicates()
+    run_coverage = metric_runs.merge(
+        executions[run_keys].drop_duplicates().assign(_present=True),
+        on=run_keys,
+        how="left",
+        validate="one_to_one",
+    )
+    if run_coverage["_present"].isna().any():
+        raise RuntimeError("validation_metrics contains an unknown execution key.")
+
+    def metric_value(
+        model_id: str,
+        random_state: int,
+        decision_scope: str,
+        aggregation_level: str,
+        group_id: str,
+        metric: str,
+    ) -> tuple[float, float, float, str, str, str]:
+        subset = metrics.loc[
+            metrics["model_id"].eq(str(model_id))
+            & metrics["random_state"].eq(int(random_state))
+            & metrics["decision_scope"].eq(str(decision_scope))
+            & metrics["map_variant"].astype(str).eq("raw")
+            & metrics["aggregation_level"].astype(str).eq(str(aggregation_level))
+            & metrics["group_id"].astype(str).eq(str(group_id))
+            & metrics["metric"].astype(str).eq(str(metric))
+        ]
+        if len(subset) != 1:
+            return np.nan, np.nan, np.nan, "missing", "", ""
+        row = subset.iloc[0]
+        return (
+            float(pd.to_numeric(pd.Series([row["value"]]), errors="coerce").iloc[0]),
+            float(pd.to_numeric(pd.Series([row["ci_low"]]), errors="coerce").iloc[0]),
+            float(pd.to_numeric(pd.Series([row["ci_high"]]), errors="coerce").iloc[0]),
+            str(row["status"]),
+            str(row["error_type"]),
+            str(row["error_message"]),
+        )
+
+    # Verify the long representation preserves coverage = 1 - uncertainty
+    # wherever both quantities are identifiable.
+    complement_pairs = (
+        ("uncertain_rate", "coverage_rate"),
+        ("macro_image_uncertain_rate", "macro_image_coverage_rate"),
+    )
+    for uncertain_metric, coverage_metric in complement_pairs:
+        pair = metrics.loc[
+            metrics["metric"].isin([uncertain_metric, coverage_metric])
+        ].pivot_table(
+            index=[
+                "model_id",
+                "random_state",
+                "decision_scope",
+                "map_variant",
+                "aggregation_level",
+                "group_id",
+            ],
+            columns="metric",
+            values="value",
+            aggfunc="first",
+        )
+        if {uncertain_metric, coverage_metric}.issubset(pair.columns):
+            uncertainty = pd.to_numeric(
+                pair[uncertain_metric], errors="coerce"
+            ).to_numpy(dtype=float)
+            coverage = pd.to_numeric(
+                pair[coverage_metric], errors="coerce"
+            ).to_numpy(dtype=float)
+            finite = np.isfinite(uncertainty) & np.isfinite(coverage)
+            if (finite & ~np.isclose(uncertainty + coverage, 1.0, atol=1e-7)).any():
+                raise RuntimeError(
+                    f"{coverage_metric} must equal 1 - {uncertain_metric}."
+                )
+
+    spatial_lookup: dict[tuple[str, int], float] = {}
+    if spatial_component_metrics is not None and len(spatial_component_metrics):
+        required_spatial = {
+            "model_id",
+            "random_state",
+            "aggregation_level",
+            "map_variant",
+            "smallest_fragment_recall",
+        }
+        missing = sorted(required_spatial - set(spatial_component_metrics.columns))
+        if missing:
+            raise KeyError(f"spatial_component_metrics is missing: {missing}")
+        spatial_overall = spatial_component_metrics.loc[
+            spatial_component_metrics["aggregation_level"].astype(str).eq("overall")
+            & spatial_component_metrics["map_variant"].astype(str).eq(
+                "locked_postprocessed"
+            )
+        ].copy()
+        spatial_key = ["model_id", "random_state"]
+        if spatial_overall.duplicated(spatial_key).any():
+            raise RuntimeError(
+                "Spatial overall metrics duplicate (model_id, random_state)."
+            )
+        spatial_lookup = {
+            (str(row.model_id), int(row.random_state)): float(
+                row.smallest_fragment_recall
+            )
+            for row in spatial_overall.itertuples(index=False)
+        }
+
+    rows: list[dict[str, object]] = []
+    status_by_scope: dict[tuple[str, int, str], str] = {}
+
+    for execution in executions.to_dict("records"):
+        model_id = str(execution["model_id"])
+        random_state = int(execution["random_state"])
+        track_id = str(execution["track_id"])
+        decision_mode = str(execution["decision_mode"])
+        projection_level = str(execution["projection_level"])
+        eligibility_status = str(execution["eligibility_status"])
+        downstream_status = str(execution["downstream_status"])
+        if downstream_status not in {"supported", "diagnostic_only"}:
+            raise RuntimeError(
+                f"Unknown downstream_status={downstream_status!r}."
+            )
+        if decision_mode not in expcfg.SIMCA_CONCAT_REFIT_GUARDRAIL_CHECK_SPECS:
+            raise RuntimeError(f"Unknown decision mode: {decision_mode!r}.")
+
+        decision_scopes = (
+            ("direct", "pixel_to_object")
+            if projection_level == "pixel_projection"
+            else ("direct",)
+        )
+        for decision_scope in decision_scopes:
+            is_protocol_supported = downstream_status == "supported"
+            blocking_failures: list[bool] = []
+            technical_failure = False
+
+            # The presence of the explicit technical-calculability row takes
+            # precedence over performance guardrails.
+            technical = metrics.loc[
+                metrics["model_id"].eq(model_id)
+                & metrics["random_state"].eq(random_state)
+                & metrics["decision_scope"].eq(decision_scope)
+                & metrics["aggregation_level"].astype(str).eq("overall")
+                & metrics["metric"].astype(str).eq("technical_calculability")
+            ]
+            if len(technical):
+                first = technical.iloc[0]
+                technical_failure = True
+                rows.append(
+                    {
+                        "model_id": model_id,
+                        "random_state": random_state,
+                        "track_id": track_id,
+                        "decision_scope": decision_scope,
+                        "eligibility_status": eligibility_status,
+                        "downstream_status": downstream_status,
+                        "candidate_status": "technical_failure",
+                        "scope": "overall",
+                        "metric": "technical_calculability",
+                        "observed_value": np.nan,
+                        "ci_low": np.nan,
+                        "ci_high": np.nan,
+                        "comparator": "is",
+                        "threshold": np.nan,
+                        "check_status": "technical_error",
+                        "is_blocking": bool(is_protocol_supported),
+                        "reason_code": "validation_technical_failure",
+                        "reason": (
+                            f"{first.get('error_type', '')}: "
+                            f"{first.get('error_message', '')}"
+                        ).strip(": "),
+                    }
+                )
+                status_by_scope[(model_id, random_state, decision_scope)] = (
+                    "technical_failure"
+                )
+                continue
+
+            constraints = expcfg.SIMCA_CONCAT_REFIT_GUARDRAIL_LIMITS[
+                decision_mode
+            ]
+            for scope in expcfg.SIMCA_CONCAT_REFIT_GUARDRAIL_SCOPES:
+                specs = expcfg.SIMCA_CONCAT_REFIT_GUARDRAIL_CHECK_SPECS[
+                    decision_mode
+                ][scope]
+                for metric_name, constraint_name, comparator in specs:
+                    # Direct pixel decisions retain the image-macro primary
+                    # evaluation used before this schema refactor. The secondary
+                    # pixel-to-object scope is an object decision and therefore
+                    # uses the pooled object-level metric.
+                    reported_metric = (
+                        f"macro_image_{metric_name}"
+                        if scope == "overall"
+                        and decision_scope == "direct"
+                        and projection_level == "pixel_projection"
+                        else metric_name
+                    )
+                    if scope == "overall":
+                        observed, ci_low, ci_high, status, error_type, error_message = (
+                            metric_value(
+                                model_id,
+                                random_state,
+                                decision_scope,
+                                "overall",
+                                "all",
+                                reported_metric,
+                            )
+                        )
+                    else:
+                        group = metrics.loc[
+                            metrics["model_id"].eq(model_id)
+                            & metrics["random_state"].eq(random_state)
+                            & metrics["decision_scope"].eq(decision_scope)
+                            & metrics["map_variant"].astype(str).eq("raw")
+                            & metrics["aggregation_level"].astype(str).eq(
+                                "source_image"
+                            )
+                            & metrics["metric"].astype(str).eq(reported_metric)
+                            & metrics["status"].astype(str).eq("calculable")
+                        ].copy()
+                        values = pd.to_numeric(group["value"], errors="coerce")
+                        finite = values[np.isfinite(values)]
+                        if finite.empty:
+                            observed = ci_low = ci_high = np.nan
+                            status = "missing"
+                            error_type = ""
+                            error_message = ""
+                        else:
+                            index = (
+                                finite.idxmax()
+                                if comparator == "<="
+                                else finite.idxmin()
+                            )
+                            selected = group.loc[index]
+                            observed = float(selected["value"])
+                            ci_low = float(
+                                pd.to_numeric(
+                                    pd.Series([selected["ci_low"]]),
+                                    errors="coerce",
+                                ).iloc[0]
+                            )
+                            ci_high = float(
+                                pd.to_numeric(
+                                    pd.Series([selected["ci_high"]]),
+                                    errors="coerce",
+                                ).iloc[0]
+                            )
+                            status = str(selected["status"])
+                            error_type = str(selected["error_type"])
+                            error_message = str(selected["error_message"])
+
+                    threshold = float(constraints[constraint_name])
+                    is_blocking = bool(is_protocol_supported)
+                    if status != "calculable" or not np.isfinite(observed):
+                        passed = False
+                        check_status = "technical_error"
+                        reason_code = "required_guardrail_metric_non_finite"
+                        reason = (
+                            error_message
+                            or f"Required guardrail metric {reported_metric} is unavailable."
+                        )
+                        technical_failure = True
+                    else:
+                        passed = bool(
+                            observed <= threshold
+                            if comparator == "<="
+                            else observed >= threshold
+                        )
+                        check_status = "pass" if passed else "fail"
+                        direction = "above" if comparator == "<=" else "below"
+                        reason_code = (
+                            f"{scope}_{reported_metric}_within_limit"
+                            if passed
+                            else f"{scope}_{reported_metric}_{direction}_limit"
+                        )
+                        reason = "Prespecified point-estimate guardrail."
+                    if is_blocking:
+                        blocking_failures.append(not passed)
+                    rows.append(
+                        {
+                            "model_id": model_id,
+                            "random_state": random_state,
+                            "track_id": track_id,
+                            "decision_scope": decision_scope,
+                            "eligibility_status": eligibility_status,
+                            "downstream_status": downstream_status,
+                            "candidate_status": "pending",
+                            "scope": str(scope),
+                            "metric": str(reported_metric),
+                            "observed_value": observed,
+                            "ci_low": ci_low,
+                            "ci_high": ci_high,
+                            "comparator": str(comparator),
+                            "threshold": threshold,
+                            "check_status": check_status,
+                            "is_blocking": is_blocking,
+                            "reason_code": reason_code,
+                            "reason": reason,
+                        }
+                    )
+
+            # Spatial morphology acts on the direct pixel map only. The
+            # pixel-to-object scope has no map and therefore no spatial check.
+            if decision_scope == "direct" and projection_level == "pixel_projection":
+                observed = spatial_lookup.get((model_id, random_state), np.nan)
+                fragment_threshold = (
+                    expcfg.SIMCA_CONCAT_REFIT_SMALLEST_FRAGMENT_RECALL_MIN
+                )
+                if fragment_threshold is None:
+                    is_blocking = False
+                    comparator = "not_thresholded"
+                    threshold = np.nan
+                    check_status = (
+                        "diagnostic_only"
+                        if np.isfinite(observed)
+                        else "not_evaluable"
+                    )
+                    reason_code = "fragment_guardrail_not_prespecified"
+                    reason = (
+                        "Smallest-fragment recall is reported diagnostically; "
+                        "no prespecified blocking threshold exists."
+                    )
+                else:
+                    threshold = float(fragment_threshold)
+                    comparator = ">="
+                    is_blocking = bool(is_protocol_supported)
+                    if not np.isfinite(observed):
+                        check_status = "technical_error"
+                        technical_failure = True
+                        passed = False
+                        reason_code = "smallest_fragment_recall_missing"
+                        reason = "Required spatial guardrail metric is unavailable."
+                    else:
+                        passed = bool(observed >= threshold)
+                        check_status = "pass" if passed else "fail"
+                        reason_code = (
+                            "smallest_fragment_recall_within_limit"
+                            if passed
+                            else "smallest_fragment_recall_below_limit"
+                        )
+                        reason = "Prospectively frozen fragment guardrail."
+                    if is_blocking:
+                        blocking_failures.append(not passed)
+                rows.append(
+                    {
+                        "model_id": model_id,
+                        "random_state": random_state,
+                        "track_id": track_id,
+                        "decision_scope": decision_scope,
+                        "eligibility_status": eligibility_status,
+                        "downstream_status": downstream_status,
+                        "candidate_status": "pending",
+                        "scope": "smallest_fragment_class",
+                        "metric": "smallest_fragment_recall",
+                        "observed_value": observed,
+                        "ci_low": np.nan,
+                        "ci_high": np.nan,
+                        "comparator": comparator,
+                        "threshold": threshold,
+                        "check_status": check_status,
+                        "is_blocking": is_blocking,
+                        "reason_code": reason_code,
+                        "reason": reason,
+                    }
+                )
+
+            if technical_failure:
+                candidate_status = "technical_failure"
+            elif downstream_status == "diagnostic_only":
+                candidate_status = "diagnostic_only"
+            elif any(blocking_failures):
+                candidate_status = "calculable_but_not_acceptable"
+            else:
+                candidate_status = "pass"
+            status_by_scope[(model_id, random_state, decision_scope)] = candidate_status
+
+    guardrails = pd.DataFrame(rows)
+    if guardrails.empty:
+        return pd.DataFrame(columns=expcfg.SIMCA_VALIDATION_GUARDRAIL_COLUMNS)
+
+    # Fill status only after all checks have been evaluated so every row for one
+    # natural decision scope carries the same final status.
+    guardrails["candidate_status"] = [
+        status_by_scope.get(
+            (str(model_id), int(random_state), str(decision_scope)),
+            str(candidate_status),
+        )
+        for model_id, random_state, decision_scope, candidate_status in zip(
+            guardrails["model_id"],
+            guardrails["random_state"],
+            guardrails["decision_scope"],
+            guardrails["candidate_status"],
+        )
+    ]
+    guardrails = guardrails.reindex(
+        columns=expcfg.SIMCA_VALIDATION_GUARDRAIL_COLUMNS
+    )
+    natural_key = [
+        "model_id",
+        "random_state",
+        "decision_scope",
+        "scope",
+        "metric",
+    ]
+    if guardrails.duplicated(natural_key).any():
+        raise RuntimeError("validation_guardrails duplicates its natural key.")
+    return guardrails.sort_values(natural_key, kind="mergesort").reset_index(drop=True)
 
 
 def _assert_uncertainty_coverage_complementarity(
@@ -1365,234 +2092,6 @@ def _assert_uncertainty_coverage_complementarity(
             raise ValueError(
                 f"{coverage_column} must equal 1 - {uncertain_column}."
             )
-
-
-def build_validation_guardrails(
-    candidate_pool: pd.DataFrame,
-    validation_metrics: pd.DataFrame,
-    *,
-    spatial_component_metrics: pd.DataFrame | None = None,
-) -> pd.DataFrame:
-    """Apply prespecified validation constraints without a composite score."""
-    _assert_uncertainty_coverage_complementarity(validation_metrics)
-    overall = validation_metrics.loc[
-        validation_metrics["aggregation_level"].astype(str).eq("overall")
-    ].copy()
-    image = validation_metrics.loc[
-        validation_metrics["aggregation_level"].astype(str).eq("source_image")
-        & validation_metrics["status"].astype(str).eq("calculable")
-    ].copy()
-    overall_lookup = {
-        str(row["validation_candidate_id"]): row
-        for row in overall.to_dict("records")
-        if str(row.get("validation_candidate_id", ""))
-    }
-    image_lookup = {
-        str(validation_candidate_id): group
-        for validation_candidate_id, group in image.groupby(
-            "validation_candidate_id", sort=False
-        )
-    }
-    spatial_lookup: dict[str, float] = {}
-    if spatial_component_metrics is not None and len(spatial_component_metrics):
-        spatial_overall = spatial_component_metrics.loc[
-            spatial_component_metrics["aggregation_level"].astype(str).eq("overall")
-            & spatial_component_metrics["map_variant"].astype(str).eq(
-                "locked_postprocessed"
-            )
-        ]
-        spatial_lookup = {
-            str(row["validation_candidate_id"]): float(
-                row["smallest_fragment_recall"]
-            )
-            for row in spatial_overall.to_dict("records")
-        }
-
-    rows: list[dict] = []
-    candidate_statuses: dict[str, str] = {}
-    for candidate in candidate_pool.to_dict("records"):
-        validation_candidate_id = str(candidate["validation_candidate_id"])
-        calibration_id = str(candidate["calibration_id"])
-        metric_row = overall_lookup.get(validation_candidate_id)
-        common = {
-            "validation_candidate_id": validation_candidate_id,
-            "calibration_id": calibration_id,
-            "evaluation_track": str(candidate["evaluation_track"]),
-            "track_id": str(candidate["track_id"]),
-            "random_state": int(candidate["random_state"]),
-            "eligibility_status": str(candidate["eligibility_status"]),
-        }
-        if metric_row is None or str(metric_row.get("status")) != "calculable":
-            candidate_statuses[validation_candidate_id] = "technical_failure"
-            rows.append(
-                {
-                    **common,
-                    "scope": "overall",
-                    "metric": "technical_calculability",
-                    "comparator": "is",
-                    "check_status": "fail",
-                    "reason": (
-                        "No calculable batch-3 metric was produced for the frozen candidate."
-                    ),
-                }
-            )
-            continue
-        mode = str(candidate["decision_mode"])
-        constraints = expcfg.SIMCA_CONCAT_REFIT_GUARDRAIL_LIMITS[mode]
-        pixel_primary = str(candidate["projection_level"]) == "pixel_projection"
-        candidate_checks: list[bool] = []
-        technical_guardrail_error = False
-        for scope in expcfg.SIMCA_CONCAT_REFIT_GUARDRAIL_SCOPES:
-            scope_specs = expcfg.SIMCA_CONCAT_REFIT_GUARDRAIL_CHECK_SPECS[
-                mode
-            ][scope]
-            for metric, constraint_name, comparator in scope_specs:
-                if scope == "overall":
-                    reported_metric = (
-                        f"macro_image_{metric}" if pixel_primary else metric
-                    )
-                    observed = float(metric_row.get(reported_metric, np.nan))
-                    ci_low = float(
-                        metric_row.get(f"{reported_metric}_ci_low", np.nan)
-                    )
-                    ci_high = float(
-                        metric_row.get(f"{reported_metric}_ci_high", np.nan)
-                    )
-                else:
-                    reported_metric = metric
-                    group = image_lookup.get(
-                        validation_candidate_id, pd.DataFrame()
-                    )
-                    values = pd.to_numeric(
-                        group.get(metric, pd.Series(dtype=float)), errors="coerce"
-                    )
-                    values = values[np.isfinite(values)]
-                    if values.empty:
-                        observed = ci_low = ci_high = np.nan
-                    else:
-                        index = values.idxmax() if comparator == "<=" else values.idxmin()
-                        observed = float(values.loc[index])
-                        ci_low = float(group.loc[index].get(f"{metric}_ci_low", np.nan))
-                        ci_high = float(group.loc[index].get(f"{metric}_ci_high", np.nan))
-                threshold = float(constraints[constraint_name])
-                if not np.isfinite(observed):
-                    passed = False
-                    check_status = "technical_error"
-                    reason = "required_guardrail_metric_non_finite"
-                    technical_guardrail_error = True
-                else:
-                    passed = bool(
-                        observed <= threshold
-                        if comparator == "<="
-                        else observed >= threshold
-                    )
-                    check_status = "pass" if passed else "fail"
-                    reason = "prespecified_point_estimate_guardrail"
-                candidate_checks.append(passed)
-                rows.append(
-                    {
-                        **common,
-                        "scope": scope,
-                        "metric": reported_metric,
-                        "observed_value": observed,
-                        "ci_low": ci_low,
-                        "ci_high": ci_high,
-                        "comparator": comparator,
-                        "threshold": threshold,
-                        "check_status": check_status,
-                        "reason": reason,
-                        "prediction_equivalence_group_id": metric_row.get(
-                            "prediction_equivalence_group_id", ""
-                        ),
-                        "decision_equivalence_group_id": metric_row.get(
-                            "decision_equivalence_group_id", ""
-                        ),
-                    }
-                )
-        if str(candidate["projection_level"]) == "pixel_projection":
-            observed = spatial_lookup.get(validation_candidate_id, np.nan)
-            fragment_threshold = expcfg.SIMCA_CONCAT_REFIT_SMALLEST_FRAGMENT_RECALL_MIN
-            if fragment_threshold is None:
-                fragment_status = "diagnostic_only_no_prespecified_threshold"
-                passed = True
-                comparator = "not_thresholded"
-                threshold = np.nan
-            else:
-                threshold = float(fragment_threshold)
-                comparator = ">="
-                passed = bool(np.isfinite(observed) and observed >= threshold)
-                fragment_status = "pass" if passed else "fail"
-                candidate_checks.append(passed)
-            rows.append(
-                {
-                    **common,
-                    "scope": "smallest_fragment_class",
-                    "metric": "smallest_fragment_recall",
-                    "observed_value": observed,
-                    "comparator": comparator,
-                    "threshold": threshold,
-                    "check_status": fragment_status,
-                    "reason": (
-                        "reported_without_post_batch3_threshold_choice"
-                        if fragment_threshold is None
-                        else "prospectively_frozen_fragment_guardrail"
-                    ),
-                    "prediction_equivalence_group_id": metric_row.get(
-                        "prediction_equivalence_group_id", ""
-                    ),
-                    "decision_equivalence_group_id": metric_row.get(
-                        "decision_equivalence_group_id", ""
-                    ),
-                }
-            )
-        if str(candidate["eligibility_status"]) in (
-            expcfg.SIMCA_CONCAT_REFIT_UNSUPPORTED_ELIGIBILITY_STATUSES
-        ):
-            candidate_statuses[validation_candidate_id] = (
-                "unsupported_domain_shift_diagnostic"
-            )
-        elif technical_guardrail_error:
-            candidate_statuses[validation_candidate_id] = "technical_failure"
-        elif all(candidate_checks):
-            candidate_statuses[validation_candidate_id] = "pass"
-        else:
-            candidate_statuses[validation_candidate_id] = (
-                "calculable_but_not_acceptable"
-            )
-
-    guardrails = pd.DataFrame(rows)
-    if len(guardrails):
-        guardrails["candidate_status"] = guardrails[
-            "validation_candidate_id"
-        ].map(candidate_statuses)
-    missing_tracks = sorted(
-        set(expcfg.SIMCA_EVALUATION_TRACKS)
-        - set(candidate_pool["evaluation_track"].astype(str))
-    )
-    missing_rows = [
-        {
-            "calibration_id": "",
-            "validation_candidate_id": "",
-            "evaluation_track": track,
-            "track_id": expcfg.SIMCA_EVALUATION_TRACK_IDS[track],
-            "random_state": np.nan,
-            "eligibility_status": "unsupported_internal_calibration",
-            "candidate_status": "not_evaluable_no_calibrated_candidate",
-            "scope": "overall",
-            "metric": "calibrated_candidate_availability",
-            "comparator": "is",
-            "check_status": "not_evaluable",
-            "reason": "03B produced no calibrated candidate for this track.",
-        }
-        for track in missing_tracks
-    ]
-    if missing_rows:
-        guardrails = pd.concat(
-            [guardrails, pd.DataFrame(missing_rows)],
-            ignore_index=True,
-            sort=False,
-        )
-    return guardrails.reindex(columns=expcfg.SIMCA_VALIDATION_GUARDRAIL_COLUMNS)
 
 
 def run_exhaustive_locked_grid_evaluation(
@@ -1657,6 +2156,10 @@ def run_exhaustive_locked_grid_evaluation(
 
 
 __all__ = [
+    "finite_max",
+    "finite_mean",
+    "finite_min",
+    "finite_std",
     "aggregate_grid_metrics",
     "build_configuration_catalog",
     "build_duplicate_groups",

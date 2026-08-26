@@ -288,6 +288,8 @@ def plot_spectra(
             cols=n_cols,
             subplot_titles=[f"{facet_name}={value}" for value in facet_groups],
             shared_xaxes=True,
+            horizontal_spacing=0.055,
+            vertical_spacing=0.12,
         )
     else:
         fig = go.Figure()
@@ -350,16 +352,13 @@ def plot_spectra(
                     **trace_kwargs,
                 )
         if use_facets:
-            fig.update_xaxes(title_text=x_title, row=row, col=col)
-            fig.update_yaxes(title_text=y_title, row=row, col=col)
-
-    fig.update_layout(
-        title=title,
-        xaxis_title=None if use_facets else x_title,
-        yaxis_title=None if use_facets else y_title,
-        width=width,
-        height=max(height, 340 * n_rows),
-    )
+            fig.update_xaxes(title_text=x_title if row == n_rows else None, row=row, col=col)
+            fig.update_yaxes(title_text=y_title if col == 1 else None, row=row, col=col)
+    layout_updates = {"title": title, "width": width, "height": max(height, 340 * n_rows)}
+    if not use_facets:
+        layout_updates["xaxis_title"] = x_title
+        layout_updates["yaxis_title"] = y_title
+    fig.update_layout(**layout_updates)
     apply_project_theme(fig)
     return show_or_return(fig, show)
 

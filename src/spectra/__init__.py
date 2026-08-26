@@ -1,6 +1,7 @@
 from src.spectra.band_selection import (
     select_wavelength_range_from_database,
     wavelength_selection_summary,
+    spectral_pixel_validity_report,
 )
 from src.spectra.preprocessing import (
     SpectralPreprocessor,
@@ -46,4 +47,5 @@ __all__ = [
     "validate_preprocessing_steps",
     "vector_normalize",
     "wavelength_selection_summary",
+    "spectral_pixel_validity_report",
 ]

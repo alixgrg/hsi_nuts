@@ -29,7 +29,7 @@ FLAGGED_RECORDS = {
 
 def main() -> None:
     project_root = Path(__file__).resolve().parents[1]
-    output = project_root / "docs" / "protocol" / "qc_review_decisions.parquet"
+    output = project_root / "docs" / "protocol" / "8tracks_v4" / "qc_review_decisions.parquet"
     output.parent.mkdir(parents=True, exist_ok=True)
     rows = [
         {
@@ -39,7 +39,7 @@ def main() -> None:
             "review_status": "reviewed",
             "review_decision": "accept_as_is",
             "reviewer": "visual_review",
-            "review_date": "2026-07-29",
+            "review_date": "2026-08-07",
             "review_comment": (
                 "Visual inspection of the source image, object mask and "
                 "spectrum found no defensible segmentation correction."
@@ -56,7 +56,7 @@ def main() -> None:
             "review_status": "reviewed",
             "review_decision": "accept_as_is",
             "reviewer": "visual_review",
-            "review_date": "2026-07-29",
+            "review_date": "2026-08-07",
             "review_comment": (
                 "Ignoring for now"
             ),

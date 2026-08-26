@@ -280,21 +280,44 @@ def apply_project_theme(
     legend_orientation: str | None = None,
 ) -> go.Figure:
     """Apply a restrained, report-ready layout without changing trace colours."""
+    has_subplot_titles = bool(fig.layout.annotations)
+
+    top_margin = 110 if (
+        legend_orientation == "h" and has_subplot_titles
+    ) else 85
+
     layout_updates: dict[str, Any] = {
         "template": template,
         "font": {"size": font_size},
-        "title": {"font": {"size": title_font_size}, "x": 0.02},
-        "margin": {"l": 70, "r": 80, "t": 75, "b": 65},
+        "title": {
+            "font": {"size": title_font_size},
+            "x": 0.02,
+            "xanchor": "left",
+        },
+        "margin": {
+            "l": 75,
+            "r": 80,
+            "t": top_margin,
+            "b": 70,
+        },
         "hoverlabel": {"namelength": -1},
     }
+
     if legend_orientation is not None:
-        layout_updates["legend"] = {
-            "orientation": legend_orientation,
-            "yanchor": "bottom",
-            "y": 1.02,
-            "xanchor": "left",
-            "x": 0.0,
-        }
+        if legend_orientation == "h":
+            layout_updates["legend"] = {
+                "orientation": "h",
+                "yanchor": "bottom",
+                "y": 1.10 if has_subplot_titles else 1.02,
+                "xanchor": "left",
+                "x": 0.0,
+                "title_text": "",
+            }
+        else:
+            layout_updates["legend"] = {
+                "orientation": legend_orientation,
+            }
+
     fig.update_layout(**layout_updates)
     return fig
 

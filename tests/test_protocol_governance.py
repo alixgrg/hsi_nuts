@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import pandas as pd
+import pytest
 
 from src import experiment_config as expcfg
 from src.protocol_governance import (
@@ -10,7 +11,9 @@ from src.protocol_governance import (
     build_planned_contrasts,
     build_scientific_protocol_manifest,
     freeze_protocol,
+    ProtocolValidationError,
     validate_protocol_contract,
+    validate_selection_only_protocol_lineage,
     verify_frozen_protocol,
 )
 
@@ -101,8 +104,8 @@ def test_protocol_contract_checks_are_all_blocking_and_green():
 
 
 def test_tasks_03_14_output_budgets_and_public_api_are_canonical():
-    assert len(expcfg.DATABASE_OUTPUT_FILENAMES) == 6
-    assert len(expcfg.QC_OUTPUT_FILENAMES) == 9  # 8 Parquet + 1 PDF
+    assert len(expcfg.DATABASE_OUTPUT_FILENAMES) == 7
+    assert len(expcfg.QC_OUTPUT_FILENAMES) == 11  # 10 Parquet + 1 PDF
     assert len(expcfg.SPATIAL_GT_OUTPUT_FILENAMES) == 6
     assert len(expcfg.MATRIX_OUTPUT_FILENAMES) == 8
     all_names = {
@@ -148,3 +151,47 @@ def test_freeze_protocol_writes_a_hashed_immutable_bundle(tmp_path):
     assert lock["lock_sha256"] == result["lock_sha256"]
     verification = verify_frozen_protocol(tmp_path)
     assert verification["passed"].all()
+
+
+def test_selection_only_lineage_requires_exact_execution_context():
+    parent_hash = "parent-protocol"
+    context = {
+        "protocol_hash": parent_hash,
+        "pca_selection_fingerprint": "pca",
+        "track_contract_hash": "tracks",
+        "fold_contract_hash": "folds",
+        "configuration_hash": "configurations",
+    }
+    manifest = {
+        **context,
+        "protocol_version": expcfg.PROTOCOL_VERSION,
+        "schema_version": expcfg.RESULTS_SCHEMA_VERSION,
+    }
+
+    checks = validate_selection_only_protocol_lineage(
+        current_protocol_hash="amended-protocol",
+        execution_protocol_hash=parent_hash,
+        expected_parent_protocol_hash=parent_hash,
+        amendment_scope="selection_only",
+        selection_profile_id="amended-selection",
+        selection_parent_profile_id="parent-selection",
+        checkpoint_manifest=manifest,
+        expected_execution_context=context,
+    )
+    assert checks["passed"].all()
+
+    stale_manifest = {**manifest, "fold_contract_hash": "stale-folds"}
+    with pytest.raises(
+        ProtocolValidationError,
+        match="fold_contract_hash",
+    ):
+        validate_selection_only_protocol_lineage(
+            current_protocol_hash="amended-protocol",
+            execution_protocol_hash=parent_hash,
+            expected_parent_protocol_hash=parent_hash,
+            amendment_scope="selection_only",
+            selection_profile_id="amended-selection",
+            selection_parent_profile_id="parent-selection",
+            checkpoint_manifest=stale_manifest,
+            expected_execution_context=context,
+        )

@@ -11,7 +11,7 @@ import pandas as pd
 import src.experiment_config as expcfg
 from src.spectra.preprocessing_configs import normalize_preprocessing_configs
 from src.utils import parse_preprocessing_steps
-
+from src.matrices.matrix_registry import matrix_family_from_method
 
 _CANDIDATE_COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
     "selected_rule_name": ("rule_variant", "rule_for_refit", "rule"),
@@ -75,27 +75,27 @@ def _normalise_decision_mode(value: Any) -> str:
     return str(value)
 
 
-def infer_matrix_family(matrix_method: Any) -> str:
-    """Infer the canonical matrix family for a matrix method or matrix id."""
-    token = str(matrix_method)
-    if token in expcfg.SIMCA_MATRIX_METHOD_FAMILY:
-        return expcfg.SIMCA_MATRIX_METHOD_FAMILY[token]
-    if token.startswith("balanced_pixel_"):
-        return "pixel_matrix"
-    if token.startswith("object_"):
-        return "object_matrix"
-    return "unknown_matrix_family"
+# def infer_matrix_family(matrix_method: Any) -> str:
+#     """Infer the canonical matrix family for a matrix method or matrix id."""
+#     token = str(matrix_method)
+#     if token in expcfg.SIMCA_MATRIX_METHOD_FAMILY:
+#         return expcfg.SIMCA_MATRIX_METHOD_FAMILY[token]
+#     if token.startswith("balanced_pixel_"):
+#         return "pixel_matrix"
+#     if token.startswith("object_"):
+#         return "object_matrix"
+#     return "unknown_matrix_family"
 
 
-def selection_track_from_parts(matrix_family: Any, decision_mode: Any) -> str:
-    """Return the canonical SIMCA selection track name."""
-    matrix_family = str(matrix_family)
-    decision_mode = _normalise_decision_mode(decision_mode)
-    track = f"{matrix_family}_{decision_mode}"
-    if track not in expcfg.SIMCA_SELECTION_TRACKS:
-        valid = ", ".join(expcfg.SIMCA_SELECTION_TRACKS)
-        raise ValueError(f"Unknown SIMCA selection track {track!r}. Valid tracks: {valid}.")
-    return track
+# def selection_track_from_parts(matrix_family: Any, decision_mode: Any) -> str:
+#     """Return the canonical SIMCA selection track name."""
+#     matrix_family = str(matrix_family)
+#     decision_mode = _normalise_decision_mode(decision_mode)
+#     track = f"{matrix_family}_{decision_mode}"
+#     if track not in expcfg.SIMCA_SELECTION_TRACKS:
+#         valid = ", ".join(expcfg.SIMCA_SELECTION_TRACKS)
+#         raise ValueError(f"Unknown SIMCA selection track {track!r}. Valid tracks: {valid}.")
+#     return track
 
 
 def validate_simca_table_columns(
@@ -110,30 +110,30 @@ def validate_simca_table_columns(
     return df
 
 
-def validate_simca_selection_tracks(df: pd.DataFrame) -> pd.DataFrame:
-    """Validate that selection_track matches matrix_family and decision_mode."""
-    validate_simca_table_columns(
-        df,
-        ("selection_track", "matrix_family", "decision_mode"),
-        table_name="SIMCA selection/evaluation table",
-    )
-    invalid_rows = []
-    for idx, row in df.iterrows():
-        try:
-            expected = selection_track_from_parts(row["matrix_family"], row["decision_mode"])
-        except ValueError:
-            invalid_rows.append(idx)
-            continue
-        if str(row["selection_track"]) != expected:
-            invalid_rows.append(idx)
+# def validate_simca_selection_tracks(df: pd.DataFrame) -> pd.DataFrame:
+#     """Validate that selection_track matches matrix_family and decision_mode."""
+#     validate_simca_table_columns(
+#         df,
+#         ("selection_track", "matrix_family", "decision_mode"),
+#         table_name="SIMCA selection/evaluation table",
+#     )
+#     invalid_rows = []
+#     for idx, row in df.iterrows():
+#         try:
+#             expected = selection_track_from_parts(row["matrix_family"], row["decision_mode"])
+#         except ValueError:
+#             invalid_rows.append(idx)
+#             continue
+#         if str(row["selection_track"]) != expected:
+#             invalid_rows.append(idx)
 
-    if invalid_rows:
-        preview = list(invalid_rows[:10])
-        raise ValueError(
-            "selection_track must match matrix_family + decision_mode. "
-            f"Invalid row index preview: {preview}"
-        )
-    return df
+#     if invalid_rows:
+#         preview = list(invalid_rows[:10])
+#         raise ValueError(
+#             "selection_track must match matrix_family + decision_mode. "
+#             f"Invalid row index preview: {preview}"
+#         )
+#     return df
 
 
 def validate_simca_candidate_contract(df: pd.DataFrame) -> pd.DataFrame:
@@ -145,14 +145,14 @@ def validate_simca_candidate_contract(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def validate_simca_evaluation_contract(df: pd.DataFrame) -> pd.DataFrame:
-    """Validate the canonical SIMCA model-evaluation table contract."""
-    validate_simca_table_columns(
-        df,
-        expcfg.SIMCA_CANDIDATE_EVALUATION_REQUIRED_COLUMNS,
-        table_name="SIMCA candidate evaluation table",
-    )
-    return validate_simca_selection_tracks(df)
+# def validate_simca_evaluation_contract(df: pd.DataFrame) -> pd.DataFrame:
+#     """Validate the canonical SIMCA model-evaluation table contract."""
+#     validate_simca_table_columns(
+#         df,
+#         expcfg.SIMCA_CANDIDATE_EVALUATION_REQUIRED_COLUMNS,
+#         table_name="SIMCA candidate evaluation table",
+#     )
+#     return validate_simca_selection_tracks(df)
 
 
 def normalize_simca_candidate_columns(
@@ -171,9 +171,9 @@ def normalize_simca_candidate_columns(
 
     if "matrix_family" not in out.columns:
         if "matrix_method" in out.columns:
-            out["matrix_family"] = out["matrix_method"].map(infer_matrix_family)
+            out["matrix_family"] = out["matrix_method"].map(matrix_family_from_method)
         elif "training_matrix_id" in out.columns:
-            out["matrix_family"] = out["training_matrix_id"].map(infer_matrix_family)
+            out["matrix_family"] = out["training_matrix_id"].map(matrix_family_from_method)
 
     if "training_matrix_id" not in out.columns and "matrix_method" in out.columns:
         out["training_matrix_id"] = out["matrix_method"].astype(str)
@@ -199,29 +199,29 @@ def normalize_simca_candidate_columns(
     return out
 
 
-def add_selection_track(
-    df: pd.DataFrame,
-    matrix_family_col: str = "matrix_family",
-    decision_mode_col: str = "decision_mode",
-    track_col: str = "selection_track",
-    overwrite: bool = True,
-) -> pd.DataFrame:
-    """Add the canonical 4-track SIMCA selection label to a table."""
-    out = normalize_simca_candidate_columns(df)
-    validate_simca_table_columns(
-        out,
-        (matrix_family_col, decision_mode_col),
-        table_name="SIMCA selection/evaluation table",
-    )
+# def add_selection_track(
+#     df: pd.DataFrame,
+#     matrix_family_col: str = "matrix_family",
+#     decision_mode_col: str = "decision_mode",
+#     track_col: str = "selection_track",
+#     overwrite: bool = True,
+# ) -> pd.DataFrame:
+#     """Add the canonical 4-track SIMCA selection label to a table."""
+#     out = normalize_simca_candidate_columns(df)
+#     validate_simca_table_columns(
+#         out,
+#         (matrix_family_col, decision_mode_col),
+#         table_name="SIMCA selection/evaluation table",
+#     )
 
-    if track_col in out.columns and not overwrite:
-        return validate_simca_selection_tracks(out)
+#     if track_col in out.columns and not overwrite:
+#         return validate_simca_selection_tracks(out)
 
-    out[track_col] = [
-        selection_track_from_parts(row[matrix_family_col], row[decision_mode_col])
-        for _, row in out.iterrows()
-    ]
-    return out
+#     out[track_col] = [
+#         selection_track_from_parts(row[matrix_family_col], row[decision_mode_col])
+#         for _, row in out.iterrows()
+#     ]
+#     return out
 
 
 def candidate_identity_payload(
@@ -1417,248 +1417,248 @@ def _locked_values_equal(left: Any, right: Any) -> bool:
     return str(left) == str(right)
 
 
-def build_locked_validation_candidate_pool(
-    calibrated_hyperparameters: pd.DataFrame,
-    calibration_domain: pd.DataFrame,
-    pareto_reference: pd.DataFrame,
-    projection_eligibility: pd.DataFrame,
-    *,
-    optuna_trials: pd.DataFrame | None = None,
-    optuna_pareto_candidates: pd.DataFrame | None = None,
-) -> pd.DataFrame:
-    """Build the score-free task-31 pool from frozen 03B/03C/04A outputs.
+# def build_locked_validation_candidate_pool(
+#     calibrated_hyperparameters: pd.DataFrame,
+#     calibration_domain: pd.DataFrame,
+#     pareto_reference: pd.DataFrame,
+#     projection_eligibility: pd.DataFrame,
+#     *,
+#     optuna_trials: pd.DataFrame | None = None,
+#     optuna_pareto_candidates: pd.DataFrame | None = None,
+# ) -> pd.DataFrame:
+#     """Build the score-free task-31 pool from frozen 03B/03C/04A outputs.
 
-    Supported tracks use the protocol Pareto front. Unsupported domain-shift
-    tracks use the diagnostic Pareto front and remain explicitly diagnostic.
-    Optuna is attached only as provenance and never adds or removes a row.
-    """
-    required_domain = set(expcfg.SIMCA_CONCAT_REFIT_CANDIDATE_COLUMNS) - {
-        "validation_candidate_id",
-        "data_config_id",
-        "eligibility_status",
-        "candidate_front",
-        "visited_by_optuna",
-        "optuna_pareto",
-    }
-    required_pareto = {
-        "row_type",
-        "calibration_id",
-        "evaluation_track",
-        "eligibility_status",
-        "technical_status",
-        "protocol_pareto_front",
-        "diagnostic_pareto_front",
-    }
-    required_eligibility = {"evaluation_track", "eligibility_status"}
-    for frame, required, name in (
-        (calibration_domain, required_domain, "calibration_domain"),
-        (pareto_reference, required_pareto, "grid_pareto_reference"),
-        (projection_eligibility, required_eligibility, "projection_eligibility"),
-    ):
-        missing = sorted(required - set(frame.columns))
-        if missing:
-            raise KeyError(f"{name} is missing frozen columns: {missing}")
+#     Supported tracks use the protocol Pareto front. Unsupported domain-shift
+#     tracks use the diagnostic Pareto front and remain explicitly diagnostic.
+#     Optuna is attached only as provenance and never adds or removes a row.
+#     """
+#     required_domain = set(expcfg.SIMCA_CONCAT_REFIT_CANDIDATE_COLUMNS) - {
+#         "validation_candidate_id",
+#         "data_config_id",
+#         "eligibility_status",
+#         "candidate_front",
+#         "visited_by_optuna",
+#         "optuna_pareto",
+#     }
+#     required_pareto = {
+#         "row_type",
+#         "calibration_id",
+#         "evaluation_track",
+#         "eligibility_status",
+#         "technical_status",
+#         "protocol_pareto_front",
+#         "diagnostic_pareto_front",
+#     }
+#     required_eligibility = {"evaluation_track", "eligibility_status"}
+#     for frame, required, name in (
+#         (calibration_domain, required_domain, "calibration_domain"),
+#         (pareto_reference, required_pareto, "grid_pareto_reference"),
+#         (projection_eligibility, required_eligibility, "projection_eligibility"),
+#     ):
+#         missing = sorted(required - set(frame.columns))
+#         if missing:
+#             raise KeyError(f"{name} is missing frozen columns: {missing}")
 
-    if expcfg.SIMCA_CONCAT_REFIT_MAX_CANDIDATES is not None:
-        raise RuntimeError(
-            "A validation candidate cap would select on row order; keep "
-            "SIMCA_CONCAT_REFIT_MAX_CANDIDATES=None."
-        )
-    eligibility = projection_eligibility[
-        ["evaluation_track", "eligibility_status"]
-    ].drop_duplicates()
-    if eligibility["evaluation_track"].astype(str).duplicated().any():
-        raise RuntimeError("03C eligibility must contain one row per track.")
+#     if expcfg.SIMCA_CONCAT_REFIT_MAX_CANDIDATES is not None:
+#         raise RuntimeError(
+#             "A validation candidate cap would select on row order; keep "
+#             "SIMCA_CONCAT_REFIT_MAX_CANDIDATES=None."
+#         )
+#     eligibility = projection_eligibility[
+#         ["evaluation_track", "eligibility_status"]
+#     ].drop_duplicates()
+#     if eligibility["evaluation_track"].astype(str).duplicated().any():
+#         raise RuntimeError("03C eligibility must contain one row per track.")
 
-    configurations = pareto_reference.loc[
-        pareto_reference["row_type"].astype(str).eq("configuration")
-        & pareto_reference["technical_status"].astype(str).eq("calculable")
-    ].copy()
-    supported = configurations["eligibility_status"].isin(
-        expcfg.SIMCA_CONCAT_REFIT_SUPPORTED_ELIGIBILITY_STATUSES
-    )
-    unsupported = configurations["eligibility_status"].isin(
-        expcfg.SIMCA_CONCAT_REFIT_UNSUPPORTED_ELIGIBILITY_STATUSES
-    )
-    keep = (
-        supported & configurations["protocol_pareto_front"].astype(bool)
-    ) | (
-        unsupported & configurations["diagnostic_pareto_front"].astype(bool)
-    )
-    selected = configurations.loc[
-        keep, ["calibration_id", "evaluation_track", "eligibility_status"]
-    ].copy()
-    selected["candidate_front"] = np.where(
-        selected["eligibility_status"].isin(
-            expcfg.SIMCA_CONCAT_REFIT_SUPPORTED_ELIGIBILITY_STATUSES
-        ),
-        "protocol_pareto",
-        "diagnostic_pareto_unsupported_domain_shift",
-    )
-    if selected["calibration_id"].astype(str).duplicated().any():
-        raise RuntimeError("04A Pareto reference selected a calibration twice.")
+#     configurations = pareto_reference.loc[
+#         pareto_reference["row_type"].astype(str).eq("configuration")
+#         & pareto_reference["technical_status"].astype(str).eq("calculable")
+#     ].copy()
+#     supported = configurations["eligibility_status"].isin(
+#         expcfg.SIMCA_CONCAT_REFIT_SUPPORTED_ELIGIBILITY_STATUSES
+#     )
+#     unsupported = configurations["eligibility_status"].isin(
+#         expcfg.SIMCA_CONCAT_REFIT_UNSUPPORTED_ELIGIBILITY_STATUSES
+#     )
+#     keep = (
+#         supported & configurations["protocol_pareto_front"].astype(bool)
+#     ) | (
+#         unsupported & configurations["diagnostic_pareto_front"].astype(bool)
+#     )
+#     selected = configurations.loc[
+#         keep, ["calibration_id", "evaluation_track", "eligibility_status"]
+#     ].copy()
+#     selected["candidate_front"] = np.where(
+#         selected["eligibility_status"].isin(
+#             expcfg.SIMCA_CONCAT_REFIT_SUPPORTED_ELIGIBILITY_STATUSES
+#         ),
+#         "protocol_pareto",
+#         "diagnostic_pareto_unsupported_domain_shift",
+#     )
+#     if selected["calibration_id"].astype(str).duplicated().any():
+#         raise RuntimeError("04A Pareto reference selected a calibration twice.")
 
-    domain = calibration_domain.copy()
-    if domain["domain_config_id"].astype(str).duplicated().any():
-        raise RuntimeError("03B domain_config_id must be unique.")
-    pool = selected.drop(columns="evaluation_track").merge(
-        domain,
-        on="calibration_id",
-        how="left",
-        validate="one_to_many",
-    )
-    if pool["domain_config_id"].isna().any():
-        raise RuntimeError("A selected 04A row is absent from the 03B domain.")
-    pool = pool.merge(
-        eligibility.rename(columns={"eligibility_status": "eligibility_status_03c"}),
-        on="evaluation_track",
-        how="left",
-        validate="many_to_one",
-    )
-    mismatch = ~pool.apply(
-        lambda row: _locked_values_equal(
-            row["eligibility_status"], row["eligibility_status_03c"]
-        ),
-        axis=1,
-    )
-    if mismatch.any():
-        raise RuntimeError("04A and 03C eligibility statuses disagree.")
-    pool = pool.drop(columns="eligibility_status_03c")
+#     domain = calibration_domain.copy()
+#     if domain["domain_config_id"].astype(str).duplicated().any():
+#         raise RuntimeError("03B domain_config_id must be unique.")
+#     pool = selected.drop(columns="evaluation_track").merge(
+#         domain,
+#         on="calibration_id",
+#         how="left",
+#         validate="one_to_many",
+#     )
+#     if pool["domain_config_id"].isna().any():
+#         raise RuntimeError("A selected 04A row is absent from the 03B domain.")
+#     pool = pool.merge(
+#         eligibility.rename(columns={"eligibility_status": "eligibility_status_03c"}),
+#         on="evaluation_track",
+#         how="left",
+#         validate="many_to_one",
+#     )
+#     mismatch = ~pool.apply(
+#         lambda row: _locked_values_equal(
+#             row["eligibility_status"], row["eligibility_status_03c"]
+#         ),
+#         axis=1,
+#     )
+#     if mismatch.any():
+#         raise RuntimeError("04A and 03C eligibility statuses disagree.")
+#     pool = pool.drop(columns="eligibility_status_03c")
 
-    seed_specific_columns = {
-        "fit_config_id",
-        "projection_config_id",
-        "random_state",
-    }
-    locked_columns = tuple(
-        column
-        for column in expcfg.SIMCA_EXACT_CONFIG_COLUMNS
-        if column not in seed_specific_columns
-        and column in calibrated_hyperparameters.columns
-        and column in pool.columns
-    )
-    member_column = "member_evaluation_config_ids_json"
-    calibration_columns = ["calibration_id", *locked_columns]
-    if member_column in calibrated_hyperparameters.columns:
-        calibration_columns.append(member_column)
-    elif "evaluation_config_id" in calibrated_hyperparameters.columns:
-        calibration_columns.append("evaluation_config_id")
-    else:
-        raise KeyError(
-            "calibrated_hyperparameters has no member evaluation provenance."
-        )
-    calibration = calibrated_hyperparameters[
-        calibration_columns
-    ].drop_duplicates("calibration_id")
-    calibration["__calibrated_present"] = True
-    checked = pool.merge(
-        calibration,
-        on="calibration_id",
-        how="left",
-        suffixes=("", "__03b"),
-        validate="many_to_one",
-    )
-    if checked["__calibrated_present"].isna().any():
-        raise RuntimeError("A validation candidate has no calibrated 03B row.")
-    checked = checked.drop(columns="__calibrated_present")
-    if member_column in checked.columns:
-        member_ok = []
-        for evaluation_id, raw_members in zip(
-            checked["evaluation_config_id"], checked[member_column]
-        ):
-            try:
-                members = set(map(str, json.loads(str(raw_members))))
-            except (TypeError, ValueError, json.JSONDecodeError) as exc:
-                raise RuntimeError(
-                    "Invalid 03B member_evaluation_config_ids_json."
-                ) from exc
-            member_ok.append(str(evaluation_id) in members)
-        if not all(member_ok):
-            raise RuntimeError(
-                "A seed-specific domain row is absent from its frozen 03B "
-                "calibration membership."
-            )
-        checked = checked.drop(columns=member_column)
-    elif "evaluation_config_id__03b" in checked.columns:
-        equal_members = checked["evaluation_config_id"].astype(str).eq(
-            checked["evaluation_config_id__03b"].astype(str)
-        )
-        if not equal_members.all():
-            raise RuntimeError("A validation row is not the frozen 03B member.")
-        checked = checked.drop(columns="evaluation_config_id__03b")
-    differences = []
-    for column in locked_columns:
-        other = f"{column}__03b"
-        equal = np.fromiter(
-            (
-                _locked_values_equal(left, right)
-                for left, right in zip(checked[column], checked[other])
-            ),
-            dtype=bool,
-            count=len(checked),
-        )
-        if not equal.all():
-            differences.append(column)
-        checked = checked.drop(columns=other)
-    if differences:
-        raise RuntimeError(
-            "04C candidates differ from frozen 03B hyperparameters: "
-            f"{differences}"
-        )
-    pool = checked
-    data_identity_columns = (
-        "matrix_method",
-        "m",
-        "balanced_pixel_strategy",
-        "preprocessing",
-        "preprocessing_steps",
-        "sg_window_length",
-        "sg_polyorder",
-        "random_state",
-    )
-    pool["data_config_id"] = [
-        simca_candidate_key(
-            row,
-            id_columns=data_identity_columns,
-            prefix="validation_data",
-        )
-        for _, row in pool.iterrows()
-    ]
-    pool["validation_candidate_id"] = [
-        simca_candidate_key(
-            row,
-            id_columns=(
-                "calibration_id",
-                "domain_config_id",
-                "random_state",
-            ),
-            prefix="validation_candidate",
-        )
-        for _, row in pool.iterrows()
-    ]
-    if pool["validation_candidate_id"].duplicated().any():
-        raise RuntimeError("04C validation_candidate_id must be unique.")
+#     seed_specific_columns = {
+#         "fit_config_id",
+#         "projection_config_id",
+#         "random_state",
+#     }
+#     locked_columns = tuple(
+#         column
+#         for column in expcfg.SIMCA_EXACT_CONFIG_COLUMNS
+#         if column not in seed_specific_columns
+#         and column in calibrated_hyperparameters.columns
+#         and column in pool.columns
+#     )
+#     member_column = "member_evaluation_config_ids_json"
+#     calibration_columns = ["calibration_id", *locked_columns]
+#     if member_column in calibrated_hyperparameters.columns:
+#         calibration_columns.append(member_column)
+#     elif "evaluation_config_id" in calibrated_hyperparameters.columns:
+#         calibration_columns.append("evaluation_config_id")
+#     else:
+#         raise KeyError(
+#             "calibrated_hyperparameters has no member evaluation provenance."
+#         )
+#     calibration = calibrated_hyperparameters[
+#         calibration_columns
+#     ].drop_duplicates("calibration_id")
+#     calibration["__calibrated_present"] = True
+#     checked = pool.merge(
+#         calibration,
+#         on="calibration_id",
+#         how="left",
+#         suffixes=("", "__03b"),
+#         validate="many_to_one",
+#     )
+#     if checked["__calibrated_present"].isna().any():
+#         raise RuntimeError("A validation candidate has no calibrated 03B row.")
+#     checked = checked.drop(columns="__calibrated_present")
+#     if member_column in checked.columns:
+#         member_ok = []
+#         for evaluation_id, raw_members in zip(
+#             checked["evaluation_config_id"], checked[member_column]
+#         ):
+#             try:
+#                 members = set(map(str, json.loads(str(raw_members))))
+#             except (TypeError, ValueError, json.JSONDecodeError) as exc:
+#                 raise RuntimeError(
+#                     "Invalid 03B member_evaluation_config_ids_json."
+#                 ) from exc
+#             member_ok.append(str(evaluation_id) in members)
+#         if not all(member_ok):
+#             raise RuntimeError(
+#                 "A seed-specific domain row is absent from its frozen 03B "
+#                 "calibration membership."
+#             )
+#         checked = checked.drop(columns=member_column)
+#     elif "evaluation_config_id__03b" in checked.columns:
+#         equal_members = checked["evaluation_config_id"].astype(str).eq(
+#             checked["evaluation_config_id__03b"].astype(str)
+#         )
+#         if not equal_members.all():
+#             raise RuntimeError("A validation row is not the frozen 03B member.")
+#         checked = checked.drop(columns="evaluation_config_id__03b")
+#     differences = []
+#     for column in locked_columns:
+#         other = f"{column}__03b"
+#         equal = np.fromiter(
+#             (
+#                 _locked_values_equal(left, right)
+#                 for left, right in zip(checked[column], checked[other])
+#             ),
+#             dtype=bool,
+#             count=len(checked),
+#         )
+#         if not equal.all():
+#             differences.append(column)
+#         checked = checked.drop(columns=other)
+#     if differences:
+#         raise RuntimeError(
+#             "04C candidates differ from frozen 03B hyperparameters: "
+#             f"{differences}"
+#         )
+#     pool = checked
+#     data_identity_columns = (
+#         "matrix_method",
+#         "m",
+#         "balanced_pixel_strategy",
+#         "preprocessing",
+#         "preprocessing_steps",
+#         "sg_window_length",
+#         "sg_polyorder",
+#         "random_state",
+#     )
+#     pool["data_config_id"] = [
+#         simca_candidate_key(
+#             row,
+#             id_columns=data_identity_columns,
+#             prefix="validation_data",
+#         )
+#         for _, row in pool.iterrows()
+#     ]
+#     pool["validation_candidate_id"] = [
+#         simca_candidate_key(
+#             row,
+#             id_columns=(
+#                 "calibration_id",
+#                 "domain_config_id",
+#                 "random_state",
+#             ),
+#             prefix="validation_candidate",
+#         )
+#         for _, row in pool.iterrows()
+#     ]
+#     if pool["validation_candidate_id"].duplicated().any():
+#         raise RuntimeError("04C validation_candidate_id must be unique.")
 
-    visited_ids: set[str] = set()
-    if optuna_trials is not None and len(optuna_trials):
-        if "calibration_id" not in optuna_trials:
-            raise KeyError("optuna_trials has no calibration_id provenance.")
-        visited_ids = set(optuna_trials["calibration_id"].dropna().astype(str))
-    optuna_front_ids: set[str] = set()
-    if optuna_pareto_candidates is not None and len(optuna_pareto_candidates):
-        if "calibration_id" not in optuna_pareto_candidates:
-            raise KeyError("optuna_pareto_candidates has no calibration_id.")
-        optuna_front_ids = set(
-            optuna_pareto_candidates["calibration_id"].dropna().astype(str)
-        )
-    pool["visited_by_optuna"] = pool["calibration_id"].astype(str).isin(visited_ids)
-    pool["optuna_pareto"] = pool["calibration_id"].astype(str).isin(optuna_front_ids)
-    pool["target_class"] = expcfg.TARGET_CLASS
-    pool["non_target_label"] = expcfg.NON_TARGET_LABEL
+#     visited_ids: set[str] = set()
+#     if optuna_trials is not None and len(optuna_trials):
+#         if "calibration_id" not in optuna_trials:
+#             raise KeyError("optuna_trials has no calibration_id provenance.")
+#         visited_ids = set(optuna_trials["calibration_id"].dropna().astype(str))
+#     optuna_front_ids: set[str] = set()
+#     if optuna_pareto_candidates is not None and len(optuna_pareto_candidates):
+#         if "calibration_id" not in optuna_pareto_candidates:
+#             raise KeyError("optuna_pareto_candidates has no calibration_id.")
+#         optuna_front_ids = set(
+#             optuna_pareto_candidates["calibration_id"].dropna().astype(str)
+#         )
+#     pool["visited_by_optuna"] = pool["calibration_id"].astype(str).isin(visited_ids)
+#     pool["optuna_pareto"] = pool["calibration_id"].astype(str).isin(optuna_front_ids)
+#     pool["target_class"] = expcfg.TARGET_CLASS
+#     pool["non_target_label"] = expcfg.NON_TARGET_LABEL
 
-    unknown_tracks = set(pool["evaluation_track"].astype(str)) - set(
-        expcfg.SIMCA_EVALUATION_TRACKS
-    )
-    if unknown_tracks:
-        raise RuntimeError(f"Unknown 04C tracks: {sorted(unknown_tracks)}")
-    return pool.reindex(columns=expcfg.SIMCA_CONCAT_REFIT_CANDIDATE_COLUMNS)
+#     unknown_tracks = set(pool["evaluation_track"].astype(str)) - set(
+#         expcfg.SIMCA_EVALUATION_TRACKS
+#     )
+#     if unknown_tracks:
+#         raise RuntimeError(f"Unknown 04C tracks: {sorted(unknown_tracks)}")
+#     return pool.reindex(columns=expcfg.SIMCA_CONCAT_REFIT_CANDIDATE_COLUMNS)

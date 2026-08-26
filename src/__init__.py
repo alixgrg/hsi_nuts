@@ -379,16 +379,16 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
         "src.spectra.band_selection",
         "select_wavelength_range_from_database",
     ),
+    "spectral_pixel_validity_report": (
+        "src.spectra.band_selection",
+        "spectral_pixel_validity_report",
+    ),
 
     # ------------------------------------------------------------------
     # PCA workflow
     # ------------------------------------------------------------------
     "OBJECT_MATRIX_METHODS": ("src.workflows.pca", "OBJECT_MATRIX_METHODS"),
     "PIXEL_MATRIX_METHODS": ("src.workflows.pca", "PIXEL_MATRIX_METHODS"),
-    "pca_matrix_family_from_method": (
-        "src.workflows.pca",
-        "pca_matrix_family_from_method",
-    ),
     "pca_matrix_variant_from_method": (
         "src.workflows.pca",
         "pca_matrix_variant_from_method",
@@ -555,14 +555,6 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
         "src.workflows.simca_internal_calibration",
         "build_calibration_folds",
     ),
-    "build_internal_calibration_configurations": (
-        "src.workflows.simca_internal_calibration",
-        "build_internal_calibration_configurations",
-    ),
-    "expand_projection_configurations": (
-        "src.workflows.simca_internal_calibration",
-        "expand_projection_configurations",
-    ),
     "hash_internal_calibration_configuration": (
         "src.workflows.simca_internal_calibration",
         "hash_internal_calibration_configuration",
@@ -575,53 +567,85 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
         "src.workflows.simca_internal_calibration",
         "compute_train_only_rule_thresholds",
     ),
-    "run_internal_calibration": (
-        "src.workflows.simca_internal_calibration",
-        "run_internal_calibration",
-    ),
     "run_internal_calibration_8tracks": (
         "src.workflows.simca_internal_calibration",
         "run_internal_calibration_8tracks",
     ),
-    "evaluate_internal_2way_tracks": (
+    "load_selected_oof_predictions_from_checkpoint_8tracks": (
         "src.workflows.simca_internal_calibration",
-        "evaluate_internal_2way_tracks",
+        "load_selected_oof_predictions_from_checkpoint_8tracks",
     ),
-    "evaluate_crossfitted_three_way_thresholds": (
+    "resolve_internal_calibration_checkpoint_run_8tracks": (
         "src.workflows.simca_internal_calibration",
-        "evaluate_crossfitted_three_way_thresholds",
+        "resolve_internal_calibration_checkpoint_run_8tracks",
     ),
-    "build_internal_calibrated_hyperparameters_8tracks": (
+    "build_internal_calibration_checkpoint_manifest": (
         "src.workflows.simca_internal_calibration",
-        "build_internal_calibrated_hyperparameters_8tracks",
+        "build_internal_calibration_checkpoint_manifest",
     ),
-    "build_calibration_domain_8tracks": (
+    "validate_internal_calibration_checkpoint_manifest": (
         "src.workflows.simca_internal_calibration",
-        "build_calibration_domain_8tracks",
+        "validate_internal_calibration_checkpoint_manifest",
     ),
-    "select_smallest_plateau_components": (
-        "src.workflows.simca_internal_calibration",
-        "select_smallest_plateau_components",
+    "build_internal_calibration_candidate_runs": (
+        "src.workflows.simca_calibration_registry",
+        "build_internal_calibration_candidate_runs",
     ),
-    "build_exact_oof_prediction_equivalence": (
-        "src.workflows.simca_internal_calibration",
-        "build_exact_oof_prediction_equivalence",
+    "evaluate_calibration_thresholds": (
+        "src.workflows.simca_thresholds_calibration",
+        "evaluate_calibration_thresholds",
     ),
-    "evaluate_internal_object_thresholds": (
-        "src.workflows.simca_internal_calibration",
-        "evaluate_internal_object_thresholds",
+    "build_quantile_policies": (
+        "src.workflows.simca_thresholds_calibration",
+        "build_quantile_policies",
     ),
-    "evaluate_internal_three_way_thresholds": (
-        "src.workflows.simca_internal_calibration",
-        "evaluate_internal_three_way_thresholds",
+    "aggregate_threshold_candidates": (
+        "src.workflows.simca_calibration_selection",
+        "aggregate_threshold_candidates",
     ),
-    "build_internal_calibrated_hyperparameters": (
-        "src.workflows.simca_internal_calibration",
-        "build_internal_calibrated_hyperparameters",
+    "reduce_threshold_policies_from_checkpoint_8tracks": (
+        "src.workflows.simca_calibration_selection",
+        "reduce_threshold_policies_from_checkpoint_8tracks",
     ),
-    "build_calibration_domain_from_03b": (
-        "src.workflows.simca_internal_calibration",
-        "build_calibration_domain_from_03b",
+    "select_threshold_policies_from_candidate_cache_8tracks": (
+        "src.workflows.simca_calibration_selection",
+        "select_threshold_policies_from_candidate_cache_8tracks",
+    ),
+    "save_threshold_candidate_cache": (
+        "src.workflows.simca_calibration_selection",
+        "save_threshold_candidate_cache",
+    ),
+    "load_threshold_candidate_cache": (
+        "src.workflows.simca_calibration_selection",
+        "load_threshold_candidate_cache",
+    ),
+    "finalize_streamed_selection_audit": (
+        "src.workflows.simca_calibration_selection",
+        "finalize_streamed_selection_audit",
+    ),
+    "summarize_selection_audit": (
+        "src.workflows.simca_calibration_selection",
+        "summarize_selection_audit",
+    ),
+    "sample_threshold_candidates_for_plot": (
+        "src.workflows.simca_calibration_selection",
+        "sample_threshold_candidates_for_plot",
+    ),
+    "select_threshold_policies": (
+        "src.workflows.simca_calibration_selection",
+        "select_threshold_policies",
+    ),
+    "materialize_selected_thresholds": (
+        "src.workflows.simca_calibration_selection",
+        "materialize_selected_thresholds",
+    ),
+    "build_model_metrics": (
+        "src.workflows.simca_calibration_selection",
+        "build_model_metrics",
+    ),
+    "select_calibrated_models": (
+        "src.workflows.simca_calibration_selection",
+        "select_calibrated_models",
     ),
     "build_image_qc_table": (
         "src.workflows.quality_check",
@@ -781,7 +805,7 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
         "valid_sg_parameter_pairs",
     ),
     "matrix_family_from_method": (
-        "src.workflows.simca",
+        "src.matrices.matrix_registry",
         "matrix_family_from_method",
     ),
     "balanced_strategy_grid_for_matrix": (
@@ -862,18 +886,6 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
         "src.workflows.simca_selection_utils",
         "SIMCA_RULE_METADATA",
     ),
-    "detection_selection_score": (
-        "src.workflows.simca_selection_utils",
-        "detection_selection_score",
-    ),
-    "add_detection_selection_score": (
-        "src.workflows.simca_selection_utils",
-        "add_detection_selection_score",
-    ),
-    "sort_detection_selection": (
-        "src.workflows.simca_selection_utils",
-        "sort_detection_selection",
-    ),
     "infer_model_family_from_rule_token": (
         "src.workflows.simca_selection_utils",
         "infer_model_family_from_rule_token",
@@ -893,14 +905,6 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
     "select_top_models": (
         "src.workflows.simca_selection_utils",
         "select_top_models",
-    ),
-    "add_reference_selection_scores": (
-        "src.workflows.simca_selection_utils",
-        "add_reference_selection_scores",
-    ),
-    "select_top_by_score": (
-        "src.workflows.simca_selection_utils",
-        "select_top_by_score",
     ),
     "pareto_front": (
         "src.workflows.simca_selection_utils",
@@ -994,9 +998,9 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
     # ------------------------------------------------------------------
     # SIMCA robustness diagnostics
     # ------------------------------------------------------------------
-    "validate_no_pure_test_inputs": (
-        "src.workflows.simca_robustness",
-        "validate_no_pure_test_inputs",
+    "assert_no_test_stage_inputs": (
+        "src.workflows.protocol_audit",
+        "assert_no_test_stage_inputs",
     ),
     "validate_simca_robustness_inputs": (
         "src.workflows.simca_robustness",
@@ -1017,6 +1021,34 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
     "build_ablation_diagnostics": (
         "src.workflows.simca_robustness",
         "build_ablation_diagnostics",
+    ),
+    "build_selection_unit_metrics": (
+        "src.workflows.simca_robustness",
+        "build_selection_unit_metrics",
+    ),
+    "build_final_safety_guardrails": (
+        "src.workflows.simca_robustness",
+        "build_final_safety_guardrails",
+    ),
+    "build_statistical_uncertainty": (
+        "src.workflows.simca_robustness",
+        "build_statistical_uncertainty",
+    ),
+    "build_planned_contrast_results": (
+        "src.workflows.simca_robustness",
+        "build_planned_contrast_results",
+    ),
+    "build_risk_coverage_curves": (
+        "src.workflows.simca_robustness",
+        "build_risk_coverage_curves",
+    ),
+    "expand_stochastic_seed_panel": (
+        "src.workflows.simca_robustness",
+        "expand_stochastic_seed_panel",
+    ),
+    "compute_seed_decision_disagreement": (
+        "src.workflows.simca_robustness",
+        "compute_seed_decision_disagreement",
     ),
     "build_random_state_stability_panel": (
         "src.workflows.simca_robustness",
@@ -1089,17 +1121,6 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
     "build_schema_manifest": (
         "src.workflows.simca_tables",
         "build_schema_manifest",
-    ),
-
-    # Backward-compatible aliases for older notebooks.
-    # Prefer add_detection_selection_score / sort_detection_selection in new notebooks.
-    "add_simca_selection_score": (
-        "src.workflows.simca_selection_utils",
-        "add_detection_selection_score",
-    ),
-    "sort_simca_selection": (
-        "src.workflows.simca_selection_utils",
-        "sort_detection_selection",
     ),
 
     # ------------------------------------------------------------------
@@ -1615,6 +1636,14 @@ _PUBLIC_API.update(
         "plot_model_metric_ranking": (
             "src.visualization.plot_model_selection",
             "plot_model_metric_ranking",
+        ),
+        "plot_selection_reasons": (
+            "src.visualization.plot_model_selection",
+            "plot_selection_reasons",
+        ),
+        "plot_threshold_tradeoff": (
+            "src.visualization.plot_model_selection",
+            "plot_threshold_tradeoff",
         ),
 
         # Reporting plots

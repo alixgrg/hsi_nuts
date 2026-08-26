@@ -1,77 +1,72 @@
-# Notebook 03C — changement de domaine et verrou spatial
+# Notebook 03C — audit de projection et verrou spatial
 
 Le notebook `03C_projection_spatial_calibration.ipynb` applique les tâches 25
-et 26 avant toute exécution de 04A ou 04B.
+et 26 aux modèles sélectionnés par 03B, avant toute recherche ou validation
+aval.
 
-## Entrées
+## Entrées normalisées
 
-03C consomme exclusivement les artefacts verrouillés de 03B : contrats des
-huit tracks, audit de sélection, prédictions OOF objet et pixel, références
-train–projection et domaine de calibration. Les observations doivent
-appartenir aux batches 1–2. Un checkpoint 03B complet et compatible peut être
-réutilisé : il suffit alors de reconstruire les sorties des sections 8 et 9,
-sans relancer les fits de la section 5.
+03C vérifie puis consomme huit artefacts du manifeste 03B :
 
-## Tâche 25
+- `track_contracts.parquet` ;
+- `model_catalog.parquet` ;
+- `selected_models.parquet` ;
+- `selected_runs.parquet` ;
+- `selected_thresholds.parquet` ;
+- les prédictions OOF objet et pixel ;
+- `projection_shift.parquet`.
+
+`selected_thresholds.parquet` contient aussi des politiques intermédiaires.
+03C les filtre explicitement par la clé naturelle sélectionnée
+`(model_id, random_state)`, contrôle les portées `direct` et
+`pixel_to_object`, puis refuse toute cardinalité ambiguë. Le `projection_id`
+sert seulement à joindre les prédictions et les références en mémoire. Il
+n'est pas recopié dans les sorties.
+
+## Audit train → projection
 
 Les diagnostics comparent les deux premiers scores PCA, T² (`H`), `Q`, la
-limite de règle, le ratio normalisé et la marge SIMCA. Ils sont produits pour
-l’ensemble des observations, les folds, les classes de taille, les zones
-bord/cœur, la classe vraie et l’image source. Les règles d’éligibilité sont
-déclarées dans `src/experiment_config.py` et n’utilisent que les strates
-globales et par fold, afin que les petites strates descriptives ne déclenchent
-pas un rejet instable.
+limite de règle, le ratio normalisé et la marge SIMCA. Ils sont agrégés de
+façon vectorisée pour l'ensemble des observations, les folds, les classes de
+taille, les zones bord/cœur, la classe vraie et l'image source.
 
-Les strates globales et par fold comparent exclusivement les projections de la
-classe cible `peanut` aux références train de la classe cible. Les amandes sont
-des non-cibles que SIMCA doit précisément rejeter : les inclure dans le taux de
-changement de domaine rendrait mécaniquement un bon classifieur non supporté.
-Elles restent disponibles dans les strates descriptives, notamment
-`truth_class=non_target`. Les écarts-types petits mais non nuls sont conservés
-à leur échelle réelle ; seul un écart-type exactement nul produit un décalage
-non borné explicite.
+Les strates d'éligibilité `overall` et `fold` comparent exclusivement les
+projections de la classe cible aux références train de cette même classe. Les
+non-cibles restent présentes dans les strates descriptives. Chaque track E1–E8
+reçoit exactement un statut déclaré dans `src/experiment_config.py`. Un track
+sans modèle sélectionné reçoit explicitement
+`unsupported_internal_calibration`; aucun modèle ou identifiant n'est inventé.
 
-Chaque track reçoit exactement un statut : `eligible`,
-`eligible_with_warning`, `unsupported_domain_shift` ou
-`unsupported_internal_calibration`. Ce dernier statut matérialise un track
-déclaré non supporté par 03B, tel que E3 : aucune projection n’est inventée et
-aucun diagnostic spatial n’est exigé pour lui. Un track non soutenu reste dans
-les sorties scientifiques ; 04A/04B l’excluent explicitement de la recherche
-en affichant son nom.
+## Calibration spatiale
 
-## Tâche 26
+La calibration spatiale utilise seulement les exécutions à projection pixel
+dont le statut est `eligible` ou `eligible_with_warning`. Les décisions brutes
+sont reconstruites avec les seuils directs sélectionnés de 03B. La vérité est
+exacte sur les images pures des batches 1–2 : l'intérieur segmenté d'une image
+`almond` est non-cible et celui d'une image `peanut` est cible. Toute donnée des
+batches 3–4 provoque une erreur.
 
-La vérité spatiale est automatique sur les images pures : à l’intérieur du
-masque segmenté, tous les pixels `almond*` sont non-cibles et tous les pixels
-`peanut*` sont cibles. L’arrière-plan est indisponible. Toute mixture ou image
-des batches 3–4 provoque une erreur bloquante.
+La clé d'une carte est `(model_id, random_state, source_image)`. La couche
+incertaine 3-way est conservée à l'identique et exclue des pixels scorés. Les
+candidats spatiaux couvrent exactement les mêmes exécutions. La sélection
+équilibre d'abord les exécutions dans chaque `track_id`, puis les tracks entre
+eux, avant le départage lexicographique et le choix de complexité minimale.
 
-Le calibrage compare systématiquement les cartes brutes aux variantes de
-connectivité, morphologie et aire minimale. La couche incertaine est conservée
-à l’identique et exclue des pixels scorés : elle n’est jamais transformée en
-non-cible. Le verrou est appris uniquement sur les tracks pixel `eligible` ou
-`eligible_with_warning` ; un track `unsupported_domain_shift` ne peut pas
-influencer les paramètres utilisés par les tracks exécutables. La sélection
-est globale à ce domaine soutenu et équilibre les tracks en deux temps :
-moyenne des configurations dans chaque track, puis moyenne à poids égal des
-tracks. Elle suit ensuite la priorité lexicographique avec plateau et choisit
-la solution la moins complexe. Une moyenne partielle qui ignorerait des
-métriques non finies est interdite. Le JSON final contient la provenance, la
-pondération, la grille, la version de l’aire minimale et les empreintes des deux
-tables de métriques.
-
-Les cartes sont construites séparément par `domain_config_id` et image. Toute
-coordonnée dupliquée, marge non finie, décision inconnue, seuil manquant ou
-grille dont l’identifiant ne correspond pas aux paramètres provoque une erreur
-bloquante avant la sélection.
+`spatial_candidate_id` est le seul nouvel identifiant : il est nécessaire pour
+relier une combinaison de paramètres spatiaux aux métriques et au verrou. Les
+sorties ne contiennent ni identifiant de fit, ni identifiant de projection, ni
+identifiant de domaine ou de run supplémentaire.
 
 ## Sorties
 
-- `projection_shift_diagnostics.parquet`
-- `projection_eligibility.parquet`
-- `spatial_calibration_metrics.parquet`
-- `fragment_size_classes.parquet`
-- `spatial_postprocessing_lock.json`
+- `projection_shift_diagnostics.parquet` ;
+- `projection_eligibility.parquet` ;
+- `spatial_calibration_metrics.parquet` ;
+- `fragment_size_classes.parquet` ;
+- `spatial_postprocessing_lock.json` ;
+- `audit_manifest.json`.
 
-Ces cinq artefacts sont écrits sous
-`results/03C_projection_spatial_calibration_<results_tag>/`.
+Le manifeste final relie les hashes des entrées 03B aux hashes, schémas et
+cardinalités des sorties 03C. Les tables scientifiques utilisent
+`model_id`, `random_state` et `track_id` comme seules clés de traçabilité vers
+la sélection des modèles.

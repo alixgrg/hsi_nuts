@@ -1,0 +1,19 @@
+{
+  "amendment_justification": "2026-08-07: spectral acquisition validity amendment introduced after inspection of the raw reflectance domain. All 20 negative reflectance values were confined to the terminal 1702 nm band, indicating an unreliable terminal acquisition band. In addition, 1197 exact zero values were identified as 19 complete all-zero pixel spectra across the retained spectral axis, consistent with pixel-level no-data rather than valid reflectance measurements. The amendment therefore removes the 1702 nm terminal band globally and excludes spectrally invalid pixels before object aggregation, pixel sampling, matrix construction and preprocessing. No clipping or value imputation is introduced. The absorbance transformation retains its strict R > 0 requirement. These changes are motivated by physical and data-integrity diagnostics, not by downstream classification performance. All downstream models and selections must be recomputed under this amended protocol.",
+  "amendment_policy": "Any scientific change after the freeze requires a new protocol version, a dated justification, and regeneration of every protocol artifact.",
+  "artifact_sha256": {
+    "checks": "d847dc854a27101a079b16acdf66f282d6286b575df0e42cebb0615f04a64fc8",
+    "inference_plan": "f821e9058716baecfb43e5357df747637e8d0259f320ea0b72d5030b5b21b90c",
+    "manifest": "4c8e1176013f84325bb8ef799368a730abbdbcc4d8d98c1fc3c02ec76dd37fb8",
+    "planned_contrasts": "59b5245107c1cb0875adadfbed4e6f624d6d0e4d5144ae55a11115445b3dda57"
+  },
+  "configuration_sha256": "31f98fd4a1c79fc8d5b72087e8640bacf2ee5e3280ea5eec5aca76eaff36df3c",
+  "freeze_date": "2026-08-07",
+  "immutable": true,
+  "inference_plan_sha256": "3cfc8f0e426c4f822851eefb713f0652ba876003b75fd220142ce00cef2a0f53",
+  "lock_sha256": "966a0a6c06e6a456a896506e34e7b8d372d4688d4afe194690ac3db376448def",
+  "planned_contrasts_sha256": "e8b988fe609328cc2c34ef76cfbefb2fac38cb1cc01633dd1766c90ee922bbdc",
+  "protocol_version": "8tracks_v4",
+  "schema_version": "8tracks_v3",
+  "status": "frozen"
+}

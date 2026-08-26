@@ -6,7 +6,7 @@ from src.models.simca_rules import (
     CombinedIndexSIMCARule,
     DataDrivenSIMCARule,
     SimpleSIMCARule,
-    accept_rule_variant,
+    #accept_rule_variant,
     compute_rule_variant_stat_limit,
     make_simca_rule,
 )
@@ -20,7 +20,7 @@ __all__ = [
     "SIMCAClassModel",
     "SIMCAClassifier",
     "SimpleSIMCARule",
-    "accept_rule_variant",
+    #"accept_rule_variant",
     "compute_rule_variant_stat_limit",
     "make_simca_rule",
     "pca_from_cov",

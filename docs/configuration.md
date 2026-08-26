@@ -9,8 +9,9 @@ artifacts in `docs/protocol/`.
 
 La configuration des tâches 25–26 est centralisée dans
 `src/experiment_config.py` sous les préfixes
-`PROJECTION_DOMAIN_*` et `SPATIAL_CALIBRATION_*`. Elle fixe avant les batches
-3–4 les seuils d’éligibilité, les dimensions descriptives, la largeur
+`DOMAIN_SPATIAL_*`, `PROJECTION_DOMAIN_*` et `SPATIAL_CALIBRATION_*`. Elle
+déclare les huit entrées normalisées de 03B, la vue compacte des exécutions,
+les schémas de sortie et, avant les batches 3–4, les seuils d’éligibilité, les dimensions descriptives, la largeur
 bord/cœur, la grille morphologique, les classes d’aire, la tolérance de plateau
 et la politique de vérité automatique des images pures. Toute modification de
 ces valeurs change le verrou du protocole.
@@ -24,15 +25,15 @@ values.
 
 The frozen protocol is identified by:
 
-- `PROTOCOL_VERSION = "8tracks_v3"`
-- `RESULTS_SCHEMA_VERSION = "8tracks_v2"`
+- `PROTOCOL_VERSION = "8tracks_v5"`
+- `RESULTS_SCHEMA_VERSION = "8tracks_v5"`
 - `PROTOCOL_STATUS = "frozen"`
-- `PROTOCOL_REGISTRATION_MODE = "prospective_amendment_tasks25_26"`
+- `PROTOCOL_REGISTRATION_MODE = "prospective_rebuild_before_internal_calibration"`
 
-La version `8tracks_v3`, gelée le 3 août 2026, ajoute avant inspection du batch
-3 les tâches 25–26 : seuils fixes de changement de domaine, conservation
-explicite des tracks non soutenus et verrou spatial global appris uniquement
-sur les cartes OOF d’images pures des batches 1–2.
+La version active `8tracks_v5` applique les tâches 25–26 aux modèles et runs
+sélectionnés de 03B. Les tables 03C utilisent la clé naturelle
+`(model_id, random_state)` et le `track_id`; les identifiants de fit et de
+projection restent dans les artefacts 03B où ils sont nécessaires.
 
 Run the blocking audit with:
 
@@ -150,28 +151,58 @@ Candidate and evaluation output schemas are documented by:
 
 The PCA shortlist from notebook 03 must remain scoped by matrix family. Use `build_pca_preprocessing_configs_by_matrix_family(...)` before running grid search or Optuna. This prevents preprocessings selected for `object_matrix` from being applied to `pixel_matrix`, and vice versa, unless the preprocessing appears in both PCA shortlist families.
 
+### Notebook 04A — audit de référence de la sélection 03B
+
+04A ne crée plus de domaine de recherche après la calibration interne. Il
+prend `selected_models`, `selected_runs` et `selected_thresholds` comme univers
+immuable, extrait uniquement les lignes de validation croisée correspondantes
+dans `threshold_metrics.parquet`, puis reconstruit les métriques avec les
+fonctions de 03B. Les réglages d'exécution et schémas sont centralisés dans :
+
+- `SIMCA_GRID_REQUIRED_03B_ARTIFACTS` et
+  `SIMCA_GRID_REQUIRED_03C_ARTIFACTS` ;
+- `SIMCA_GRID_THRESHOLD_METRIC_BATCH_SIZE` ;
+- `SIMCA_GRID_REFERENCE_METRIC_ATOL`, limité à la précision de sérialisation
+  des métriques amont en `float32` ;
+- `SIMCA_GRID_MODEL_REFERENCE_COLUMNS` et
+  `SIMCA_GRID_SELECTED_FOLD_METRIC_COLUMNS`.
+
+Les sorties ne contiennent ni `calibration_id`, ni `domain_config_id`, ni ID
+de groupe. Les tracks non soutenus par 03C sont conservés avec le statut
+`diagnostic_only`.
+
 ### Notebook 04B — benchmark Optuna 8-tracks
 
-04B est un benchmark par identifiant sur les sorties exhaustives de 04A. Les
-objectifs actifs et leurs directions sont dérivés, pour chaque
+04B est un contrôle négatif de couverture, pas une nouvelle sélection. Son
+univers est constitué des modèles évaluables de 03B et sa référence est la
+sélection 03B auditée par 04A. Pour chaque track, Optuna suggère seulement un
+`model_id` catégoriel existant et relit ses objectifs dans
+`model_metrics.parquet`. Le TPE ne reçoit donc aucune géométrie
+d'hyperparamètres et ses sorties sont interdites comme source downstream.
+
+Les objectifs actifs et leurs directions restent dérivés, pour chaque
 `evaluation_track`, de `SIMCA_EVALUATION_TRACK_SPECS` dans
 `SIMCA_OPTUNA_OBJECTIVE_SPECS`. Le nom historique
 `SIMCA_OPTUNA_DIRECTIONS` reste inchangé uniquement pour préserver le hash du
-protocole amont gelé ; 04B ne l'utilise pas pour construire ses études.
+protocole amont gelé.
 
 Les réglages centralisés sont notamment :
 
 - `SIMCA_OPTUNA_N_TRIALS_PER_TRACK` et `SIMCA_OPTUNA_N_STARTUP_TRIALS` ;
 - `SIMCA_OPTUNA_RANDOM_STATE`, avec un décalage stable E1–E8 ;
 - `SIMCA_OPTUNA_SAMPLER_NAME` et `SIMCA_OPTUNA_SAMPLER_MULTIVARIATE` ;
-- `SIMCA_OPTUNA_MIN_PARETO_RECALL` ;
-- `SIMCA_OPTUNA_UNIFORM_RECALL_DELTA_TOLERANCE` ;
-- `SIMCA_OPTUNA_TECHNICAL_PRUNE_STATUSES` ;
-- `SIMCA_ABLATION_*` pour le plan apparié gelé avant la prochaine exécution
-  8-tracks du batch 3.
+- `SIMCA_OPTUNA_BENCHMARK_RULE_VERSION`,
+  `SIMCA_OPTUNA_BENCHMARK_ROLE` et `SIMCA_OPTUNA_BENCHMARK_PARAMETER` ;
+- `SIMCA_OPTUNA_REQUIRED_03B_ARTIFACTS` et
+  `SIMCA_OPTUNA_REQUIRED_04A_ARTIFACTS` ;
+- `SIMCA_OPTUNA_BENCHMARK_SAMPLE_COLUMNS` et
+  `SIMCA_OPTUNA_BENCHMARK_SUMMARY_COLUMNS`.
 
-`SIMCA_OPTUNA_REUSE_GRID_METRICS` doit rester vrai : le notebook ne possède
-plus de chemin actif autorisant un refit ou un chargement du H5.
+`SIMCA_OPTUNA_REUSE_INTERNAL_METRICS` doit rester vrai : le notebook ne
+possède aucun chemin actif autorisant un refit, une nouvelle proposition de
+seuil ou un chargement du H5. Les tables ne répètent ni objectifs, ni réglages
+de modèles, ni identifiants de calibration ou d'étude ; la jointure éventuelle
+se fait uniquement par le `model_id` amont.
 
 ## Frozen Protocol Artifacts And Inference Plan
 
@@ -237,9 +268,9 @@ for SIMCA result files. When adding a new SIMCA output file, register its file n
 
 Notebook 04C uses the `SIMCA_CONCAT_REFIT_*` settings. Its candidate cap must
 remain `None`: a row-order cap would introduce an unregistered selection. The
-pool consists of the 04A protocol Pareto front for supported tracks and the
-diagnostic Pareto front for `unsupported_domain_shift` tracks. Optuna is only
-provenance.
+pool must consist of the 03B selected models that are marked `supported` by
+03C/04A. Models marked `diagnostic_only` remain audit results and must not be
+silently promoted to validation candidates. Optuna is only provenance.
 
 The expensive refit resumes through `SIMCA_CONCAT_REFIT_CHECKPOINT_ENABLED`
 and `SIMCA_CONCAT_REFIT_RESUME_FROM_CHECKPOINT`. Checkpoint shards are accepted

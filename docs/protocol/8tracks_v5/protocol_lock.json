@@ -1,0 +1,19 @@
+{
+  "amendment_justification": "2026-08-07: spectral acquisition validity amendment introduced after inspection of the raw reflectance domain. All 20 negative reflectance values were confined to the terminal 1702 nm band, indicating an unreliable terminal acquisition band. In addition, 1197 exact zero values were identified as 19 complete all-zero pixel spectra across the retained spectral axis, consistent with pixel-level no-data rather than valid reflectance measurements. The amendment therefore removes the 1702 nm terminal band globally and excludes spectrally invalid pixels before object aggregation, pixel sampling, matrix construction and preprocessing. No clipping or value imputation is introduced. The absorbance transformation retains its strict R > 0 requirement. These changes are motivated by physical and data-integrity diagnostics, not by downstream classification performance. All downstream models and selections must be recomputed under this amended protocol.2026-08-12: before rerunning notebook 03B, the internal calibration architecture was rebuilt. Random seeds are now treated as repeated executions of one model rather than selectable hyperparameters. Three-way threshold policies are compared by their prespecified quantile coordinates using cross-fitted predictions. False-negative risk is controlled by stricter hard constraints and a lexicographic FN-first threshold policy. Pareto selection remains unweighted. No batch-3 or batch-4 observation was used to define these rules.",
+  "amendment_policy": "Any scientific change after the freeze requires a new protocol version, a dated justification, and regeneration of every protocol artifact.",
+  "artifact_sha256": {
+    "checks": "62016230317f764ff06184bc4805523ede34fe0b957e34b903b17d790c21d4ce",
+    "inference_plan": "3b34fa6331ce14de3bb2b63202cbb821333cc15f162a494afa93d572f6dd9c86",
+    "manifest": "5e5cba7d1c8409e424b269d95b08956a8b5e798e598990b983fb42254a4f096b",
+    "planned_contrasts": "14abc9529b2fa764bc9412c0122e5c981c55a5ca82c8abd75c102db2f56a3bad"
+  },
+  "configuration_sha256": "0e05f0f9a3042ea0c04df4eb4dc31b69098fb8bec339a50850382bd8feed94dc",
+  "freeze_date": "2026-08-12",
+  "immutable": true,
+  "inference_plan_sha256": "10624351f77a2b18a37b8a51b766be759e4cc361cbb5458d22cf64a4e99bdf0e",
+  "lock_sha256": "af19c5f35d24a81a9c34d0a37c1f2776a31f5aecc70a9bfc1eecac42f8f91fa2",
+  "planned_contrasts_sha256": "5a557c1c13441366f7795cbed2504f70516af8dbbe8c135b7a9309805c9d9d74",
+  "protocol_version": "8tracks_v5",
+  "schema_version": "8tracks_v5",
+  "status": "frozen"
+}

@@ -1,48 +1,38 @@
-# Notebook 04A — Référence exhaustive SIMCA interne
+# Notebook 04A — Audit de référence des modèles SIMCA sélectionnés
 
-`notebooks/04A_simca_grid_search.ipynb` réalise les tâches 27 et 28 du
-protocole. Il ne réajuste aucun modèle : il réutilise le domaine, les folds,
-les seuils et les prédictions OOF de 03B, puis les statuts de domaine et le
-verrou spatial de 03C. Seuls les batches 1–2 sont autorisés.
+`notebooks/04A_simca_grid_search.ipynb` réalise les tâches 27 et 28 sans
+ouvrir une seconde sélection. Il audite exclusivement les modèles, runs,
+seuils et métriques de validation croisée verrouillés par 03B, puis associe
+le statut d'éligibilité de domaine produit par 03C.
 
 ## Contrat
 
-- Chaque `domain_config_id` reçoit exactement une ligne dans l’audit
-  technique, qu’il soit calculable ou en erreur.
-- Les seeds sont des répétitions d’une même `calibration_id`, pas des modèles
-  concurrents ni des doublons.
-- Les seuils 2-way/3-way sont appliqués tels quels. Aucun seuil n’est suggéré,
-  recalibré ou sélectionné dans 04A.
-- Le post-traitement spatial est celui verrouillé par 03C. La couche incertaine
-  reste inchangée.
-- Calculabilité, acceptabilité, éligibilité de domaine, équivalence et Pareto
-  sont cinq statuts distincts.
-- Les configurations calculables qui échouent aux contraintes restent dans
-  l’audit.
-- Les tracks non soutenus ne sont jamais supprimés silencieusement : chacun
-  des huit tracks possède une ligne de synthèse explicite.
-- Le Pareto est calculé séparément dans chaque `evaluation_track`, à partir des
-  objectifs centralisés dans `SIMCA_EVALUATION_TRACK_SPECS`. Aucun score
-  pondéré, plafond, quota ou filtre de diversité n’est utilisé.
-- La déduplication exacte choisit le représentant par ordre lexical, jamais par
-  performance. Une équivalence de sorties n’est destructive que si les
-  vecteurs OOF de scores et de décisions sont tous deux identiques.
+- 03B reste l'unique autorité de sélection. 04A ne calcule aucun nouveau
+  Pareto, ne modifie pas `selected_models` et ne propose aucun seuil.
+- La clé d'exécution reste `(model_id, random_state)`. La seule clé ajoutée aux
+  métriques est le couple scientifique `decision_scope, fold_id` ; aucun ID
+  synthétique n'est créé.
+- Le gros fichier `threshold_metrics.parquet` est filtré en flux par Arrow.
+  Seules les politiques effectivement sélectionnées sont converties et
+  agrégées.
+- Les métriques modèles sont reconstruites avec les mêmes fonctions que 03B,
+  puis comparées à `model_metrics.parquet` à la précision de sérialisation
+  `float32` centralisée dans `experiment_config`.
+- Les huit tracks sont conservés. Un track non soutenu par 03C est marqué
+  `diagnostic_only`, jamais éliminé silencieusement.
+- Le verrou spatial 03C est vérifié par son hash mais n'est pas réappliqué :
+  04A n'évalue aucune nouvelle carte et laisse cette opération au workflow
+  aval concerné.
 
 ## Sorties
 
-- `grid_configurations.parquet` : domaine principal dédupliqué par
-  `calibration_id`, avec les seeds et identifiants sources conservés.
-- `grid_fold_metrics.parquet` : métriques par seed, fold et image.
-- `grid_threshold_metrics.parquet` : agrégats, comptes, dispersion,
-  acceptabilité et éligibilité par `calibration_id`.
-- `grid_pareto_reference.parquet` : fronts diagnostique et protocolaire dans
-  les huit tracks.
-- `technical_audit.parquet` : audit exhaustif par `domain_config_id`.
-- `duplicate_groups.parquet` : groupes exacts et vecteurs de prédiction
-  identiques.
-- `calculable_not_acceptable.parquet` : configurations calculables hors
-  contraintes.
-- `grid_protocol.json` : provenance et empreintes SHA-256 des entrées/sorties.
+- `selected_model_reference.parquet` : une ligne par `model_id`, avec le track,
+  les cardinalités, le statut 03C et l'écart maximal de reproduction.
+- `selected_run_fold_metrics.parquet` : une ligne par
+  `(model_id, random_state, decision_scope, fold_id)`.
+- `audit_manifest.json` : hashes, cardinalités et déclaration explicite de
+  non-refit/non-resélection.
 
-Les prédictions OOF complètes ne sont pas recopiées dans 04A ; seules les
-métriques compactes et les signatures nécessaires à l’audit sont persistées.
+Les seuils, hyperparamètres, prédictions OOF et métriques modèles ne sont pas
+recopiés : ils restent dans les artefacts 03B faisant autorité et sont reliés
+aux sorties 04A par leurs empreintes SHA-256.

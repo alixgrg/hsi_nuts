@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import plotly.express as px
 
 from src.visualization.common import (
     apply_project_theme,
@@ -452,5 +453,192 @@ def plot_model_metric_ranking(
         width=width,
         height=height,
     )
+    apply_project_theme(fig)
+    return show_or_return(fig, show)
+
+
+def plot_selection_reasons(
+    audit: pd.DataFrame,
+    model_catalog: pd.DataFrame,
+    *,
+    selection_level: str | None = None,
+    title: str = "Éliminations par étape et raison",
+    show: bool = True,
+):
+    """Plot elimination counts without modifying the audit schema."""
+    validate_columns(
+        audit,
+        (
+            "selection_level",
+            "model_id",
+            "stage",
+            "decision",
+            "reason_code",
+        ),
+    )
+    validate_columns(
+        model_catalog,
+        ("model_id", "track_id"),
+    )
+    work = audit.merge(
+        model_catalog[["model_id", "track_id"]],
+        on="model_id",
+        how="left",
+        validate="many_to_one",
+    )
+    if selection_level is not None:
+        work = work.loc[
+            work["selection_level"].eq(selection_level)
+        ]
+    eliminated = work.loc[
+        work["decision"].eq("eliminated")
+    ]
+    summary = (
+        eliminated.groupby(
+            ["track_id", "stage", "reason_code"],
+            as_index=False,
+            sort=False,
+            dropna=False,
+        )
+        .size()
+        .rename(columns={"size": "n_eliminated"})
+    )
+    fig = px.bar(
+        summary,
+        x="stage",
+        y="n_eliminated",
+        color="reason_code",
+        facet_col="track_id",
+        facet_col_wrap=4,
+        title=title,
+        labels={
+            "stage": "Étape",
+            "n_eliminated": "Candidats éliminés",
+            "reason_code": "Raison",
+        },
+    )
+    fig.update_xaxes(tickangle=45)
+    apply_project_theme(fig)
+    return show_or_return(fig, show)
+
+
+def plot_threshold_tradeoff(
+    candidate_metrics: pd.DataFrame,
+    selected_metrics: pd.DataFrame,
+    model_catalog: pd.DataFrame,
+    *,
+    track_id: str,
+    decision_scope: str,
+    fn_limit: float | None = None,
+    fp_limit: float | None = None,
+    show: bool = True,
+):
+    """Plot all candidate policies and highlight selected policies."""
+    required = (
+        "model_id",
+        "decision_scope",
+        "target_miss_rate",
+        "false_accept_rate",
+        "lower_quantile",
+        "upper_quantile",
+        "vote_threshold",
+    )
+    validate_columns(candidate_metrics, required)
+    validate_columns(model_catalog, ("model_id", "track_id"))
+
+    work = candidate_metrics.merge(
+        model_catalog[["model_id", "track_id"]],
+        on="model_id",
+        how="left",
+        validate="many_to_one",
+    )
+    work = work.loc[
+        work["track_id"].astype(str).eq(str(track_id))
+        & work["decision_scope"].eq(decision_scope)
+    ].copy()
+
+    policy_columns = [
+        "model_id",
+        "decision_scope",
+        "lower_quantile",
+        "upper_quantile",
+        "vote_threshold",
+    ]
+    selected = selected_metrics[
+        policy_columns
+    ].drop_duplicates().copy()
+    for column in policy_columns[2:]:
+        work[f"_{column}"] = pd.to_numeric(
+            work[column],
+            errors="coerce",
+        ).fillna(-1.0)
+        selected[f"_{column}"] = pd.to_numeric(
+            selected[column],
+            errors="coerce",
+        ).fillna(-1.0)
+
+    merge_columns = [
+        "model_id",
+        "decision_scope",
+        "_lower_quantile",
+        "_upper_quantile",
+        "_vote_threshold",
+    ]
+    selected = selected[merge_columns].assign(selected=True)
+    work = work.merge(
+        selected,
+        on=merge_columns,
+        how="left",
+        validate="many_to_one",
+    )
+    work["selected"] = work["selected"].fillna(False)
+
+    if work["vote_threshold"].notna().any():
+        color_column = "vote_threshold"
+    elif "uncertain_rate" in work:
+        color_column = "uncertain_rate"
+    else:
+        color_column = None
+
+    fig = px.scatter(
+        work,
+        x="false_accept_rate",
+        y="target_miss_rate",
+        color=color_column,
+        symbol="selected",
+        hover_data=[
+            "model_id",
+            "lower_quantile",
+            "upper_quantile",
+            "vote_threshold",
+            "worst_target_miss_rate",
+            "worst_false_accept_rate",
+        ],
+        title=(
+            f"{track_id} — politiques {decision_scope}: "
+            "faux positifs versus faux négatifs"
+        ),
+        labels={
+            "false_accept_rate": "Taux de faux positifs",
+            "target_miss_rate": "Taux de faux négatifs",
+            "selected": "Sélectionnée",
+        },
+    )
+    if fp_limit is not None:
+        fig.add_vline(
+            x=float(fp_limit),
+            line_dash="dot",
+            line_color="darkorange",
+            annotation_text="limite FP",
+        )
+    if fn_limit is not None:
+        fig.add_hline(
+            y=float(fn_limit),
+            line_dash="dash",
+            line_color="firebrick",
+            annotation_text="limite FN",
+        )
+    fig.update_xaxes(tickformat=".0%")
+    fig.update_yaxes(tickformat=".0%")
     apply_project_theme(fig)
     return show_or_return(fig, show)

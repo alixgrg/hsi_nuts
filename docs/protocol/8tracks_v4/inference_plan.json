@@ -1,0 +1,150 @@
+{
+  "amendment_justification": "2026-08-07: spectral acquisition validity amendment introduced after inspection of the raw reflectance domain. All 20 negative reflectance values were confined to the terminal 1702 nm band, indicating an unreliable terminal acquisition band. In addition, 1197 exact zero values were identified as 19 complete all-zero pixel spectra across the retained spectral axis, consistent with pixel-level no-data rather than valid reflectance measurements. The amendment therefore removes the 1702 nm terminal band globally and excludes spectrally invalid pixels before object aggregation, pixel sampling, matrix construction and preprocessing. No clipping or value imputation is introduced. The absorbance transformation retains its strict R > 0 requirement. These changes are motivated by physical and data-integrity diagnostics, not by downstream classification performance. All downstream models and selections must be recomputed under this amended protocol.",
+  "amendment_policy": "Any scientific change after the freeze requires a new protocol version, a dated justification, and regeneration of every protocol artifact.",
+  "bootstrap": {
+    "confidence_level": 0.95,
+    "group_column": "source_image",
+    "method": "clustered_nonparametric_bootstrap",
+    "n_resamples": 2000,
+    "objects_and_pixels_remain_grouped": true,
+    "random_state": 42,
+    "report_batches_separately": true
+  },
+  "data_roles": {
+    "calibration_batches": [
+      1,
+      2
+    ],
+    "external_test_batches": [
+      4
+    ],
+    "external_test_opening_rule": "Open only after the eight-track panel and all thresholds are locked; never retune after opening.",
+    "selection_validation_batches": [
+      3
+    ]
+  },
+  "freeze_date": "2026-08-07",
+  "hypotheses": [
+    {
+      "hypothesis_id": "H1",
+      "name": "object_training_family",
+      "question": "At fixed object projection and decision mode, does the training matrix family change object-level performance?",
+      "scope": "primary"
+    },
+    {
+      "hypothesis_id": "H2",
+      "name": "pixel_training_family",
+      "question": "At fixed pixel projection and decision mode, does the training matrix family change pixel and small-fragment performance?",
+      "scope": "primary"
+    },
+    {
+      "hypothesis_id": "H3",
+      "name": "train_projection_transfer",
+      "question": "Does the interaction between training family and projection level create a measurable standardized domain shift?",
+      "scope": "primary"
+    },
+    {
+      "hypothesis_id": "H4",
+      "name": "selective_rejection",
+      "question": "At fixed training family and projection level, does 3-way decision improve the risk-coverage trade-off over 2-way?",
+      "scope": "primary"
+    }
+  ],
+  "multiplicity": {
+    "exploratory_analyses_must_be_labelled": true,
+    "families": [
+      "H1",
+      "H2",
+      "H3",
+      "H4"
+    ],
+    "method": "holm_within_hypothesis_family",
+    "report_all_planned_estimates_and_intervals": true
+  },
+  "n_planned_contrasts": 22,
+  "planned_contrasts_sha256": "e8b988fe609328cc2c34ef76cfbefb2fac38cb1cc01633dd1766c90ee922bbdc",
+  "practical_tolerances": {
+    "absolute_rate_difference": 0.05,
+    "standardized_projection_shift": 0.2
+  },
+  "primary_inference_unit": "source_image",
+  "prior_evidence": {
+    "batch4_blinding_claim": "batch3_results_precede_spectral_validity_amendment",
+    "scope": "All outputs generated before this freeze are supporting or exploratory and cannot redefine the primary contrasts.",
+    "status": "legacy_exploratory"
+  },
+  "protocol_version": "8tracks_v4",
+  "registration_mode": "prospective_amendment_after_batch3_before_external_test",
+  "schema_version": "8tracks_v3",
+  "selection": {
+    "hard_constraints_before_pareto": true,
+    "pareto_scope": "evaluation_track",
+    "technical_filters_first": true,
+    "tie_break": "lexicographic",
+    "tie_break_priority": [
+      "risk_guardrails",
+      "worst_image",
+      "stability",
+      "simplicity",
+      "compute_cost"
+    ],
+    "weighted_scores_allowed": false
+  },
+  "spectral_data_validity": {
+    "absorbance_domain_policy": "R must remain strictly positive; clipping and imputation are forbidden",
+    "balanced_pixel_sampling_policy": "sampling occurs only after pixel validity filtering",
+    "invalid_pixel_stage": "identified during QC and excluded before matrix representation construction",
+    "n_remove_start": 6,
+    "n_stop_end": 67,
+    "object_aggregation_policy": "object mean and median spectra are recomputed from analysis-valid pixels only",
+    "pixel_validity_policy": {
+      "all_zero_atol": 0.0,
+      "clipping": "forbidden",
+      "exclude_all_zero": true,
+      "imputation": "forbidden",
+      "invalid_pixel_action": "exclude_from_all_spectral_representations",
+      "object_action": "retain_object_if_at_least_one_analysis_valid_pixel_remains",
+      "require_finite": true,
+      "require_strictly_positive": true,
+      "rule_version": "spectral_pixel_validity_v1"
+    },
+    "raw_band_count": 69,
+    "raw_spectral_range_nm": [
+      889.0,
+      1702.0
+    ],
+    "terminal_band_policy": {
+      "action_on_failure": "exclude_terminal_band_before_database_freeze",
+      "exclude_all_zero_pixels_from_diagnostics": true,
+      "flag_any_negative_reflectance": true,
+      "n_terminal_bands": 5,
+      "negative_reflectance_rule": "any_negative_blocks_terminal_band",
+      "rule_version": "terminal_band_qc_v1"
+    }
+  },
+  "status": "frozen",
+  "threshold_policy": {
+    "batch3_or_batch4_threshold_learning_forbidden": true,
+    "direct_object_or_pixel_decision": "simca_margin",
+    "fixed_2way_pixel_to_object_vote": [
+      0.75,
+      0.8
+    ],
+    "fixed_vote_scope": [
+      "E3",
+      "E7"
+    ],
+    "three_way_threshold_source": "track-specific grouped OOF calibration on batches 1-2"
+  },
+  "truth_policy": {
+    "ambiguity_policy_id": "separate_validity_mask",
+    "boundary_policy_id": "majority_pixel_area",
+    "double_annotation_policy": "all_selected_images",
+    "mask_semantics_id": "binary_peanut_presence",
+    "object_truth": "object_exact",
+    "pixel_fragment_primary_truth": "pixel_annotated",
+    "positive_class": "peanut",
+    "target_class": "peanut",
+    "weak_or_indirect_truth_is_not_primary": true
+  }
+}

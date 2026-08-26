@@ -11,6 +11,7 @@ import pandas as pd
 from src import experiment_config as expcfg
 from src.protocol_governance import canonical_json, sha256_payload
 
+from src.spectra.band_selection import spectral_pixel_validity_report
 
 QC_ALERT_COLUMNS = list(expcfg.QC_ALERT_OUTPUT_COLUMNS)
 QC_FLAG_COLUMNS = QC_ALERT_COLUMNS
@@ -203,10 +204,9 @@ def _first_axis(records: Mapping):
 def build_image_qc_table(
     image_db: dict,
     *,
-    qc_policy: dict | None = None,
+    qc_policy=expcfg.QC_POLICY,
 ) -> pd.DataFrame:
     """Build the compact image QC output used by notebooks 00 and 01."""
-    policy = dict(expcfg.QC_POLICY if qc_policy is None else qc_policy)
     reference_axis = _first_axis(image_db)
     rows = []
 
@@ -239,10 +239,10 @@ def build_image_qc_table(
         fatal = (
             cube.ndim != 3
             or not numeric
-            or invalid_rate > float(policy.get("max_invalid_pixel_rate", 0.0))
+            or invalid_rate > float(qc_policy.get("max_invalid_pixel_rate", 0.0))
             or not axis_matches
             or (
-                bool(policy.get("exclude_empty_mask", True))
+                bool(qc_policy.get("exclude_empty_mask", True))
                 and (not mask.size or int(mask.sum()) == 0)
             )
         )
@@ -268,7 +268,7 @@ def build_image_qc_table(
                 "zero_variance_band_rate": _zero_variance_band_rate(
                     cube,
                     epsilon=float(
-                        policy.get(
+                        qc_policy.get(
                             "zero_variance_epsilon",
                             expcfg.QC_ZERO_VARIANCE_EPSILON,
                         )
@@ -528,6 +528,7 @@ def build_object_qc_table(
     object_db: dict,
     image_db: dict | None = None,
     *,
+    pixel_qc_df: pd.DataFrame | None = None,
     include_geometry: bool = True,
     border_margin: int = 0,
     merge_warning_thresholds: dict | None = None,
@@ -548,6 +549,34 @@ def build_object_qc_table(
     )
 
     nearest_by_object = _nearest_bbox_distances(object_db)
+
+    pixel_qc_by_object = {}
+    if pixel_qc_df is not None and not pixel_qc_df.empty:
+        for object_id, group in pixel_qc_df.groupby(
+            "object_id",
+            sort=False,
+        ):
+            n_total = len(group)
+            n_analysis_valid = int(
+                group["analysis_valid"].sum()
+            )
+            pixel_qc_by_object[str(object_id)] = {
+                "n_analysis_valid_pixels": n_analysis_valid,
+                "n_analysis_invalid_pixels": (
+                    n_total - n_analysis_valid
+                ),
+                "analysis_invalid_pixel_rate": (
+                    float((n_total - n_analysis_valid) / n_total)
+                    if n_total
+                    else np.nan
+                ),
+                "n_all_zero_pixels": int(
+                    group["all_zero_spectrum"].sum()
+                ),
+                "n_nonpositive_pixels": int(
+                    group["has_nonpositive_reflectance"].sum()
+                ),
+            }
 
     rows = []
     for object_id, obj in object_db.items():
@@ -598,12 +627,20 @@ def build_object_qc_table(
         )
         too_small = area < min_area
         requires_review = bool(possible_merged or too_small)
+        pixel_stats = pixel_qc_by_object.get(str(object_id), {
+                    "n_analysis_valid_pixels": n_valid,
+                    "n_analysis_invalid_pixels": 0,
+                    "analysis_invalid_pixel_rate": 0.0,
+                    "n_all_zero_pixels": 0,
+                    "n_nonpositive_pixels": 0,
+                })
         fatal = (
             not numeric
             or spectra.ndim != 2
             or n_nan + n_inf > 0
             or n_pixels != area
             or spectra.shape != (n_pixels, n_bands)
+            or pixel_stats["n_analysis_valid_pixels"] ==0
         )
 
         status = str(obj.get("object_status", "accepted"))
@@ -618,7 +655,7 @@ def build_object_qc_table(
 
         mean_spectrum = np.asarray(obj.get("mean_spectrum"), dtype=float)
         median_spectrum = np.asarray(obj.get("median_spectrum"), dtype=float)
-        std_spectrum = np.asarray(obj.get("std_spectrum"), dtype=float)
+        std_spectrum = np.asarray(obj.get("std_spectrum"), dtype=float)        
         rows.append(
             {
                 "object_id": str(object_id),
@@ -654,6 +691,7 @@ def build_object_qc_table(
                 "too_small": too_small,
                 "requires_segmentation_review": requires_review,
                 "object_status": status,
+                **pixel_stats,
             }
         )
 
@@ -669,6 +707,7 @@ def build_object_qc_table(
 def add_robust_spectral_qc(
     object_qc_df: pd.DataFrame,
     object_db: Mapping,
+    pixel_validity_policy=expcfg.SPECTRAL_PIXEL_VALIDITY_POLICY,
     *,
     group_cols=expcfg.QC_SPECTRAL_GROUP_COLUMNS,
     threshold=expcfg.QC_SPECTRAL_OUTLIER_DISTANCE_THRESHOLD,
@@ -690,9 +729,24 @@ def add_robust_spectral_qc(
     for object_id in out["object_id"].astype(str):
         if object_id not in object_db:
             raise KeyError(f"Object {object_id!r} is absent from object_db.")
-        spectra.append(
-            np.asarray(object_db[object_id]["mean_spectrum"], dtype=float)
+        # spectra.append(
+        #     np.asarray(object_db[object_id]["mean_spectrum"], dtype=float)
+        # )
+        obj = object_db[object_id]
+        X_obj = np.asarray(obj["spectra"], dtype=float)
+        validity = spectral_pixel_validity_report(
+            X_obj,
+            policy=pixel_validity_policy,
         )
+        valid_mask = validity["valid_mask"]
+        if not valid_mask.any():
+            raise ValueError(
+                f"Object {object_id!r} has no valid spectral pixel."
+            )
+        spectra.append(
+            np.mean(X_obj[valid_mask], axis=0)
+        )
+
     lengths = {len(row) for row in spectra}
     if len(lengths) != 1:
         raise ValueError("Object mean spectra have inconsistent lengths.")
@@ -1540,10 +1594,17 @@ def build_qc_protocol(
     exclusion_manifest: pd.DataFrame,
     *,
     protocol_version=expcfg.PROTOCOL_VERSION,
+    pixel_exclusion_manifest=None,
     qc_policy=None,
+    spectral_pixel_policy=expcfg.SPECTRAL_PIXEL_VALIDITY_POLICY,
 ) -> pd.DataFrame:
     """Build the one-row QC closure contract."""
     policy = expcfg.QC_POLICY if qc_policy is None else qc_policy
+    pixel_exclusion_manifest = (
+        pd.DataFrame()
+        if pixel_exclusion_manifest is None
+        else pixel_exclusion_manifest
+    )
     n_pending = int(
         (~qc_review_df["review_status"].eq(
             expcfg.QC_REVIEW_REQUIRED_STATUS
@@ -1554,11 +1615,14 @@ def build_qc_protocol(
             {
                 "protocol_version": str(protocol_version),
                 "qc_policy_hash": sha256_payload(policy),
+                "spectral_pixel_policy_hash": sha256_payload(spectral_pixel_policy),
+                "pixel_exclusion_hash": _frame_hash(pixel_exclusion_manifest),
                 "alerts_hash": _frame_hash(qc_alerts_df),
                 "review_hash": _frame_hash(qc_review_df),
                 "n_alerts": int(len(qc_alerts_df)),
                 "n_pending": n_pending,
                 "n_excluded": int(len(exclusion_manifest)),
+                "n_pixel_excluded": int(len(pixel_exclusion_manifest)),
                 "closure_status": (
                     "closed" if n_pending == 0 else "pending"
                 ),
@@ -1583,3 +1647,237 @@ def qc_requires_new_cycle(qc_flags_df: pd.DataFrame) -> bool:
         pending_review.any()
         or qc_flags_df["qc_status"].eq("corrected_segmentation").any()
     )
+
+
+def build_terminal_band_qc_table(
+    object_db: Mapping,
+    *,
+    raw_band_indices=None,
+    policy=None,
+) -> pd.DataFrame:
+    """
+    Diagnose reflectance integrity band by band, with emphasis on
+    terminal retained wavelengths.
+
+    All-zero spectra can be excluded from this diagnostic because they
+    represent pixel-level no-data rather than a band-specific defect.
+    """
+    policy = dict(
+        expcfg.TERMINAL_BAND_QC_POLICY
+        if policy is None
+        else policy
+    )
+
+    spectra_parts = []
+    reference_wavelengths = None
+
+    for object_id, obj in object_db.items():
+        spectra = np.asarray(obj.get("spectra"), dtype=float)
+
+        if spectra.ndim != 2:
+            raise ValueError(
+                f"Object {object_id!r}: spectra must be 2D, "
+                f"got shape={spectra.shape}."
+            )
+
+        wavelengths = np.asarray(obj.get("wavelengths"), dtype=float)
+
+        if reference_wavelengths is None:
+            reference_wavelengths = wavelengths
+        elif not np.array_equal(wavelengths, reference_wavelengths):
+            raise ValueError(
+                f"Inconsistent wavelength axis for object {object_id!r}."
+            )
+
+        spectra_parts.append(spectra)
+
+    if not spectra_parts:
+        return pd.DataFrame()
+
+    X = np.vstack(spectra_parts)
+
+    finite_rows = np.isfinite(X).all(axis=1)
+
+    if policy.get(
+        "exclude_all_zero_pixels_from_diagnostics",
+        True,
+    ):
+        all_zero_rows = np.all(X == 0.0, axis=1)
+    else:
+        all_zero_rows = np.zeros(len(X), dtype=bool)
+
+    diagnostic_rows = finite_rows & ~all_zero_rows
+    X_qc = X[diagnostic_rows]
+
+    if len(X_qc) == 0:
+        raise ValueError(
+            "No valid spectrum is available for terminal-band QC."
+        )
+
+    n_bands = X_qc.shape[1]
+    n_terminal = min(
+        int(policy.get("n_terminal_bands", 5)),
+        n_bands,
+    )
+
+    if raw_band_indices is None:
+        raw_band_indices = np.arange(n_bands)
+    else:
+        raw_band_indices = np.asarray(raw_band_indices, dtype=int)
+
+    if len(raw_band_indices) != n_bands:
+        raise ValueError(
+            "raw_band_indices must match the retained spectral axis."
+        )
+
+    rows = []
+
+    for j in range(n_bands):
+        values = X_qc[:, j]
+
+        n_negative = int(np.count_nonzero(values < 0.0))
+        n_zero = int(np.count_nonzero(values == 0.0))
+        n_nonpositive = int(np.count_nonzero(values <= 0.0))
+
+        is_terminal = j >= n_bands - n_terminal
+
+        failed = bool(
+            is_terminal
+            and policy.get("flag_any_negative_reflectance", True)
+            and n_negative > 0
+        )
+
+        rows.append(
+            {
+                "processed_band_index": int(j),
+                "raw_band_index": int(raw_band_indices[j]),
+                "wavelength_nm": float(reference_wavelengths[j]),
+                "n_pixels_evaluated": int(len(values)),
+                "n_negative": n_negative,
+                "negative_rate": float(n_negative / len(values)),
+                "n_zero": n_zero,
+                "zero_rate": float(n_zero / len(values)),
+                "n_nonpositive": n_nonpositive,
+                "min_reflectance": float(np.min(values)),
+                "q001_reflectance": float(
+                    np.quantile(values, 0.001)
+                ),
+                "q01_reflectance": float(
+                    np.quantile(values, 0.01)
+                ),
+                "is_terminal": is_terminal,
+                "terminal_qc_status": (
+                    "fail" if failed else "pass"
+                ),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def assert_terminal_bands_valid(
+    terminal_band_qc_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Block database freezing when a retained terminal band fails QC."""
+    failed = terminal_band_qc_df.loc[
+        terminal_band_qc_df["is_terminal"]
+        & terminal_band_qc_df["terminal_qc_status"].eq("fail")
+    ]
+
+    if not failed.empty:
+        details = failed[
+            [
+                "raw_band_index",
+                "wavelength_nm",
+                "n_negative",
+                "min_reflectance",
+            ]
+        ].to_dict("records")
+
+        raise RuntimeError(
+            "Retained terminal spectral bands failed QC. "
+            f"Review N_STOP_END before freezing the database: {details}"
+        )
+
+    return terminal_band_qc_df
+
+
+def build_pixel_spectral_qc_table(
+    object_db: Mapping,
+    *,
+    policy=expcfg.SPECTRAL_PIXEL_VALIDITY_POLICY,
+)->pd.DataFrame:
+    """
+    Diagnose reflectance integrity pixel by pixel, with emphasis on
+    spectral outliers.
+
+    All-zero spectra can be excluded from this diagnostic because they
+    represent pixel-level no-data rather than a band-specific defect.
+    """
+    rows = []
+
+    for object_id, obj in object_db.items():
+        spectra = np.asarray(obj.get("spectra"), dtype=float)
+        positions = np.asarray(obj.get("positions_global"))
+
+        if spectra.ndim != 2:
+            raise ValueError(
+                f"Object {object_id!r}: spectra must be 2D, "
+                f"got shape={spectra.shape}."
+            )
+        if (
+            positions.ndim !=2
+            or positions.shape[1] !=2
+            or len(positions) != len(spectra)
+        ):
+            raise ValueError(
+                f"Object {object_id!r}: Inconsistent shape for positions."
+            )
+        
+        report = spectral_pixel_validity_report(spectra, policy=policy)
+
+        finite_values = np.isfinite(spectra)
+        min_reflectance = np.min(
+            np.where(finite_values, spectra, np.inf), axis=1
+        )
+        min_reflectance[~np.isfinite(min_reflectance)] = np.nan
+
+        for pixel_index in range(len(spectra)):
+            rows.append(
+                {
+                    "object_id": str(object_id),
+                    "source_image": str(obj.get("source_clean_key", obj.get("source_image"))),
+                    "batch": obj.get("batch"),
+                    "label": obj.get("object_nut_type"),
+                    "pixel_index": int(pixel_index),
+                    "row": int(positions[pixel_index, 0]),
+                    "col": int(positions[pixel_index, 1]),
+                    "n_bands": int(spectra.shape[1]),
+                    "n_zero": int(report['n_zero'][pixel_index]),
+                    "n_nonpositive": int(report["n_nonpositive"][pixel_index]),
+                    "zero_fraction": float(
+                        report["n_zero"][pixel_index]
+                        / spectra.shape[1]
+                    ),
+                    "min_reflectance": float(
+                        min_reflectance[pixel_index]
+                    ),
+                    "finite": bool(
+                        report["finite"][pixel_index]
+                    ),
+                    "all_zero_spectrum": bool(
+                        report["all_zero"][pixel_index]
+                    ),
+                    "has_nonpositive_reflectance": bool(
+                        report["has_nonpositive"][pixel_index]
+                    ),
+                    "analysis_valid": bool(
+                        report["valid_mask"][pixel_index]
+                    ),
+                    "invalid_reason": str(
+                        report["reason"][pixel_index]
+                    ),
+                }
+            )
+
+    return pd.DataFrame(rows, columns=expcfg.PIXEL_SPECTRAL_QC_COLUMNS)

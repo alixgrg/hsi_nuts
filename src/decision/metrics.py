@@ -565,27 +565,6 @@ def metrics_by_group(
     return pd.DataFrame(rows)
 
 
-def add_detection_score(
-    metrics_df: pd.DataFrame,
-    sensitivity_weight: float = 10.0,
-    specificity_weight: float = 1.0,
-    score_col: str = "detection_score",
-) -> pd.DataFrame:
-    """
-    Add a scalar score useful for model ranking.
-
-    High score favors target sensitivity first, then non-target specificity.
-    """
-    df = metrics_df.copy()
-
-    sens = df["target_sensitivity"].astype(float)
-    spec = df["non_target_specificity"].astype(float)
-
-    df[score_col] = sensitivity_weight * sens + specificity_weight * spec
-
-    return df
-
-
 def add_binary_confusion_case(
     df: pd.DataFrame,
     target_class: str = DEFAULT_TARGET_CLASS,

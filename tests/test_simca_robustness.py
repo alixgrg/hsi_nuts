@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -9,7 +12,9 @@ from src.workflows.simca_robustness import (
     build_border_core_skip_table,
     build_duplicated_candidate_review,
     build_pareto_diagnostics,
+    build_planned_contrast_results,
     build_random_state_stability_panel,
+    build_risk_coverage_curves,
     select_track_primary_or_available_metrics,
     summarize_duplicated_candidate_review,
     summarize_random_state_stability_metrics,
@@ -59,11 +64,54 @@ def _metric_row(**overrides):
     return row
 
 
+def _selection_unit_row(**overrides):
+    row = {
+        "evaluation_track": "object_train__object_projection__2way",
+        "track_id": "E1",
+        "calibration_id": "cal_a",
+        "selection_unit_id": "cal_a",
+        "decision_mode": "2way",
+        "projection_level": "object_projection",
+        "matrix_method": "object_mean",
+        "balanced_pixel_strategy": "not_applicable",
+        "target_miss_rate": 0.05,
+        "false_accept_rate": 0.10,
+        "balanced_accuracy": 0.925,
+        "safety_target_miss_rate": 0.05,
+        "safety_false_accept_rate": 0.10,
+        "safety_balanced_accuracy": 0.925,
+        "pareto_pool_status": "eligible",
+        "pareto_pool_reason": "",
+        "all_member_seeds_calculable": True,
+        "eligibility_status": "eligible",
+    }
+    row.update(overrides)
+    return row
+
+
 def test_validate_no_pure_test_inputs_rejects_forbidden_stage():
     df = pd.DataFrame([_metric_row(evaluation_stage="pure_test_batch_4")])
 
     with pytest.raises(ValueError, match="must not consume pure-test"):
         validate_no_pure_test_inputs(df)
+
+
+def test_notebook05_orchestrates_frozen_upstream_outputs_without_legacy_scoring():
+    path = Path(__file__).resolve().parents[1] / "notebooks" / "05_simca_validation_robustness.ipynb"
+    notebook = json.loads(path.read_text(encoding="utf-8"))
+    source = "\n".join(
+        "".join(cell.get("source", [])) for cell in notebook["cells"]
+    )
+
+    assert "build_locked_validation_candidate_pool" in source
+    assert "projection_eligibility" in source
+    assert "ablation_plan" in source
+    assert "validation_metrics" in source
+    assert "select_final_models_lexicographic" in source
+    assert "SIMCA_ROBUSTNESS_PERSISTED_CANDIDATE_COLUMNS" in source
+    assert "add_simca_robustness_scores" not in source
+    assert "select_top_with_diversity" not in source
+    assert '"batch4_loaded": False' in source
 
 
 def test_select_track_primary_falls_back_to_secondary_when_primary_absent():
@@ -92,7 +140,7 @@ def test_select_track_primary_falls_back_to_secondary_when_primary_absent():
     assert selected.loc[0, "metric_level"] == "object"
 
 
-def test_add_simca_robustness_scores_adds_flags_and_track_rank():
+def test_add_simca_robustness_scores_is_flags_only_without_rank_or_score():
     df = pd.DataFrame(
         [
             _metric_row(selected_config_id="bad_2way", fn_rate=0.20, fp_rate=0.30, balanced_accuracy=0.70),
@@ -115,95 +163,341 @@ def test_add_simca_robustness_scores_adds_flags_and_track_rank():
 
     bad_flags = scored.loc[scored["selected_config_id"].eq("bad_2way"), "robustness_flags"].iloc[0]
     three_way_flags = scored.loc[scored["selected_config_id"].eq("uncertain_3way"), "robustness_flags"].iloc[0]
-    good_rank = scored.loc[scored["selected_config_id"].eq("good_2way"), "robustness_rank_in_track"].iloc[0]
-
     assert "high_fn_rate" in bad_flags
     assert "high_fp_rate" in bad_flags
     assert "low_balanced_accuracy" in bad_flags
     assert "high_uncertain_rate" in three_way_flags
-    assert int(good_rank) == 1
+    assert "robustness_score" not in scored
+    assert "robustness_rank_in_track" not in scored
 
 
 def test_build_pareto_diagnostics_marks_dominated_rows():
     df = pd.DataFrame(
         [
-            _metric_row(selected_config_id="front_a", fn_rate=0.05, fp_rate=0.05, balanced_accuracy=0.95),
-            _metric_row(selected_config_id="dominated", fn_rate=0.20, fp_rate=0.20, balanced_accuracy=0.70),
-            _metric_row(selected_config_id="tradeoff", fn_rate=0.00, fp_rate=0.40, balanced_accuracy=0.80),
+            _selection_unit_row(calibration_id="front_a", selection_unit_id="front_a", target_miss_rate=0.05, false_accept_rate=0.05),
+            _selection_unit_row(calibration_id="dominated", selection_unit_id="dominated", target_miss_rate=0.20, false_accept_rate=0.20),
+            _selection_unit_row(calibration_id="tradeoff", selection_unit_id="tradeoff", target_miss_rate=0.00, false_accept_rate=0.40),
         ]
     )
 
-    front, annotated, audit = build_pareto_diagnostics(df, decision_mode="2way")
+    front, annotated, audit = build_pareto_diagnostics(df)
 
-    assert set(front["selected_config_id"]) == {"front_a", "tradeoff"}
-    assert not bool(annotated.loc[annotated["selected_config_id"].eq("dominated"), "is_pareto_2way"].iloc[0])
-    assert int(audit["n_dominated"].sum()) == 1
+    assert set(front["calibration_id"]) == {"front_a", "tradeoff"}
+    assert not bool(annotated.loc[annotated["calibration_id"].eq("dominated"), "is_protocol_pareto"].iloc[0])
+    assert int((audit["n_protocol_eligible"] - audit["n_protocol_pareto"]).sum()) == 1
 
 
-def test_build_ablation_diagnostics_summarizes_factor_values():
+def test_build_ablation_diagnostics_uses_only_frozen_paired_plan():
     df = pd.DataFrame(
         [
-            _metric_row(selected_config_id="cfg_4", n_components=4, fn_rate=0.0, fp_rate=0.1, balanced_accuracy=0.95),
-            _metric_row(selected_config_id="cfg_8", n_components=8, fn_rate=0.1, fp_rate=0.2, balanced_accuracy=0.85),
+            {
+                **_selection_unit_row(calibration_id="cfg_4"),
+                "aggregation_level": "overall",
+                "status": "calculable",
+                "random_state": 0,
+                "target_miss_rate": 0.0,
+                "false_accept_rate": 0.1,
+            },
+            {
+                **_selection_unit_row(calibration_id="cfg_8"),
+                "aggregation_level": "overall",
+                "status": "calculable",
+                "random_state": 0,
+                "target_miss_rate": 0.1,
+                "false_accept_rate": 0.2,
+            },
         ]
     )
-
-    ablation = build_ablation_diagnostics(df, factor_cols=("n_components",))
-
-    assert set(ablation["factor"]) == {"n_components"}
-    assert set(ablation["factor_value"]) == {"4", "8"}
-    assert "robustness_score_mean" in ablation.columns
-
-
-def test_build_random_state_stability_panel_prefers_balanced_pixels_when_limited():
-    candidate_panel = pd.DataFrame(
+    plan = pd.DataFrame(
         [
-            _metric_row(selected_config_id="object_cfg", matrix_method="object_mean"),
-            _metric_row(
-                selected_config_id="balanced_cfg",
-                matrix_family="pixel_matrix",
-                matrix_method="balanced_pixels",
-                training_matrix_id="balanced_pixel_random_m40",
-            ),
+            {
+                "ablation_id": "abl_1",
+                "evaluation_track": "object_train__object_projection__2way",
+                "track_id": "E1",
+                "contrast_type": "paired_variant",
+                "factor": "n_components",
+                "reference_config_id": "cfg_4",
+                "ablated_config_id": "cfg_8",
+                "reference_level": "4",
+                "ablated_level": "8",
+                "eligibility_status": "eligible",
+                "plan_status": "planned",
+                "unsupported_reason": "",
+                "registration_status": "frozen",
+                "preregistered": True,
+            }
         ]
     )
+
+    ablation = build_ablation_diagnostics(
+        df,
+        ablation_plan_df=plan,
+        metric_cols=("target_miss_rate", "false_accept_rate"),
+    )
+
+    assert set(ablation["ablation_id"]) == {"abl_1"}
+    assert set(ablation["effect_status"]) == {"estimated_paired"}
+    assert set(ablation["metric"]) == {"target_miss_rate", "false_accept_rate"}
+    assert "robustness_score" not in ablation.columns
+
+
+def test_threshold_ablation_reuses_saved_margins_without_refit():
     metrics = pd.DataFrame(
         [
-            _metric_row(selected_config_id="object_cfg", matrix_method="object_mean", robustness_score=10.0),
-            _metric_row(
-                selected_config_id="balanced_cfg",
-                matrix_family="pixel_matrix",
+            {
+                **_selection_unit_row(calibration_id="cfg_threshold"),
+                "aggregation_level": "overall",
+                "status": "calculable",
+                "random_state": 0,
+                "target_miss_rate": 0.0,
+            },
+            {
+                **_selection_unit_row(calibration_id="cfg_threshold"),
+                "aggregation_level": "source_image",
+                "status": "calculable",
+                "random_state": 0,
+                "group_id": "img_target",
+                "target_miss_rate": 0.0,
+            },
+        ]
+    )
+    plan = pd.DataFrame(
+        [
+            {
+                "ablation_id": "threshold_low",
+                "evaluation_track": "object_train__object_projection__2way",
+                "track_id": "E1",
+                "contrast_type": "threshold_sensitivity",
+                "factor": "direct_2way_threshold",
+                "reference_config_id": "cfg_threshold",
+                "ablated_config_id": "",
+                "reference_level": "0.0",
+                "ablated_level": -0.2,
+                "eligibility_status": "eligible",
+                "plan_status": "planned",
+                "unsupported_reason": "",
+                "registration_status": "frozen",
+                "preregistered": True,
+            },
+            {
+                "ablation_id": "threshold_high",
+                "evaluation_track": "object_train__object_projection__2way",
+                "track_id": "E1",
+                "contrast_type": "threshold_sensitivity",
+                "factor": "direct_2way_threshold",
+                "reference_config_id": "cfg_threshold",
+                "ablated_config_id": "",
+                "reference_level": "0.0",
+                "ablated_level": 0.2,
+                "eligibility_status": "eligible",
+                "plan_status": "planned",
+                "unsupported_reason": "",
+                "registration_status": "frozen",
+                "preregistered": True,
+            },
+        ]
+    )
+    candidates = pd.DataFrame(
+        [
+            {
+                "calibration_id": "cfg_threshold",
+                "projection_config_id": "projection_0",
+                "projection_level": "object_projection",
+                "decision_mode": "2way",
+                "direct_2way_threshold": 0.0,
+                "three_way_lower_threshold": np.nan,
+                "three_way_upper_threshold": np.nan,
+            }
+        ]
+    )
+    predictions = pd.DataFrame(
+        {
+            "projection_config_id": ["projection_0"] * 4,
+            "source_image": ["img_target", "img_target", "img_non_target", "img_non_target"],
+            "object_id": ["t1", "t2", "n1", "n2"],
+            "truth": [True, True, False, False],
+            "simca_margin": [0.3, 0.1, -0.1, -0.3],
+        }
+    )
+
+    effects = build_ablation_diagnostics(
+        metrics,
+        ablation_plan_df=plan,
+        candidate_pool_df=candidates,
+        object_predictions_df=predictions,
+        pixel_predictions_df=predictions.iloc[0:0].copy(),
+        metric_cols=("target_miss_rate",),
+    )
+
+    assert effects["effect_status"].eq("estimated_paired").all()
+    values = effects.set_index("ablation_id")["ablated_value"]
+    assert values["threshold_low"] == pytest.approx(0.0)
+    assert values["threshold_high"] == pytest.approx(0.5)
+
+
+def test_build_random_state_stability_panel_keeps_all_stochastic_pareto_units():
+    candidate_panel = pd.DataFrame(
+        [
+            _selection_unit_row(calibration_id="object_cfg", matrix_method="object_mean"),
+            _selection_unit_row(
+                calibration_id="balanced_cfg",
                 matrix_method="balanced_pixels",
-                training_matrix_id="balanced_pixel_random_m40",
-                robustness_score=0.0,
+                balanced_pixel_strategy="random",
             ),
         ]
     )
+    metrics = candidate_panel.copy()
+    metrics["is_protocol_pareto"] = True
 
     panel = build_random_state_stability_panel(
         candidate_panel,
         metrics,
-        max_per_track=1,
-        prefer_balanced_pixels=True,
     )
 
-    assert panel.loc[0, "selected_config_id"] == "balanced_cfg"
-    assert panel.loc[0, "stability_panel_reason"] == "top_robustness_candidates_per_track"
+    assert panel["calibration_id"].tolist() == ["balanced_cfg"]
+    assert panel.loc[0, "stability_panel_reason"] == "all_protocol_pareto_stochastic_units"
+    with pytest.raises(ValueError, match="forbids a per-track"):
+        build_random_state_stability_panel(candidate_panel, metrics, max_per_track=1)
 
 
 def test_summarize_random_state_stability_metrics_flags_unstable_metrics():
     stability_metrics = pd.DataFrame(
         [
-            _metric_row(selected_config_id="cfg_a", random_state=0, fn_rate=0.00, fp_rate=0.10, balanced_accuracy=0.95),
-            _metric_row(selected_config_id="cfg_a", random_state=1, fn_rate=0.10, fp_rate=0.30, balanced_accuracy=0.80),
+            {
+                **_selection_unit_row(
+                    calibration_id="cfg_a",
+                    matrix_method="balanced_pixels",
+                    balanced_pixel_strategy="random",
+                ),
+                "aggregation_level": "overall",
+                "random_state": 0,
+                "target_miss_rate": 0.00,
+                "false_accept_rate": 0.10,
+                "balanced_accuracy": 0.95,
+            },
+            {
+                **_selection_unit_row(
+                    calibration_id="cfg_a",
+                    matrix_method="balanced_pixels",
+                    balanced_pixel_strategy="random",
+                ),
+                "aggregation_level": "overall",
+                "random_state": 1,
+                "target_miss_rate": 0.10,
+                "false_accept_rate": 0.30,
+                "balanced_accuracy": 0.80,
+            },
         ]
     )
 
-    summary = summarize_random_state_stability_metrics(stability_metrics)
+    summary = summarize_random_state_stability_metrics(
+        stability_metrics, expected_random_states=(0, 1)
+    )
 
     assert len(summary) == 1
-    assert "unstable_fn_rate" in summary.loc[0, "stability_flags"]
-    assert "unstable_fp_rate" in summary.loc[0, "stability_flags"]
+    assert "unstable_target_miss" in summary.loc[0, "stability_flags"]
+    assert "unstable_false_accept" in summary.loc[0, "stability_flags"]
+    assert summary.loc[0, "stability_status"] == "unstable"
+
+
+def test_deterministic_stability_is_explicitly_not_applicable():
+    metrics = pd.DataFrame(
+        [
+            {
+                **_selection_unit_row(calibration_id="deterministic"),
+                "aggregation_level": "overall",
+                "random_state": 0,
+            }
+        ]
+    )
+
+    summary = summarize_random_state_stability_metrics(metrics)
+
+    assert summary.loc[0, "stability_status"] == "not_applicable_deterministic"
+
+
+def test_risk_coverage_supports_frozen_h4_point_contrasts():
+    selected = pd.DataFrame(
+        [
+            {
+                "evaluation_track": "object_train__object_projection__2way",
+                "track_id": "E1",
+                "calibration_id": "cal_2way",
+                "decision_mode": "2way",
+            },
+            {
+                "evaluation_track": "object_train__object_projection__3way",
+                "track_id": "E2",
+                "calibration_id": "cal_3way",
+                "decision_mode": "3way",
+            },
+        ]
+    )
+    candidates = pd.DataFrame(
+        [
+            {
+                "calibration_id": "cal_2way",
+                "projection_config_id": "projection_2way",
+                "projection_level": "object_projection",
+                "decision_mode": "2way",
+                "direct_2way_threshold": 0.0,
+                "three_way_lower_threshold": np.nan,
+                "three_way_upper_threshold": np.nan,
+                "random_state": 0,
+            },
+            {
+                "calibration_id": "cal_3way",
+                "projection_config_id": "projection_3way",
+                "projection_level": "object_projection",
+                "decision_mode": "3way",
+                "direct_2way_threshold": np.nan,
+                "three_way_lower_threshold": -0.2,
+                "three_way_upper_threshold": 0.2,
+                "random_state": 0,
+            },
+        ]
+    )
+    base_predictions = pd.DataFrame(
+        {
+            "source_image": ["target", "target", "non_target", "non_target"],
+            "object_id": ["t1", "t2", "n1", "n2"],
+            "truth": [True, True, False, False],
+            "simca_margin": [0.4, 0.1, -0.1, -0.4],
+        }
+    )
+    predictions = pd.concat(
+        [
+            base_predictions.assign(projection_config_id="projection_2way"),
+            base_predictions.assign(projection_config_id="projection_3way"),
+        ],
+        ignore_index=True,
+    )
+    curves = build_risk_coverage_curves(
+        selected,
+        candidates,
+        predictions,
+        predictions.iloc[0:0].copy(),
+        coverage_grid=(0.5, 0.75, 1.0),
+    )
+    contrasts = pd.DataFrame(
+        [
+            {
+                "contrast_id": "H4_test",
+                "hypothesis_id": "H4",
+                "left_track": "object_train__object_projection__3way",
+                "right_track": "object_train__object_projection__2way",
+                "metric": "selective_risk_auc",
+            }
+        ]
+    )
+
+    results = build_planned_contrast_results(contrasts, selected, curves)
+
+    assert set(curves["decision_mode"]) == {"2way", "3way"}
+    assert curves["n_seeds"].eq(1).all()
+    assert curves["selective_risk_auc"].notna().all()
+    assert np.isfinite(results.loc[0, "effect_estimate"])
+    assert results.loc[0, "inference_status"] == "not_estimable_insufficient_independent_images"
 
 
 def test_duplicated_candidate_review_uses_optional_refit_status():

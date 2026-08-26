@@ -13,28 +13,24 @@ from src import experiment_config as expcfg
 from src.decision.labels import DEFAULT_NON_TARGET_LABEL, DEFAULT_TARGET_CLASS
 from src.utils import parse_preprocessing_steps, row_str, row_value
 from src.workflows.simca_selection_utils import (
-    detection_selection_score,
     ensure_candidate_columns,
-    normalize_simca_rule_columns,
     fill_selected_config_defaults,
-    add_detection_selection_score,
-    add_reference_selection_scores,
-    sort_detection_selection,
+    materialize_selection_metrics,
+    normalize_simca_rule_columns,
     pareto_front_by_group,
+    sort_detection_selection,
 )
 from src.workflows.simca import (
     _normalize_preprocessing_configs_by_family,
     _preprocessing_configs_for_family,
     make_target_train_filters,
-    matrix_family_from_method,
     run_single_simca_pixel_projection,
     run_simca_rule_variant_grid,
 )
 from src.workflows.simca_internal_calibration import (
-    run_internal_calibration,
     validate_simca_configuration,
 )
-
+from src.matrices.matrix_registry import matrix_family_from_method
 
 def _families_for_matrix_methods(matrix_methods: Sequence[str]) -> set[str]:
     return {matrix_family_from_method(str(method)) for method in matrix_methods}
@@ -79,15 +75,13 @@ def make_simca_optuna_objective(
     default_sg_window_length: Sequence[int] = (11,),
     default_sg_polyorder: Sequence[int] = (2,),
     position_dilation_radius_choices: Sequence[int] = (0, 2, 3, 5),
-    objective_metric: str = "fn_fp_hierarchical",
     min_target_sensitivity: float | None = 0.5,
     min_non_target_specificity: float | None = 0.1,
-    constraint_penalty: float = 2.0,
     balanced_pixel_strategy_choices: Sequence[str] = ("random", "center"),
     target_class: str = DEFAULT_TARGET_CLASS,
     non_target_label: str = DEFAULT_NON_TARGET_LABEL,
 ):
-    """Create an Optuna objective for the SIMCA pixel-projection workflow."""
+    """Create a score-free, three-objective SIMCA Optuna objective."""
     optuna = _require_optuna()
     preprocessing_configs_by_family = _normalize_preprocessing_configs_by_family(preprocessing_configs)
 
@@ -189,18 +183,40 @@ def make_simca_optuna_objective(
             if threshold_df is None or len(threshold_df) == 0:
                 raise optuna.exceptions.TrialPruned()
 
-            row = threshold_df.iloc[0].to_dict()
-            score = detection_selection_score(
-                row,
-                objective_metric=objective_metric,
-                min_target_sensitivity=min_target_sensitivity,
-                min_non_target_specificity=min_non_target_specificity,
-                constraint_penalty=constraint_penalty,
+            metrics = materialize_selection_metrics(
+                threshold_df.iloc[[0]],
+                keep_source_columns=False,
             )
-            if not np.isfinite(score):
+            row = metrics.iloc[0].to_dict()
+            fn_rate = float(row["fn_rate"])
+            fp_rate = float(row["fp_rate"])
+            balanced_accuracy = float(row["balanced_accuracy"])
+            if not np.isfinite(
+                [fn_rate, fp_rate, balanced_accuracy]
+            ).all():
                 raise optuna.exceptions.TrialPruned()
 
-            trial.set_user_attr("score", float(score))
+            sensitivity = float(row["target_sensitivity"])
+            specificity = float(row["non_target_specificity"])
+            if (
+                min_target_sensitivity is not None
+                and sensitivity < float(min_target_sensitivity)
+            ):
+                trial.set_user_attr(
+                    "prune_reason",
+                    "min_target_sensitivity_not_met",
+                )
+                raise optuna.exceptions.TrialPruned()
+            if (
+                min_non_target_specificity is not None
+                and specificity < float(min_non_target_specificity)
+            ):
+                trial.set_user_attr(
+                    "prune_reason",
+                    "min_non_target_specificity_not_met",
+                )
+                raise optuna.exceptions.TrialPruned()
+
             for col in [
                 "balanced_accuracy",
                 "target_sensitivity",
@@ -238,7 +254,7 @@ def make_simca_optuna_objective(
             trial.set_user_attr("selection_split", "validation_batch_3")
             trial.set_user_attr("selection_strategy", "04B2_optuna_challenge")
 
-            return float(score)
+            return fn_rate, fp_rate, balanced_accuracy
 
         except optuna.exceptions.TrialPruned:
             raise
@@ -313,7 +329,7 @@ def run_optuna_simca_pixel_optimization(
     try:
         study = optuna.create_study(
             study_name=study_name,
-            direction="maximize",
+            directions=("minimize", "minimize", "maximize"),
             sampler=sampler,
             pruner=pruner,
             storage=storage,
@@ -426,13 +442,16 @@ def best_completed_trial_row(trials_df: pd.DataFrame) -> pd.Series:
     if completed.empty:
         raise ValueError("No completed Optuna trial found.")
 
-    if {"value_0", "value_1", "value_2"}.issubset(completed.columns):
-        return completed.sort_values(["value_0", "value_1", "value_2"], ascending=[True, True, False]).iloc[0]
-        
-    if "value" in completed.columns:
-        return completed.sort_values("value", ascending=False).iloc[0]
-
-    raise ValueError("No objective value column found in trials_df.")
+    objective_columns = {"value_0", "value_1", "value_2"}
+    if not objective_columns.issubset(completed.columns):
+        raise ValueError(
+            "Score-free selection requires three Optuna objective columns."
+        )
+    return completed.sort_values(
+        ["value_0", "value_1", "value_2"],
+        ascending=[True, True, False],
+        kind="mergesort",
+    ).iloc[0]
 
 
 def refit_optuna_best_trial(
@@ -546,28 +565,17 @@ def optuna_trials_to_candidate_configs(
     if "state" in df.columns:
         df = df[df["state"].astype(str).eq("COMPLETE")].copy()
 
-    has_multi_objective = {"value_0", "value_1", "value_2"}.issubset(df.columns)
-    if has_multi_objective:
-        df = df[pd.to_numeric(df["value_0"], errors="coerce").notna()].copy()
-    elif "value" in df.columns:
-        df = df[pd.to_numeric(df["value"], errors="coerce").notna()].copy()
+    objective_columns = {"value_0", "value_1", "value_2"}
+    if not objective_columns.issubset(df.columns):
+        raise ValueError(
+            "Score-free candidate conversion requires a three-objective study."
+        )
+    df = df[pd.to_numeric(df["value_0"], errors="coerce").notna()].copy()
 
     if df.empty:
         return pd.DataFrame()
 
-    if has_multi_objective:
-        value_0 = pd.to_numeric(df["value_0"], errors="coerce")
-        value_1 = pd.to_numeric(df["value_1"], errors="coerce")
-        value_2 = pd.to_numeric(df["value_2"], errors="coerce")
-        df["optuna_value"] = -10.0 * value_0 - value_1 + value_2
-    else:
-        df["optuna_value"] = pd.to_numeric(df["value"], errors="coerce")
     df["optuna_trial_number"] = df["number"].astype(int)
-
-    if "score" in df.columns:
-        df["selection_score"] = pd.to_numeric(df["score"], errors="coerce")
-    else:
-        df["selection_score"] = df["optuna_value"]
 
     def _fill_numeric(target: str, sources: Sequence[str]) -> None:
         if target in df.columns and pd.to_numeric(df[target], errors="coerce").notna().any():
@@ -681,19 +689,18 @@ def optuna_trials_to_candidate_configs(
             "object_threshold": 0.75,
         },
     )
-    df = add_detection_selection_score(df)
-    df = add_reference_selection_scores(df)
+    df = materialize_selection_metrics(
+        df,
+        keep_source_columns=False,
+    )
 
     df["selection_split"] = selection_split
     df["selection_strategy"] = selection_strategy
     df["candidate_source"] = selection_strategy
 
-    df = (
-        df.sort_values(
-            ["fn_rate", "fp_rate", "selection_score", "optuna_value"],
-            ascending=[True, True, False, False],
-        )
-        .reset_index(drop=True)
+    df = sort_detection_selection(
+        df,
+        materialize_metrics=False,
     )
 
     parts = []
@@ -716,7 +723,10 @@ def optuna_trials_to_candidate_configs(
     else:
         selected = df.copy()
 
-    selected = sort_detection_selection(selected, add_score=False)
+    selected = sort_detection_selection(
+        selected,
+        materialize_metrics=False,
+    )
     selected = selected.reset_index(drop=True)
 
     selected["selected_config_id"] = [
@@ -730,7 +740,6 @@ def optuna_trials_to_candidate_configs(
         "selection_strategy",
         "candidate_source",
         "optuna_trial_number",
-        "optuna_value",
         "value_0",
         "value_1",
         "value_2",
@@ -772,11 +781,6 @@ def optuna_trials_to_candidate_configs(
         "f1_score",
         "accuracy",
         "precision",
-
-        "selection_score",
-        "score_conservative_target",
-        "score_balanced_reference",
-        "score_specificity_control",
 
         "n_components",
         "alpha",
@@ -1102,49 +1106,10 @@ def evaluate_config_binary_multiseed(
             )
         eval_df = pd.DataFrame()
     else:
-        if calibration_folds is None:
-            raise ValueError(
-                "calibration_folds is required without precomputed metrics."
-            )
-        result = run_internal_calibration(
-            object_db=object_db,
-            image_db=image_db,
-            folds=calibration_folds,
-            configurations=runtime,
-            wavelengths=wavelengths,
-            calibration_batches=expcfg.INTERNAL_CALIBRATION_BATCHES,
-            forbidden_batches=expcfg.INTERNAL_CALIBRATION_FORBIDDEN_BATCHES,
-            target_class=target_class,
-            non_target_label=non_target_label,
-            keep_oof_pixels=False,
-            keep_oof_objects=True,
-            error_granularity="configuration",
-            verbose=False,
-            checkpoint_dir=None,
+        raise ValueError(
+            "precomputed_metrics is required: notebook 04A is the "
+            "authoritative evaluator for the active eight-track protocol."
         )
-        eval_df = result["fixed_fold_metrics"].copy()
-        errors = result["errors"].copy()
-        if not errors.empty:
-            statuses = set(errors["status"].dropna().astype(str))
-            summary["status"] = (
-                "technical_invalid"
-                if "technical_invalid" in statuses
-                else "fit_or_projection_error"
-            )
-            summary["technical_error"] = ";".join(
-                errors["technical_errors"].dropna().astype(str).unique()
-            )
-            return eval_df, summary
-        if eval_df.empty or not eval_df["status"].eq("calculable").all():
-            summary["status"] = "fit_or_projection_error"
-            summary["technical_error"] = "missing_fixed_threshold_metrics"
-            return eval_df, summary
-        threshold_metrics = result["fixed_threshold_metrics"]
-        if threshold_metrics.empty:
-            summary["status"] = "fit_or_projection_error"
-            summary["technical_error"] = "missing_threshold_summary"
-            return eval_df, summary
-        summary.update(threshold_metrics.iloc[0].to_dict())
 
     summary["coverage_mean"] = float(
         summary.get("coverage_rate_mean", np.nan)

@@ -6,6 +6,7 @@ from typing import Mapping, Sequence
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 from src.decision.maps import (
     make_object_error_map,
@@ -556,86 +557,463 @@ def plot_confusion_heatmap_from_long(
     title: str,
     count_col: str = "n",
     rate_col: str = "row_rate",
-    confidence_col: str = "mean_confidence",
+    confidence_col: str | None = "mean_confidence",
     true_order: Sequence[str] | None = None,
     decision_order: Sequence[str] | None = None,
+    facet_col: str | None = None,
+    facet_order: Sequence[str] | None = None,
+    facet_col_wrap: int = 4,
+    shared_coloraxis: bool = True,
     display: str = "both",
-    width: int = 750,
-    height: int = 550,
+    colorscale: str | Sequence = "Viridis",
+    zmin: float = 0.0,
+    zmax: float = 1.0,
+    rate_format: str = ".1%",
+    confidence_format: str = ".2f",
+    colorbar_title: str = "Taux conditionnel à la vérité",
+    xaxis_title: str = "Décision",
+    yaxis_title: str = "Vérité",
+    width: int | None = None,
+    height: int | None = None,
     show: bool = True,
 ):
-    """Plot a confusion heatmap with fixed category order and a [0, 1] scale."""
+    """Trace une ou plusieurs matrices de confusion à partir d’un format long.
+
+    Les taux fournis dans rate_col ne sont jamais moyennés : ils sont recalculés
+    après agrégation des effectifs. rate_col est conservé dans la signature pour
+    compatibilité avec la fonction existante.
+    """
     if confusion_df is None or len(confusion_df) == 0:
-        raise ValueError("Empty confusion table.")
-    d = confusion_df.copy()
+        raise ValueError("La table de confusion est vide.")
 
-    # Sum counts first; derive rates from aggregated counts to avoid averaging rates.
-    counts = d.pivot_table(
-        index=true_col_name,
-        columns=decision_col_name,
-        values=count_col,
-        aggfunc="sum",
-        fill_value=0,
+    if display not in {"count", "rate", "both"}:
+        raise ValueError(
+            "display doit valoir 'count', 'rate' ou 'both'."
+        )
+
+    if int(facet_col_wrap) < 1:
+        raise ValueError(
+            "facet_col_wrap doit être supérieur ou égal à 1."
+        )
+
+    if (
+        not np.isfinite([zmin, zmax]).all()
+        or float(zmin) >= float(zmax)
+    ):
+        raise ValueError(
+            "zmin et zmax doivent être finis avec zmin < zmax."
+        )
+
+    required = [
+        true_col_name,
+        decision_col_name,
+        count_col,
+    ]
+
+    if facet_col is not None:
+        required.append(facet_col)
+
+    missing = [
+        column
+        for column in required
+        if column not in confusion_df.columns
+    ]
+
+    if missing:
+        raise KeyError(
+            f"Colonnes absentes de la table de confusion : {missing}"
+        )
+
+    work = confusion_df.loc[
+        confusion_df[true_col_name].notna()
+        & confusion_df[decision_col_name].notna()
+    ].copy()
+
+    work[count_col] = pd.to_numeric(
+        work[count_col],
+        errors="coerce",
     )
-    if true_order is not None:
-        counts = counts.reindex(index=list(true_order), fill_value=0)
-    if decision_order is not None:
-        counts = counts.reindex(columns=list(decision_order), fill_value=0)
-    row_totals = counts.sum(axis=1).replace(0, np.nan)
-    rates = counts.div(row_totals, axis=0).fillna(0.0)
 
-    confidence = None
-    if confidence_col in d.columns:
-        confidence = d.pivot_table(
-            index=true_col_name,
-            columns=decision_col_name,
-            values=confidence_col,
-            aggfunc="mean",
-        ).reindex(index=counts.index, columns=counts.columns)
+    if work.empty:
+        raise ValueError(
+            "Aucune ligne avec vérité et décision renseignées."
+        )
 
-    text = []
-    for true_label in counts.index:
-        row = []
-        for decision in counts.columns:
-            n = int(counts.loc[true_label, decision])
-            rate = float(rates.loc[true_label, decision])
-            if display == "count":
-                value = f"{n}"
-            elif display == "rate":
-                value = f"{rate:.1%}"
-            else:
-                value = f"{n}<br>{rate:.1%}"
-            if confidence is not None and pd.notna(confidence.loc[true_label, decision]):
-                value += f"<br>conf={confidence.loc[true_label, decision]:.2f}"
-            row.append(value)
-        text.append(row)
+    if (
+        work[count_col].isna().any()
+        or (~np.isfinite(work[count_col])).any()
+    ):
+        raise ValueError(
+            f"{count_col} doit contenir uniquement des effectifs finis."
+        )
 
-    fig = go.Figure(
-        go.Heatmap(
-            z=rates.to_numpy(dtype=float),
-            x=rates.columns.astype(str),
-            y=rates.index.astype(str),
-            text=text,
-            texttemplate="%{text}",
-            colorscale="Viridis",
-            zmin=0,
-            zmax=1,
-            colorbar=dict(title="row rate"),
-            hovertemplate=(
-                "True: %{y}<br>Decision: %{x}<br>Rate: %{z:.2%}<extra></extra>"
+    if work[count_col].lt(0).any():
+        raise ValueError(
+            f"{count_col} ne peut pas contenir d’effectif négatif."
+        )
+
+    work[true_col_name] = work[true_col_name].astype(str)
+    work[decision_col_name] = work[decision_col_name].astype(str)
+
+    true_levels = (
+        [str(value) for value in true_order]
+        if true_order is not None
+        else list(dict.fromkeys(work[true_col_name]))
+    )
+
+    decision_levels = (
+        [str(value) for value in decision_order]
+        if decision_order is not None
+        else list(dict.fromkeys(work[decision_col_name]))
+    )
+
+    if not true_levels or not decision_levels:
+        raise ValueError(
+            "Les ordres de vérité et de décision ne peuvent pas être vides."
+        )
+
+    if facet_col is None:
+        facet_levels = [None]
+
+    else:
+        work[facet_col] = work[facet_col].astype(str)
+
+        observed_facets = list(
+            dict.fromkeys(work[facet_col])
+        )
+
+        facet_levels = (
+            [str(value) for value in facet_order]
+            if facet_order is not None
+            else observed_facets
+        )
+
+        absent_facets = [
+            value
+            for value in facet_levels
+            if value not in observed_facets
+        ]
+
+        if absent_facets:
+            raise ValueError(
+                f"Facettes demandées absentes de "
+                f"{facet_col} : {absent_facets}"
+            )
+
+    n_facets = len(facet_levels)
+    n_cols = min(
+        int(facet_col_wrap),
+        n_facets,
+    )
+    n_rows = int(
+        np.ceil(n_facets / n_cols)
+    )
+
+    subplot_titles = [
+        ""
+        if value is None
+        else f"{facet_col} = {value}"
+        for value in facet_levels
+    ]
+
+    fig = make_subplots(
+        rows=n_rows,
+        cols=n_cols,
+        subplot_titles=subplot_titles,
+        horizontal_spacing=0.08,
+        vertical_spacing=min(
+            0.18,
+            0.12 + 0.02 * n_rows,
+        ),
+    )
+
+    for facet_index, facet_value in enumerate(
+        facet_levels
+    ):
+        row = facet_index // n_cols + 1
+        col = facet_index % n_cols + 1
+
+        subset = (
+            work
+            if facet_col is None
+            else work.loc[
+                work[facet_col].eq(
+                    str(facet_value)
+                )
+            ]
+        )
+
+        # -------------------------------------------------------------
+        # Agréger d'abord les effectifs.
+        # Les taux sont ensuite recalculés depuis les effectifs agrégés.
+        # -------------------------------------------------------------
+        counts = (
+            subset.pivot_table(
+                index=true_col_name,
+                columns=decision_col_name,
+                values=count_col,
+                aggfunc="sum",
+                fill_value=0,
+            )
+            .reindex(
+                index=true_levels,
+                columns=decision_levels,
+                fill_value=0,
+            )
+            .astype(float)
+        )
+
+        row_totals = counts.sum(
+            axis=1
+        ).replace(
+            0,
+            np.nan,
+        )
+
+        rates = counts.div(
+            row_totals,
+            axis=0,
+        ).fillna(0.0)
+
+        # -------------------------------------------------------------
+        # Si une confiance agrégée est disponible, la recombiner avec
+        # une moyenne pondérée par les effectifs de chaque cellule.
+        # -------------------------------------------------------------
+        confidence = None
+
+        if (
+            confidence_col is not None
+            and confidence_col in subset.columns
+        ):
+            confidence_values = pd.to_numeric(
+                subset[confidence_col],
+                errors="coerce",
+            )
+
+            weighted = subset.assign(
+                _confidence_value=confidence_values,
+                _confidence_numerator=(
+                    confidence_values
+                    * subset[count_col]
+                ),
+                _confidence_weight=np.where(
+                    confidence_values.notna(),
+                    subset[count_col],
+                    0.0,
+                ),
+            )
+
+            numerator = (
+                weighted.pivot_table(
+                    index=true_col_name,
+                    columns=decision_col_name,
+                    values="_confidence_numerator",
+                    aggfunc="sum",
+                )
+                .reindex(
+                    index=true_levels,
+                    columns=decision_levels,
+                )
+            )
+
+            denominator = (
+                weighted.pivot_table(
+                    index=true_col_name,
+                    columns=decision_col_name,
+                    values="_confidence_weight",
+                    aggfunc="sum",
+                )
+                .reindex(
+                    index=true_levels,
+                    columns=decision_levels,
+                )
+            )
+
+            confidence = numerator.div(
+                denominator.where(
+                    denominator.gt(0)
+                )
+            )
+
+        # -------------------------------------------------------------
+        # Texte affiché dans chaque case.
+        # -------------------------------------------------------------
+        text_values = []
+
+        confidence_array = np.full(
+            counts.shape,
+            np.nan,
+            dtype=float,
+        )
+
+        for true_index, true_label in enumerate(
+            true_levels
+        ):
+            text_row = []
+
+            for decision_index, decision_label in enumerate(
+                decision_levels
+            ):
+                count = float(
+                    counts.loc[
+                        true_label,
+                        decision_label,
+                    ]
+                )
+
+                rate = float(
+                    rates.loc[
+                        true_label,
+                        decision_label,
+                    ]
+                )
+
+                if display == "count":
+                    label = f"{count:,.0f}"
+
+                elif display == "rate":
+                    label = format(
+                        rate,
+                        rate_format,
+                    )
+
+                else:
+                    label = (
+                        f"{count:,.0f}"
+                        f"<br>"
+                        f"{format(rate, rate_format)}"
+                    )
+
+                if confidence is not None:
+                    value = confidence.loc[
+                        true_label,
+                        decision_label,
+                    ]
+
+                    if pd.notna(value):
+                        confidence_array[
+                            true_index,
+                            decision_index,
+                        ] = float(value)
+
+                        label += (
+                            "<br>conf="
+                            f"{format(float(value), confidence_format)}"
+                        )
+
+                text_row.append(label)
+
+            text_values.append(text_row)
+
+        customdata = np.stack(
+            [
+                counts.to_numpy(dtype=float),
+                confidence_array,
+            ],
+            axis=-1,
+        )
+
+        trace_kwargs = {
+            "z": rates.to_numpy(dtype=float),
+            "x": decision_levels,
+            "y": true_levels,
+            "text": text_values,
+            "texttemplate": "%{text}",
+            "customdata": customdata,
+            "hovertemplate": (
+                "Vérité : %{y}<br>"
+                "Décision : %{x}<br>"
+                "Effectif : %{customdata[0]:,.0f}<br>"
+                "Taux conditionnel : %{z:.2%}"
+                "<extra></extra>"
             ),
+        }
+
+        if shared_coloraxis:
+            trace_kwargs["coloraxis"] = "coloraxis"
+
+        else:
+            trace_kwargs.update(
+                colorscale=colorscale,
+                zmin=float(zmin),
+                zmax=float(zmax),
+                showscale=facet_index == 0,
+                colorbar={
+                    "title": colorbar_title
+                },
+            )
+
+        fig.add_trace(
+            go.Heatmap(
+                **trace_kwargs
+            ),
+            row=row,
+            col=col,
+        )
+
+    if shared_coloraxis:
+        fig.update_layout(
+            coloraxis={
+                "colorscale": colorscale,
+                "cmin": float(zmin),
+                "cmax": float(zmax),
+                "colorbar": {
+                    "title": colorbar_title
+                },
+            }
+        )
+
+    resolved_width = (
+        width
+        or max(
+            760,
+            330 * n_cols,
         )
     )
-    fig.update_layout(
-        title=title,
-        xaxis_title="Decision",
-        yaxis_title="True label",
-        width=width,
-        height=height,
-    )
-    apply_project_theme(fig)
-    return show_or_return(fig, show)
 
+    resolved_height = (
+        height
+        or max(
+            520,
+            330 * n_rows + 120,
+        )
+    )
+
+    fig.update_layout(
+        title={
+            "text": title,
+            "x": 0.02,
+        },
+        width=int(resolved_width),
+        height=int(resolved_height),
+    )
+
+    for col in range(
+        1,
+        n_cols + 1,
+    ):
+        fig.update_xaxes(
+            title_text=xaxis_title,
+            row=n_rows,
+            col=col,
+        )
+
+    for row in range(
+        1,
+        n_rows + 1,
+    ):
+        fig.update_yaxes(
+            title_text=yaxis_title,
+            row=row,
+            col=1,
+        )
+
+    apply_project_theme(fig)
+
+    return show_or_return(
+        fig,
+        show,
+    )
 
 def plot_three_way_confusion_heatmap(
     confusion_df: pd.DataFrame,

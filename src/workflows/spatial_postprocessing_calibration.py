@@ -188,19 +188,18 @@ def apply_spatial_postprocessing(
 
 def build_spatial_calibration_input(
     oof_pixels: pd.DataFrame,
-    calibration_domain: pd.DataFrame,
+    selected_executions: pd.DataFrame,
+    selected_thresholds: pd.DataFrame,
     image_db: dict,
     *,
     target_class: str = expcfg.TARGET_CLASS,
     allowed_batches: Sequence[int] = expcfg.SPATIAL_CALIBRATION_ALLOWED_BATCHES,
     required_classes: Sequence[str] = expcfg.SPATIAL_CALIBRATION_REQUIRED_CLASSES,
 ) -> pd.DataFrame:
-    """Attach locked thresholds and exact pure-image pixel truth to OOF rows."""
+    """Build compact pixel maps from normalized selected 03B tables."""
     required_oof = {
-        "projection_config_id",
-        "fold_id",
+        "projection_id",
         "source_image",
-        "object_id",
         "batch",
         "row",
         "col",
@@ -210,46 +209,66 @@ def build_spatial_calibration_input(
     if missing:
         raise KeyError(f"Missing OOF pixel columns: {missing}")
     mapping_columns = [
-        "domain_config_id",
-        "evaluation_track",
+        "model_id",
+        "random_state",
         "track_id",
-        "projection_config_id",
+        "projection_id",
         "decision_mode",
-        "direct_2way_threshold",
-        "three_way_lower_threshold",
-        "three_way_upper_threshold",
+        "projection_level",
     ]
-    has_oof_seed = "random_state" in oof_pixels.columns
-    has_domain_seed = "random_state" in calibration_domain.columns
-    if has_oof_seed != has_domain_seed:
-        raise KeyError(
-            "random_state must be present in both OOF pixels and the domain, "
-            "or absent from both legacy inputs."
-        )
-    if has_oof_seed:
-        mapping_columns.append("random_state")
-    missing = sorted(set(mapping_columns) - set(calibration_domain.columns))
+    missing = sorted(set(mapping_columns) - set(selected_executions.columns))
     if missing:
-        raise KeyError(f"Missing spatial-domain columns: {missing}")
-    mapping = calibration_domain.loc[
-        calibration_domain["projection_level"].astype(str).eq("pixel_projection"),
+        raise KeyError(f"Missing selected-execution columns: {missing}")
+    mapping = selected_executions.loc[
+        selected_executions["projection_level"].astype(str).eq("pixel_projection"),
         mapping_columns,
-    ].drop_duplicates()
+    ].copy()
     if mapping.empty:
-        raise RuntimeError("No calibrated pixel-projection track is available.")
-    if mapping["domain_config_id"].astype(str).duplicated().any():
-        raise RuntimeError("A spatial domain_config_id has conflicting metadata.")
-    merge_keys = ["projection_config_id"]
-    if has_oof_seed:
-        merge_keys.append("random_state")
+        raise RuntimeError("No selected pixel-projection execution is available.")
+    execution_keys = ["model_id", "random_state"]
+    if mapping.duplicated(execution_keys).any():
+        raise RuntimeError("Selected spatial execution keys must be unique.")
+
+    required_thresholds = set(
+        expcfg.INTERNAL_CALIBRATION_SELECTED_THRESHOLD_COLUMNS
+    )
+    missing = sorted(required_thresholds - set(selected_thresholds.columns))
+    if missing:
+        raise KeyError(f"Missing selected-threshold columns: {missing}")
+    direct = selected_thresholds.loc[
+        selected_thresholds["decision_scope"].astype(str).eq("direct"),
+        [*execution_keys, "lower_threshold", "upper_threshold"],
+    ].copy()
+    if direct.duplicated(execution_keys).any():
+        raise RuntimeError("A selected spatial execution has duplicate direct thresholds.")
+    mapping = mapping.merge(
+        direct,
+        on=execution_keys,
+        how="left",
+        validate="one_to_one",
+    )
+    lower = pd.to_numeric(mapping["lower_threshold"], errors="coerce")
+    upper = pd.to_numeric(mapping["upper_threshold"], errors="coerce")
+    if not np.isfinite(np.column_stack([lower, upper])).all():
+        raise RuntimeError("A selected spatial execution has no finite direct threshold.")
+
     out = oof_pixels.merge(
         mapping,
-        on=merge_keys,
+        on="projection_id",
         how="inner",
         validate="many_to_many",
     )
     if out.empty:
-        raise RuntimeError("No OOF pixel row matches the calibrated 03B domain.")
+        raise RuntimeError("No OOF pixel row matches the selected 03B executions.")
+    observed_keys = out[execution_keys].drop_duplicates()
+    missing_executions = mapping[execution_keys].merge(
+        observed_keys,
+        on=execution_keys,
+        how="left",
+        indicator=True,
+    )
+    if missing_executions["_merge"].eq("left_only").any():
+        raise RuntimeError("A selected pixel execution has no OOF pixel prediction.")
     batches = set(pd.to_numeric(out["batch"], errors="raise").astype(int))
     if not batches.issubset(set(map(int, allowed_batches))):
         raise RuntimeError(f"Forbidden batch in spatial calibration: {sorted(batches)}")
@@ -273,7 +292,7 @@ def build_spatial_calibration_input(
         )
 
     out["true_target"] = False
-    out["truth_available"] = False
+    truth_available = np.zeros(len(out), dtype=bool)
     for image_key, indices in out.groupby("source_image", sort=False).groups.items():
         truth = truth_cache[str(image_key)]
         row = pd.to_numeric(out.loc[indices, "row"], errors="raise").astype(int).to_numpy()
@@ -283,24 +302,35 @@ def build_spatial_calibration_input(
         if not inside.all():
             raise RuntimeError(f"OOF coordinates outside image {image_key}.")
         out.loc[indices, "true_target"] = truth.truth_mask[row, col]
-        out.loc[indices, "truth_available"] = truth.available_mask[row, col]
-    if not out["truth_available"].astype(bool).all():
+        truth_available[out.index.get_indexer(indices)] = truth.available_mask[row, col]
+    if not truth_available.all():
         raise RuntimeError(
             "An OOF projected pixel falls outside the pure-image segmented ROI."
         )
+    two_way = out["decision_mode"].astype(str).eq("2way").to_numpy()
+    three_way = out["decision_mode"].astype(str).eq("3way").to_numpy()
+    if not (two_way | three_way).all():
+        unknown = sorted(
+            set(out.loc[~(two_way | three_way), "decision_mode"].astype(str))
+        )
+        raise RuntimeError(f"Unknown spatial decision modes: {unknown}")
+    lower_threshold = pd.to_numeric(
+        out["lower_threshold"], errors="coerce"
+    ).to_numpy(dtype=float)
+    upper_threshold = pd.to_numeric(
+        out["upper_threshold"], errors="coerce"
+    ).to_numpy(dtype=float)
     try:
         target, uncertain = apply_locked_margin_decision(
             pd.to_numeric(out["simca_margin"], errors="coerce").to_numpy(),
             out["decision_mode"].astype(str).to_numpy(),
-            direct_2way_threshold=pd.to_numeric(
-                out["direct_2way_threshold"], errors="coerce"
-            ).to_numpy(),
-            three_way_lower_threshold=pd.to_numeric(
-                out["three_way_lower_threshold"], errors="coerce"
-            ).to_numpy(),
-            three_way_upper_threshold=pd.to_numeric(
-                out["three_way_upper_threshold"], errors="coerce"
-            ).to_numpy(),
+            direct_2way_threshold=np.where(two_way, lower_threshold, np.nan),
+            three_way_lower_threshold=np.where(
+                three_way, lower_threshold, np.nan
+            ),
+            three_way_upper_threshold=np.where(
+                three_way, upper_threshold, np.nan
+            ),
         )
     except ValueError as exc:
         message = str(exc)
@@ -309,24 +339,30 @@ def build_spatial_calibration_input(
                 "Unknown decision modes", "Unknown spatial decision modes", 1
             )
         elif "2-way threshold" in message:
-            message = "Invalid locked 2-way threshold in calibration_domain."
+            message = "Invalid selected 2-way direct threshold."
         elif "3-way threshold" in message:
-            message = "Invalid locked 3-way threshold in calibration_domain."
+            message = "Invalid selected 3-way direct thresholds."
         raise RuntimeError(message) from exc
     out["raw_uncertain"] = uncertain
     out["raw_target"] = target
-    coordinate_keys = ["domain_config_id", "source_image", "row", "col"]
+    coordinate_keys = [
+        "model_id",
+        "random_state",
+        "source_image",
+        "row",
+        "col",
+    ]
     duplicated_coordinates = out.duplicated(coordinate_keys, keep=False)
     if duplicated_coordinates.any():
         examples = out.loc[
-            duplicated_coordinates, coordinate_keys + ["object_id"]
+            duplicated_coordinates, coordinate_keys
         ].head(10)
         raise RuntimeError(
             "A spatial map contains duplicated pixel coordinates: "
             f"{examples.to_dict('records')}"
         )
     out["truth_level"] = expcfg.SPATIAL_CALIBRATION_TRUTH_SOURCE
-    return out
+    return out.reindex(columns=expcfg.SPATIAL_CALIBRATION_INPUT_COLUMNS)
 
 
 def _maps_for_group(group: pd.DataFrame, image_db: dict) -> dict[str, np.ndarray]:
@@ -484,9 +520,7 @@ def _summarize_fragment_classes(
         None,
     )
     rows = []
-    for index, (label_name, minimum, maximum) in enumerate(
-        zip(labels, minima, maxima)
-    ):
+    for label_name, minimum, maximum in zip(labels, minima, maxima):
         group = fragments.loc[fragments["area_class"].eq(label_name)]
         rows.append(
             {
@@ -506,155 +540,159 @@ def _summarize_fragment_classes(
     return rows
 
 
-def _select_global_candidate(
+def _select_candidate_within_track(
     metrics: pd.DataFrame,
     *,
+    track_id: str,
     tolerance: float,
 ) -> str:
-    candidates = metrics.loc[metrics["map_variant"].eq("postprocessed")].copy()
-    selection_metrics = [
-        "smallest_fragment_recall",
-        "component_recall",
-        "pixel_recall",
-        "dice",
-        "iou",
-        "component_precision",
-        "split_rate",
-        "merge_rate",
-    ]
-    selection_parameters = [
-        "min_area_pixels",
-        "morphology_radius",
-        "morphology_operation",
-        "connectivity",
-    ]
+    """Select one spatial candidate using only executions from one track."""
+    track_id = str(track_id)
+    candidates = metrics.loc[
+        metrics["map_variant"].astype(str).eq("postprocessed")
+        & metrics["track_id"].astype(str).eq(track_id)
+    ].copy()
+    if candidates.empty:
+        raise RuntimeError(
+            f"No post-processed spatial candidate is available for track {track_id}."
+        )
+
+    maximize = list(expcfg.SPATIAL_CALIBRATION_SELECTION_MAXIMIZE)
+    minimize = list(expcfg.SPATIAL_CALIBRATION_SELECTION_MINIMIZE)
+    selection_metrics = [*maximize, *minimize]
+    parameter_columns = list(expcfg.SPATIAL_CALIBRATION_PARAMETER_COLUMNS)
     required = {
-        "spatial_candidate_id",
-        "evaluation_track",
-        *selection_metrics,
-        *selection_parameters,
+        "spatial_candidate_id", "model_id", "random_state", "track_id",
+        *selection_metrics, *parameter_columns,
     }
     missing = sorted(required - set(candidates.columns))
     if missing:
         raise KeyError(f"Missing spatial selection columns: {missing}")
-    if candidates.empty:
-        raise RuntimeError("No spatial candidate can be locked.")
-    parameter_counts = candidates.groupby("spatial_candidate_id")[
-        selection_parameters
-    ].nunique(dropna=False)
-    if parameter_counts.gt(1).any().any():
-        raise RuntimeError("A candidate identifier has conflicting parameters.")
-    expected_tracks = set(candidates["evaluation_track"].astype(str))
-    track_coverage = candidates.groupby("spatial_candidate_id")[
-        "evaluation_track"
-    ].nunique()
-    if not track_coverage.eq(len(expected_tracks)).all():
-        raise RuntimeError("Spatial candidates do not cover identical track sets.")
-    expected_configurations = candidates[
-        ["domain_config_id", "evaluation_track"]
-    ].drop_duplicates()
-    configuration_coverage = candidates.groupby("spatial_candidate_id")[
-        "domain_config_id"
-    ].nunique()
-    if not configuration_coverage.eq(
-        expected_configurations["domain_config_id"].nunique()
-    ).all():
+
+    candidate_keys = ["spatial_candidate_id", "model_id", "random_state"]
+    if candidates.duplicated(candidate_keys).any():
         raise RuntimeError(
-            "Spatial candidates do not cover identical domain configurations."
+            f"Track {track_id} contains duplicate candidate/execution metrics."
         )
-    numeric_selection = candidates[selection_metrics].apply(
-        pd.to_numeric, errors="coerce"
+
+    parameter_counts = candidates.groupby(
+        "spatial_candidate_id", sort=False
+    )[parameter_columns].nunique(dropna=False)
+    if parameter_counts.gt(1).any().any():
+        raise RuntimeError(
+            f"A spatial candidate has conflicting parameters inside track {track_id}."
+        )
+
+    execution_keys = ["model_id", "random_state"]
+    n_expected_executions = len(candidates[execution_keys].drop_duplicates())
+    coverage = (
+        candidates[candidate_keys].drop_duplicates()
+        .groupby("spatial_candidate_id", sort=False).size()
     )
-    candidates[selection_metrics] = numeric_selection
-    complete_candidate = (
-        np.isfinite(numeric_selection.to_numpy(dtype=float))
-        .all(axis=1)
+    incomplete = coverage[coverage.ne(n_expected_executions)]
+    if len(incomplete):
+        raise RuntimeError(
+            f"Spatial candidates do not cover the same selected executions in "
+            f"track {track_id}: {incomplete.to_dict()}"
+        )
+
+    numeric = candidates[selection_metrics].apply(pd.to_numeric, errors="coerce")
+    finite = np.isfinite(numeric.to_numpy(dtype=float)).all(axis=1)
+    row_counts = candidates.groupby("spatial_candidate_id", sort=False).size()
+    complete_counts = (
+        candidates.loc[finite].groupby("spatial_candidate_id", sort=False).size()
+        .reindex(row_counts.index, fill_value=0)
     )
-    # An id is selectable only when every configuration contributes every
-    # predeclared metric; partial skip-na means would favor candidates with
-    # missing difficult cases.
-    row_counts = candidates.groupby("spatial_candidate_id").size()
-    complete_counts = candidates.loc[complete_candidate].groupby(
-        "spatial_candidate_id"
-    ).size()
-    selectable_ids = [
-        candidate_id
-        for candidate_id, count in row_counts.items()
-        if int(complete_counts.get(candidate_id, 0)) == int(count)
-    ]
+    selectable_ids = row_counts.index[complete_counts.eq(row_counts)]
+    if len(selectable_ids) == 0:
+        raise RuntimeError(
+            f"No spatial candidate has complete finite metrics in track {track_id}."
+        )
+    candidates.loc[:, selection_metrics] = numeric
     candidates = candidates.loc[
         candidates["spatial_candidate_id"].isin(selectable_ids)
     ].copy()
-    if candidates.empty:
-        raise RuntimeError(
-            "No spatial candidate has complete finite metrics on every configuration."
-        )
 
-    # Two-stage macro aggregation prevents tracks with many retained domain
-    # configurations from dominating the global lock (E4/E7/E8 can have very
-    # different configuration counts).
-    by_track = candidates.groupby(
-        ["spatial_candidate_id", "evaluation_track"], as_index=False
-    ).agg(
-        smallest_fragment_recall=("smallest_fragment_recall", "mean"),
-        component_recall=("component_recall", "mean"),
-        pixel_recall=("pixel_recall", "mean"),
-        dice=("dice", "mean"),
-        iou=("iou", "mean"),
-        component_precision=("component_precision", "mean"),
-        split_rate=("split_rate", "mean"),
-        merge_rate=("merge_rate", "mean"),
-        min_area_pixels=("min_area_pixels", "first"),
-        morphology_radius=("morphology_radius", "first"),
-        morphology_operation=("morphology_operation", "first"),
-        connectivity=("connectivity", "first"),
+    aggregation = {metric: (metric, "mean") for metric in selection_metrics}
+    aggregation.update(
+        {parameter: (parameter, "first") for parameter in parameter_columns}
     )
-    summary = by_track.groupby("spatial_candidate_id", as_index=False).agg(
-        smallest_fragment_recall=("smallest_fragment_recall", "mean"),
-        component_recall=("component_recall", "mean"),
-        pixel_recall=("pixel_recall", "mean"),
-        dice=("dice", "mean"),
-        iou=("iou", "mean"),
-        component_precision=("component_precision", "mean"),
-        split_rate=("split_rate", "mean"),
-        merge_rate=("merge_rate", "mean"),
-        min_area_pixels=("min_area_pixels", "first"),
-        morphology_radius=("morphology_radius", "first"),
-        morphology_operation=("morphology_operation", "first"),
-        connectivity=("connectivity", "first"),
-    )
+    summary = candidates.groupby(
+        "spatial_candidate_id", as_index=False, sort=False
+    ).agg(**aggregation)
+
     active = summary.copy()
-    for column in (
-        "smallest_fragment_recall",
-        "component_recall",
-        "pixel_recall",
-        "dice",
-        "iou",
-        "component_precision",
-    ):
-        finite = pd.to_numeric(active[column], errors="coerce")
-        if finite.notna().any():
-            best = float(finite.max())
-            active = active.loc[finite.ge(best - float(tolerance))].copy()
-    for column in ("split_rate", "merge_rate"):
-        finite = pd.to_numeric(active[column], errors="coerce")
-        if finite.notna().any():
-            best = float(finite.min())
-            active = active.loc[finite.le(best + float(tolerance))].copy()
-    active["operation_complexity"] = active["morphology_operation"].map(
-        {"none": 0, "opening": 1, "closing": 1, "opening_closing": 2}
+    for column in maximize:
+        best = float(active[column].max())
+        active = active.loc[active[column].ge(best - float(tolerance))]
+        if active.empty:
+            raise RuntimeError(
+                f"Spatial maximization removed every candidate for {track_id} at {column}."
+            )
+    for column in minimize:
+        best = float(active[column].min())
+        active = active.loc[active[column].le(best + float(tolerance))]
+        if active.empty:
+            raise RuntimeError(
+                f"Spatial minimization removed every candidate for {track_id} at {column}."
+            )
+
+    operation_complexity = active["morphology_operation"].astype(str).map(
+        expcfg.SPATIAL_CALIBRATION_OPERATION_COMPLEXITY
     )
+    if operation_complexity.isna().any():
+        unknown = sorted(set(active.loc[operation_complexity.isna(), "morphology_operation"].astype(str)))
+        raise RuntimeError(
+            f"Unknown morphology operations in track {track_id}: {unknown}"
+        )
+    active = active.assign(operation_complexity=operation_complexity.astype(int))
     active = active.sort_values(
-        [
-            "min_area_pixels",
-            "operation_complexity",
-            "morphology_radius",
-            "connectivity",
-            "spatial_candidate_id",
-        ],
+        ["min_area_pixels", "operation_complexity", "morphology_radius",
+         "connectivity", "spatial_candidate_id"],
         kind="mergesort",
     )
     return str(active.iloc[0]["spatial_candidate_id"])
+
+def _select_candidates_by_track(
+    metrics: pd.DataFrame,
+    *,
+    tolerance: float,
+    track_ids: Sequence[str] | None = None,
+) -> dict[str, str]:
+    """Select exactly one spatial candidate independently inside each track."""
+    observed_tracks = tuple(
+        dict.fromkeys(
+            metrics.loc[
+                metrics["map_variant"].astype(str).eq("postprocessed"),
+                "track_id",
+            ].astype(str)
+        )
+    )
+    if track_ids is None:
+        selected_tracks = observed_tracks
+    else:
+        selected_tracks = tuple(dict.fromkeys(map(str, track_ids)))
+
+    if not selected_tracks:
+        raise RuntimeError("No spatial track is available for within-track selection.")
+
+    missing_tracks = sorted(set(selected_tracks) - set(observed_tracks))
+    extra_tracks = sorted(set(observed_tracks) - set(selected_tracks))
+    if missing_tracks or extra_tracks:
+        raise RuntimeError(
+            "Spatial selection track coverage mismatch: "
+            f"missing={missing_tracks}, extra={extra_tracks}."
+        )
+
+    return {
+        track_id: _select_candidate_within_track(
+            metrics,
+            track_id=track_id,
+            tolerance=float(tolerance),
+        )
+        for track_id in selected_tracks
+    }
+
 
 
 def calibrate_spatial_postprocessing(
@@ -665,30 +703,58 @@ def calibrate_spatial_postprocessing(
     candidate_grid: pd.DataFrame | None = None,
     tolerance: float = expcfg.SPATIAL_CALIBRATION_SELECTION_TOLERANCE,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
-    """Evaluate raw/post maps and freeze one global OOF spatial candidate."""
+    """Evaluate OOF maps and freeze one independent spatial lock per track."""
     grid = _validate_spatial_candidate_grid(
         build_spatial_candidate_grid()
         if candidate_grid is None
         else candidate_grid.copy()
     )
-    group_ids = [
-        "domain_config_id",
-        "evaluation_track",
-        "track_id",
-        "projection_config_id",
-    ]
+    required_input = set(expcfg.SPATIAL_CALIBRATION_INPUT_COLUMNS)
+    missing_input = sorted(required_input - set(spatial_input.columns))
+    if missing_input:
+        raise KeyError(f"Missing compact spatial input columns: {missing_input}")
+    if spatial_input.empty:
+        raise RuntimeError("Spatial calibration input is empty.")
+
+    spatial_input = spatial_input.reindex(
+        columns=expcfg.SPATIAL_CALIBRATION_INPUT_COLUMNS
+    ).copy()
+    spatial_input["model_id"] = spatial_input["model_id"].astype(str)
+    spatial_input["track_id"] = spatial_input["track_id"].astype(str)
+    spatial_input["random_state"] = pd.to_numeric(
+        spatial_input["random_state"], errors="raise"
+    ).astype(int)
+
+    observed_tracks = tuple(
+        dict.fromkeys(spatial_input["track_id"].astype(str))
+    )
+    allowed_pixel_tracks = set(map(str, expcfg.SPATIAL_CALIBRATION_PIXEL_TRACK_IDS))
+    unexpected_tracks = sorted(set(observed_tracks) - allowed_pixel_tracks)
+    if unexpected_tracks:
+        raise RuntimeError(
+            "Spatial calibration received non-pixel-projection tracks: "
+            f"{unexpected_tracks}."
+        )
+
+    group_ids = ["model_id", "random_state", "track_id"]
     metric_rows: list[dict] = []
     fragment_rows: list[dict] = []
+
     for key, configuration in spatial_input.groupby(group_ids, sort=False):
-        metadata = dict(zip(group_ids, key if isinstance(key, tuple) else (key,)))
+        metadata = dict(
+            zip(group_ids, key if isinstance(key, tuple) else (key,))
+        )
         maps = [
             _maps_for_group(group, image_db)
             for _, group in configuration.groupby("source_image", sort=False)
         ]
+
         for connectivity in sorted(grid["connectivity"].astype(int).unique()):
             raw_id = f"raw_c{connectivity}"
             raw_metrics, raw_fragments = _evaluate_maps(
-                maps, connectivity=int(connectivity), candidate=None
+                maps,
+                connectivity=int(connectivity),
+                candidate=None,
             )
             metric_rows.append(
                 {
@@ -719,8 +785,9 @@ def calibrate_spatial_postprocessing(
                     },
                 )
             )
+
         for candidate in grid.to_dict("records"):
-            metrics, fragments = _evaluate_maps(
+            candidate_metrics, candidate_fragments = _evaluate_maps(
                 maps,
                 connectivity=int(candidate["connectivity"]),
                 candidate=candidate,
@@ -734,10 +801,12 @@ def calibrate_spatial_postprocessing(
                     **candidate_metadata,
                     "map_variant": "postprocessed",
                     "connectivity": int(candidate["connectivity"]),
-                    "morphology_operation": str(candidate["morphology_operation"]),
+                    "morphology_operation": str(
+                        candidate["morphology_operation"]
+                    ),
                     "morphology_radius": int(candidate["morphology_radius"]),
                     "min_area_pixels": int(candidate["min_area_pixels"]),
-                    **metrics,
+                    **candidate_metrics,
                     "is_locked_candidate": False,
                     "truth_level": expcfg.SPATIAL_CALIBRATION_TRUTH_SOURCE,
                     "protocol_version": expcfg.PROTOCOL_VERSION,
@@ -746,7 +815,7 @@ def calibrate_spatial_postprocessing(
             )
             fragment_rows.extend(
                 _summarize_fragment_classes(
-                    fragments,
+                    candidate_fragments,
                     metadata={
                         **candidate_metadata,
                         "is_locked_candidate": False,
@@ -756,34 +825,129 @@ def calibrate_spatial_postprocessing(
                     },
                 )
             )
+
     metrics = pd.DataFrame(metric_rows)
     fragments = pd.DataFrame(fragment_rows)
-    selected_id = _select_global_candidate(metrics, tolerance=float(tolerance))
-    metrics["is_locked_candidate"] = metrics["spatial_candidate_id"].eq(selected_id)
-    fragments["is_locked_candidate"] = fragments["spatial_candidate_id"].eq(selected_id)
+
+    selected_by_track = _select_candidates_by_track(
+        metrics,
+        tolerance=float(tolerance),
+        track_ids=observed_tracks,
+    )
+
+    selected_metric_id = metrics["track_id"].astype(str).map(selected_by_track)
+    metrics["is_locked_candidate"] = (
+        metrics["map_variant"].astype(str).eq("postprocessed")
+        & metrics["spatial_candidate_id"].astype(str).eq(selected_metric_id)
+    )
+
+    selected_fragment_id = fragments["track_id"].astype(str).map(
+        selected_by_track
+    )
+    fragments["is_locked_candidate"] = (
+        fragments["spatial_candidate_id"].astype(str).eq(
+            selected_fragment_id
+        )
+    )
+
     metrics = metrics.reindex(columns=expcfg.SPATIAL_CALIBRATION_METRIC_COLUMNS)
     fragments = fragments.reindex(columns=expcfg.FRAGMENT_SIZE_CLASS_COLUMNS)
-    selected = grid.loc[grid["spatial_candidate_id"].eq(selected_id)]
-    if len(selected) != 1:
-        raise RuntimeError("The global spatial lock is not unique.")
-    selected_payload = selected.iloc[0].to_dict()
+
+    metric_keys = [
+        "track_id",
+        "spatial_candidate_id",
+        "map_variant",
+        "model_id",
+        "random_state",
+    ]
+    fragment_keys = [
+        "track_id",
+        "spatial_candidate_id",
+        "model_id",
+        "random_state",
+        "area_class",
+    ]
+    if metrics.duplicated(metric_keys).any():
+        raise RuntimeError("Spatial metric natural keys are not unique.")
+    if fragments.duplicated(fragment_keys).any():
+        raise RuntimeError("Fragment-class natural keys are not unique.")
+
+    selected_parameters_by_track: dict[str, dict] = {}
+    selected_counts_by_track: dict[str, dict[str, int]] = {}
+
+    for track_id in observed_tracks:
+        selected_id = str(selected_by_track[track_id])
+        selected = grid.loc[
+            grid["spatial_candidate_id"].astype(str).eq(selected_id)
+        ]
+        if len(selected) != 1:
+            raise RuntimeError(
+                f"The spatial lock is not unique inside track {track_id}."
+            )
+        payload = selected.iloc[0].to_dict()
+        selected_parameters_by_track[str(track_id)] = {
+            "spatial_candidate_id": str(payload["spatial_candidate_id"]),
+            "connectivity": int(payload["connectivity"]),
+            "morphology_operation": str(payload["morphology_operation"]),
+            "morphology_radius": int(payload["morphology_radius"]),
+            "min_area_pixels": int(payload["min_area_pixels"]),
+        }
+
+        track_input = spatial_input.loc[
+            spatial_input["track_id"].astype(str).eq(str(track_id))
+        ]
+        selected_counts_by_track[str(track_id)] = {
+            "models": int(track_input["model_id"].nunique()),
+            "executions": int(
+                len(
+                    track_input[
+                        ["model_id", "random_state"]
+                    ].drop_duplicates()
+                )
+            ),
+        }
+
     lock = {
         "protocol_version": expcfg.PROTOCOL_VERSION,
         "protocol_hash": str(protocol_hash),
         "rule_version": expcfg.SPATIAL_CALIBRATION_RULE_VERSION,
         "truth_source": expcfg.SPATIAL_CALIBRATION_TRUTH_SOURCE,
-        "allowed_batches": list(map(int, expcfg.SPATIAL_CALIBRATION_ALLOWED_BATCHES)),
-        "forbidden_batches": list(map(int, expcfg.SPATIAL_CALIBRATION_FORBIDDEN_BATCHES)),
-        "uncertain_pixel_policy": "preserve_as_distinct_immutable_layer",
-        "selection_policy": (
-            "global_track_balanced_lexicographic_plateau_then_minimum_complexity"
+        "allowed_batches": list(
+            map(int, expcfg.SPATIAL_CALIBRATION_ALLOWED_BATCHES)
         ),
-        "selection_weighting": (
-            "equal_evaluation_track_after_equal_domain_configuration"
+        "forbidden_batches": list(
+            map(int, expcfg.SPATIAL_CALIBRATION_FORBIDDEN_BATCHES)
+        ),
+        "uncertain_pixel_policy": "preserve_as_distinct_immutable_layer",
+        "selection_scope": expcfg.SPATIAL_CALIBRATION_SELECTION_SCOPE,
+        "selection_policy": expcfg.SPATIAL_CALIBRATION_SELECTION_POLICY,
+        "within_track_aggregation": (
+            expcfg.SPATIAL_CALIBRATION_WITHIN_TRACK_AGGREGATION
         ),
         "selection_tolerance": float(tolerance),
-        "selected_parameters": selected_payload,
+        "selection_maximize": list(
+            map(str, expcfg.SPATIAL_CALIBRATION_SELECTION_MAXIMIZE)
+        ),
+        "selection_minimize": list(
+            map(str, expcfg.SPATIAL_CALIBRATION_SELECTION_MINIMIZE)
+        ),
+        "spatial_track_ids": list(map(str, observed_tracks)),
+        "n_selected_models": int(spatial_input["model_id"].nunique()),
+        "n_selected_executions": int(
+            len(
+                spatial_input[
+                    ["model_id", "random_state"]
+                ].drop_duplicates()
+            )
+        ),
+        "selected_counts_by_track": selected_counts_by_track,
+        "selected_parameters_by_track": selected_parameters_by_track,
         "area_minimum_version": expcfg.SPATIAL_CALIBRATION_RULE_VERSION,
+        "spatial_input_sha256": sha256_dataframe(
+            spatial_input.reindex(
+                columns=expcfg.SPATIAL_CALIBRATION_INPUT_COLUMNS
+            )
+        ),
         "candidate_grid_sha256": sha256_dataframe(grid),
         "spatial_calibration_metrics_sha256": sha256_dataframe(metrics),
         "fragment_size_classes_sha256": sha256_dataframe(fragments),
@@ -797,22 +961,239 @@ def verify_spatial_postprocessing_lock(
     metrics: pd.DataFrame,
     fragments: pd.DataFrame,
 ) -> None:
-    """Block when a locked parameter or calibration output has changed."""
+    """Verify the per-track 03C lock and its persisted calibration outputs."""
     payload = dict(lock)
     lock_hash = payload.pop("lock_sha256", None)
     expected_hash = _payload_hash(payload)
     if str(lock_hash) != expected_hash:
         raise RuntimeError("The spatial post-processing lock was modified.")
+
+    if str(lock.get("protocol_version", "")) != str(expcfg.PROTOCOL_VERSION):
+        raise RuntimeError(
+            "The spatial post-processing lock belongs to another protocol version."
+        )
+    if str(lock.get("rule_version", "")) != str(
+        expcfg.SPATIAL_CALIBRATION_RULE_VERSION
+    ):
+        raise RuntimeError(
+            "The spatial post-processing lock uses another rule version."
+        )
+    if str(lock.get("truth_source", "")) != str(
+        expcfg.SPATIAL_CALIBRATION_TRUTH_SOURCE
+    ):
+        raise RuntimeError(
+            "The spatial post-processing lock uses another truth source."
+        )
+    if str(lock.get("selection_scope", "")) != str(
+        expcfg.SPATIAL_CALIBRATION_SELECTION_SCOPE
+    ):
+        raise RuntimeError("The spatial lock is not explicitly within-track.")
+    if str(lock.get("selection_policy", "")) != str(
+        expcfg.SPATIAL_CALIBRATION_SELECTION_POLICY
+    ):
+        raise RuntimeError("Unexpected spatial selection policy.")
+    if str(lock.get("within_track_aggregation", "")) != str(
+        expcfg.SPATIAL_CALIBRATION_WITHIN_TRACK_AGGREGATION
+    ):
+        raise RuntimeError("Unexpected within-track aggregation policy.")
+
+    legacy_fields = sorted(
+        {"selected_parameters", "selection_weighting"}.intersection(lock)
+    )
+    if legacy_fields:
+        raise RuntimeError(
+            f"Legacy global spatial-lock fields are forbidden: {legacy_fields}."
+        )
+
     if str(lock["spatial_calibration_metrics_sha256"]) != sha256_dataframe(metrics):
-        raise RuntimeError("spatial_calibration_metrics.parquet changed after lock.")
+        raise RuntimeError(
+            "spatial_calibration_metrics.parquet changed after lock."
+        )
     if str(lock["fragment_size_classes_sha256"]) != sha256_dataframe(fragments):
         raise RuntimeError("fragment_size_classes.parquet changed after lock.")
-    selected_id = str(lock["selected_parameters"]["spatial_candidate_id"])
-    selected = metrics.loc[
-        metrics["is_locked_candidate"].astype(bool), "spatial_candidate_id"
-    ].astype(str).unique()
-    if selected.tolist() != [selected_id]:
-        raise RuntimeError("Locked spatial candidate does not match metrics.")
+
+    selected_parameters_by_track = lock.get("selected_parameters_by_track")
+    if not isinstance(selected_parameters_by_track, Mapping):
+        raise RuntimeError(
+            "The spatial lock has no selected_parameters_by_track mapping."
+        )
+    selected_parameters_by_track = {
+        str(track_id): dict(parameters)
+        for track_id, parameters in selected_parameters_by_track.items()
+    }
+
+    spatial_track_ids = tuple(map(str, lock.get("spatial_track_ids", ())))
+    if not spatial_track_ids:
+        raise RuntimeError("The spatial lock has no spatial_track_ids.")
+    if len(set(spatial_track_ids)) != len(spatial_track_ids):
+        raise RuntimeError("spatial_track_ids contains duplicates.")
+    if set(selected_parameters_by_track) != set(spatial_track_ids):
+        raise RuntimeError(
+            "Each spatial track must have exactly one locked parameter payload."
+        )
+
+    allowed_pixel_tracks = set(map(str, expcfg.SPATIAL_CALIBRATION_PIXEL_TRACK_IDS))
+    if not set(spatial_track_ids).issubset(allowed_pixel_tracks):
+        raise RuntimeError(
+            "The spatial lock contains a non-pixel-projection track."
+        )
+
+    metric_tracks = set(metrics["track_id"].astype(str))
+    fragment_tracks = set(fragments["track_id"].astype(str))
+    if metric_tracks != set(spatial_track_ids):
+        raise RuntimeError(
+            "Spatial metric tracks do not match the locked track universe."
+        )
+    if fragment_tracks != set(spatial_track_ids):
+        raise RuntimeError(
+            "Fragment-class tracks do not match the locked track universe."
+        )
+
+    if metrics.loc[
+        metrics["map_variant"].astype(str).eq("raw"),
+        "is_locked_candidate",
+    ].fillna(False).astype(bool).any():
+        raise RuntimeError("A raw map was incorrectly marked as locked.")
+
+    required_parameter_keys = set(
+        expcfg.SPATIAL_CALIBRATION_REQUIRED_LOCK_PARAMETER_KEYS
+    )
+    counts_by_track = lock.get("selected_counts_by_track", {})
+    if counts_by_track and not isinstance(counts_by_track, Mapping):
+        raise RuntimeError("selected_counts_by_track must be a mapping.")
+
+    for track_id in spatial_track_ids:
+        parameters = selected_parameters_by_track[track_id]
+        missing_parameters = sorted(
+            required_parameter_keys - set(parameters)
+        )
+        if missing_parameters:
+            raise KeyError(
+                f"Track {track_id} spatial lock is missing parameters: "
+                f"{missing_parameters}."
+            )
+
+        candidate_payload = {
+            parameter: parameters[parameter]
+            for parameter in expcfg.SPATIAL_CALIBRATION_PARAMETER_COLUMNS
+        }
+        expected_candidate_id = _candidate_id(candidate_payload)
+        selected_id = str(parameters["spatial_candidate_id"])
+        if selected_id != expected_candidate_id:
+            raise RuntimeError(
+                f"Track {track_id} spatial candidate id does not match its parameters."
+            )
+
+        track_metrics = metrics.loc[
+            metrics["track_id"].astype(str).eq(track_id)
+        ].copy()
+        locked_metrics = track_metrics.loc[
+            track_metrics["is_locked_candidate"].fillna(False).astype(bool)
+        ]
+        if locked_metrics.empty:
+            raise RuntimeError(
+                f"Track {track_id} has no locked spatial metric rows."
+            )
+        if not locked_metrics["map_variant"].astype(str).eq(
+            "postprocessed"
+        ).all():
+            raise RuntimeError(
+                f"Track {track_id} has a non-postprocessed locked row."
+            )
+        locked_ids = set(
+            locked_metrics["spatial_candidate_id"].astype(str)
+        )
+        if locked_ids != {selected_id}:
+            raise RuntimeError(
+                f"Track {track_id} locked candidate does not match metrics."
+            )
+
+        execution_keys = ["model_id", "random_state"]
+        expected_executions = set(
+            track_metrics[execution_keys]
+            .drop_duplicates()
+            .itertuples(index=False, name=None)
+        )
+        locked_executions = set(
+            locked_metrics[execution_keys]
+            .drop_duplicates()
+            .itertuples(index=False, name=None)
+        )
+        if locked_executions != expected_executions:
+            raise RuntimeError(
+                f"Track {track_id} lock does not cover every selected execution."
+            )
+        if locked_metrics.duplicated(execution_keys).any():
+            raise RuntimeError(
+                f"Track {track_id} has more than one locked candidate row per execution."
+            )
+
+        parameter_columns = list(
+            expcfg.SPATIAL_CALIBRATION_PARAMETER_COLUMNS
+        )
+        parameter_values = locked_metrics[parameter_columns].drop_duplicates()
+        if len(parameter_values) != 1:
+            raise RuntimeError(
+                f"Track {track_id} locked metric rows disagree on parameters."
+            )
+        row = parameter_values.iloc[0]
+        for parameter in parameter_columns:
+            expected_value = parameters[parameter]
+            observed_value = row[parameter]
+            if parameter in {
+                "connectivity",
+                "morphology_radius",
+                "min_area_pixels",
+            }:
+                if int(observed_value) != int(expected_value):
+                    raise RuntimeError(
+                        f"Track {track_id} locked parameter mismatch: {parameter}."
+                    )
+            elif str(observed_value) != str(expected_value):
+                raise RuntimeError(
+                    f"Track {track_id} locked parameter mismatch: {parameter}."
+                )
+
+        track_fragments = fragments.loc[
+            fragments["track_id"].astype(str).eq(track_id)
+        ]
+        locked_fragments = track_fragments.loc[
+            track_fragments["is_locked_candidate"]
+            .fillna(False)
+            .astype(bool)
+        ]
+        if locked_fragments.empty:
+            raise RuntimeError(
+                f"Track {track_id} has no locked fragment-class rows."
+            )
+        fragment_ids = set(
+            locked_fragments["spatial_candidate_id"].astype(str)
+        )
+        if fragment_ids != {selected_id}:
+            raise RuntimeError(
+                f"Track {track_id} fragment lock does not match metrics."
+            )
+
+        if counts_by_track:
+            raw_counts = counts_by_track.get(track_id)
+            if not isinstance(raw_counts, Mapping):
+                raise RuntimeError(
+                    f"Track {track_id} has no selected_counts_by_track payload."
+                )
+            observed_models = int(
+                locked_metrics["model_id"].astype(str).nunique()
+            )
+            observed_executions = int(
+                len(locked_metrics[execution_keys].drop_duplicates())
+            )
+            if int(raw_counts.get("models", -1)) != observed_models:
+                raise RuntimeError(
+                    f"Track {track_id} locked model count mismatch."
+                )
+            if int(raw_counts.get("executions", -1)) != observed_executions:
+                raise RuntimeError(
+                    f"Track {track_id} locked execution count mismatch."
+                )
 
 
 def encode_boolean_map(
@@ -837,105 +1218,330 @@ def decode_boolean_map(payload: bytes, shape: Sequence[int]) -> np.ndarray:
 
 
 def build_locked_spatial_validation_outputs(
-    candidate_pool: pd.DataFrame,
+    validation_executions: pd.DataFrame,
+    selected_thresholds: pd.DataFrame,
     pixel_predictions: pd.DataFrame,
     image_db: Mapping[str, Mapping],
     spatial_lock: Mapping,
 ) -> dict[str, pd.DataFrame]:
-    """Build task-32 raw/post maps, components and fragment diagnostics."""
-    required_candidates = {
-        "validation_candidate_id",
-        "calibration_id",
-        "projection_config_id",
-        "evaluation_track",
-        "track_id",
-        "projection_level",
-        "decision_mode",
-        "random_state",
-        "direct_2way_threshold",
-        "three_way_lower_threshold",
-        "three_way_upper_threshold",
-    }
-    required_pixels = {
-        "projection_config_id",
-        "random_state",
-        "source_image",
-        "object_id",
-        "batch",
-        "row",
-        "col",
-        "simca_margin",
-    }
+    """Build locked batch-3 pixel maps and spatial diagnostics for 04C.
+
+    The function reuses the canonical 03B identities. One scientific execution
+    is addressed by ``(model_id, random_state)`` and continuous pixel
+    predictions by ``projection_id``. Only the locked ``direct`` decision scope
+    is spatially reconstructed; ``pixel_to_object`` is an object-level decision
+    and therefore has no pixel map.
+    """
+    required_executions = set(expcfg.SIMCA_VALIDATION_EXECUTION_COLUMNS)
+    required_thresholds = set(
+        expcfg.INTERNAL_CALIBRATION_SELECTED_THRESHOLD_COLUMNS
+    )
+    required_pixels = set(expcfg.SIMCA_VALIDATION_PIXEL_PREDICTION_COLUMNS)
     for frame, required, name in (
-        (candidate_pool, required_candidates, "candidate_pool"),
+        (validation_executions, required_executions, "validation_executions"),
+        (selected_thresholds, required_thresholds, "selected_thresholds"),
         (pixel_predictions, required_pixels, "validation_pixel_predictions"),
     ):
         missing = sorted(required - set(frame.columns))
         if missing:
             raise KeyError(f"{name} is missing spatial columns: {missing}")
-    payload = dict(spatial_lock)
-    lock_hash = str(payload.pop("lock_sha256", ""))
-    if lock_hash != _payload_hash(payload):
+
+    # ------------------------------------------------------------------
+    # Verify the immutable 03C spatial lock before using any parameter.
+    # ------------------------------------------------------------------
+    lock_payload = dict(spatial_lock)
+    lock_hash = str(lock_payload.pop("lock_sha256", ""))
+    if not lock_hash or lock_hash != _payload_hash(lock_payload):
         raise RuntimeError("The spatial post-processing lock was modified.")
-    parameters = dict(spatial_lock["selected_parameters"])
-    connectivity = int(parameters["connectivity"])
-    pixel_candidates = candidate_pool.loc[
-        candidate_pool["projection_level"].astype(str).eq("pixel_projection")
+    if str(spatial_lock.get("protocol_version", "")) != str(
+        expcfg.PROTOCOL_VERSION
+    ):
+        raise RuntimeError(
+            "The spatial post-processing lock belongs to another protocol version."
+        )
+    if str(spatial_lock.get("truth_source", "")) != str(
+        expcfg.SPATIAL_CALIBRATION_TRUTH_SOURCE
+    ):
+        raise RuntimeError(
+            "The spatial post-processing lock uses another truth source."
+        )
+    if expcfg.SIMCA_CONCAT_REFIT_MAP_ENCODING != "packbits_zlib_v1":
+        raise RuntimeError(
+            "encode_boolean_map currently implements packbits_zlib_v1 only."
+        )
+
+    if "selected_parameters" in spatial_lock or "selection_weighting" in spatial_lock:
+        raise RuntimeError(
+            "Legacy global spatial-lock fields are forbidden in 04C."
+        )
+    if str(spatial_lock.get("selection_scope", "")) != str(
+        expcfg.SPATIAL_CALIBRATION_SELECTION_SCOPE
+    ):
+        raise RuntimeError("04C requires the within-track 03C spatial lock.")
+
+    raw_parameters_by_track = spatial_lock.get("selected_parameters_by_track")
+    if not isinstance(raw_parameters_by_track, Mapping):
+        raise RuntimeError(
+            "The spatial lock has no selected_parameters_by_track mapping."
+        )
+    parameters_by_track = {
+        str(track_id): dict(parameters)
+        for track_id, parameters in raw_parameters_by_track.items()
+    }
+    required_parameters = set(
+        expcfg.SPATIAL_CALIBRATION_REQUIRED_LOCK_PARAMETER_KEYS
+    )
+    for track_id, parameters in parameters_by_track.items():
+        missing_parameters = sorted(required_parameters - set(parameters))
+        if missing_parameters:
+            raise KeyError(
+                f"Track {track_id} spatial lock is missing parameters: "
+                f"{missing_parameters}."
+            )
+        connectivity = int(parameters["connectivity"])
+        if connectivity not in {1, 2}:
+            raise RuntimeError(
+                f"Track {track_id} locked 2D connectivity must be 1 or 2."
+            )
+
+    # ------------------------------------------------------------------
+    # Normalize the canonical execution and threshold registries.
+    # ------------------------------------------------------------------
+    executions = validation_executions.copy()
+    executions["model_id"] = executions["model_id"].astype(str)
+    executions["projection_id"] = executions["projection_id"].astype(str)
+    executions["track_id"] = executions["track_id"].astype(str)
+    executions["random_state"] = pd.to_numeric(
+        executions["random_state"], errors="raise"
+    ).astype(int)
+    run_keys = ["model_id", "random_state"]
+    if executions.duplicated(run_keys).any():
+        raise RuntimeError(
+            "Validation executions duplicate the natural (model_id, random_state) key."
+        )
+
+    pixel_execution_mask = executions["projection_level"].astype(str).eq(
+        "pixel_projection"
+    )
+    supported_statuses = set(
+        map(str, expcfg.SIMCA_CONCAT_REFIT_SUPPORTED_ELIGIBILITY_STATUSES)
+    )
+    supported_pixel_mask = (
+        pixel_execution_mask
+        & executions["eligibility_status"].astype(str).isin(supported_statuses)
+        & executions["downstream_status"].astype(str).eq("supported")
+    )
+    pixel_executions = executions.loc[
+        supported_pixel_mask,
+        [
+            "model_id",
+            "random_state",
+            "projection_id",
+            "track_id",
+            "decision_mode",
+        ],
     ].copy()
+
+    lock_tracks = set(map(str, parameters_by_track))
+    supported_pixel_tracks = set(pixel_executions["track_id"].astype(str))
+    if supported_pixel_tracks != lock_tracks:
+        raise RuntimeError(
+            "04C supported pixel-track universe does not match the 03C spatial lock: "
+            f"supported={sorted(supported_pixel_tracks)}, locked={sorted(lock_tracks)}."
+        )
+
+    if pixel_executions.empty:
+        return {
+            "pixel_maps_manifest": pd.DataFrame(
+                columns=expcfg.SIMCA_PIXEL_MAP_MANIFEST_COLUMNS
+            ),
+            "spatial_components": pd.DataFrame(
+                columns=expcfg.SIMCA_SPATIAL_COMPONENT_COLUMNS
+            ),
+            "spatial_component_metrics": pd.DataFrame(
+                columns=expcfg.SIMCA_SPATIAL_COMPONENT_METRIC_COLUMNS
+            ),
+        }
+
+    thresholds = selected_thresholds.loc[
+        :, list(expcfg.INTERNAL_CALIBRATION_SELECTED_THRESHOLD_COLUMNS)
+    ].copy()
+    thresholds["model_id"] = thresholds["model_id"].astype(str)
+    thresholds["random_state"] = pd.to_numeric(
+        thresholds["random_state"], errors="raise"
+    ).astype(int)
+    thresholds["decision_scope"] = thresholds["decision_scope"].astype(str)
+    direct = thresholds.loc[
+        thresholds["decision_scope"].eq("direct"),
+        [*run_keys, "lower_threshold", "upper_threshold"],
+    ].copy()
+    if direct.duplicated(run_keys).any():
+        raise RuntimeError(
+            "A pixel validation execution has duplicate direct thresholds."
+        )
+
+    threshold_coverage = pixel_executions[run_keys].merge(
+        direct[run_keys].assign(_threshold_present=True),
+        on=run_keys,
+        how="left",
+        validate="one_to_one",
+    )
+    if threshold_coverage["_threshold_present"].isna().any():
+        missing_keys = threshold_coverage.loc[
+            threshold_coverage["_threshold_present"].isna(), run_keys
+        ].to_dict("records")
+        raise RuntimeError(
+            "A pixel validation execution has no locked direct threshold: "
+            f"{missing_keys[:10]}"
+        )
+
+    pixel_executions = pixel_executions.merge(
+        direct,
+        on=run_keys,
+        how="left",
+        validate="one_to_one",
+    )
+    lower = pd.to_numeric(
+        pixel_executions["lower_threshold"], errors="coerce"
+    ).to_numpy(dtype=float)
+    upper = pd.to_numeric(
+        pixel_executions["upper_threshold"], errors="coerce"
+    ).to_numpy(dtype=float)
+    if not np.isfinite(np.column_stack([lower, upper])).all():
+        raise RuntimeError("A selected direct threshold is non-finite.")
+    two_way = pixel_executions["decision_mode"].astype(str).eq("2way").to_numpy()
+    three_way = pixel_executions["decision_mode"].astype(str).eq("3way").to_numpy()
+    if not (two_way | three_way).all():
+        unknown = sorted(
+            set(
+                pixel_executions.loc[
+                    ~(two_way | three_way), "decision_mode"
+                ].astype(str)
+            )
+        )
+        raise RuntimeError(f"Unknown spatial decision modes: {unknown}")
+    if not np.isclose(lower[two_way], upper[two_way]).all():
+        raise RuntimeError("A selected 2-way direct threshold is inconsistent.")
+    if not (lower[three_way] < upper[three_way]).all():
+        raise RuntimeError("A selected 3-way direct threshold is inconsistent.")
+
+    # ------------------------------------------------------------------
+    # Continuous predictions are stored once per projection_id.
+    # ------------------------------------------------------------------
+    predictions = pixel_predictions.copy()
+    predictions["projection_id"] = predictions["projection_id"].astype(str)
+    duplicate_prediction_key = [
+        "projection_id",
+        "source_image",
+        "object_id",
+        "row",
+        "col",
+    ]
+    if predictions.duplicated(duplicate_prediction_key).any():
+        raise RuntimeError(
+            "validation_pixel_predictions duplicates its natural observation key."
+        )
     prediction_lookup = {
-        (str(key[0]), int(key[1])): np.asarray(indices, dtype=int)
-        for key, indices in pixel_predictions.groupby(
-            ["projection_config_id", "random_state"], sort=False
+        str(projection_id): np.asarray(indices, dtype=int)
+        for projection_id, indices in predictions.groupby(
+            "projection_id", sort=False, dropna=False
         ).indices.items()
     }
-    manifests: list[dict] = []
-    component_parts: list[pd.DataFrame] = []
-    metric_rows: list[dict] = []
 
+    manifests: list[dict[str, object]] = []
+    component_parts: list[pd.DataFrame] = []
+    metric_rows: list[dict[str, object]] = []
     bounds = tuple(expcfg.SPATIAL_CALIBRATION_FRAGMENT_AREA_UPPER_BOUNDS)
-    labels = tuple(expcfg.SPATIAL_CALIBRATION_FRAGMENT_AREA_LABELS)
-    for candidate in pixel_candidates.to_dict("records"):
-        validation_candidate_id = str(candidate["validation_candidate_id"])
-        calibration_id = str(candidate["calibration_id"])
-        projection_id = str(candidate["projection_config_id"])
-        key = (projection_id, int(candidate["random_state"]))
-        positions = prediction_lookup.get(key)
+    labels = tuple(map(str, expcfg.SPATIAL_CALIBRATION_FRAGMENT_AREA_LABELS))
+    allowed_batches = set(map(int, expcfg.SIMCA_CONCAT_REFIT_PROJECTION_BATCHES))
+
+    # ------------------------------------------------------------------
+    # Reconstruct direct pixel decisions and apply the immutable 03C lock.
+    # ------------------------------------------------------------------
+    for execution in pixel_executions.to_dict("records"):
+        model_id = str(execution["model_id"])
+        random_state = int(execution["random_state"])
+        track_id = str(execution["track_id"])
+        projection_id = str(execution["projection_id"])
+        decision_mode = str(execution["decision_mode"])
+        if track_id not in parameters_by_track:
+            raise RuntimeError(
+                f"No track-specific spatial lock is available for {track_id}."
+            )
+        parameters = parameters_by_track[track_id]
+        connectivity = int(parameters["connectivity"])
+
+        positions = prediction_lookup.get(projection_id)
         if positions is None or not len(positions):
-            # The technical failure is already retained in validation_metrics.
+            # A missing projection is represented by validation technical events
+            # and will become a technical failure in the guardrail table.
             continue
-        observations = pixel_predictions.iloc[positions].copy()
-        target, uncertain = apply_locked_margin_decision(
-            observations["simca_margin"].to_numpy(dtype=float),
-            str(candidate["decision_mode"]),
-            direct_2way_threshold=candidate["direct_2way_threshold"],
-            three_way_lower_threshold=candidate["three_way_lower_threshold"],
-            three_way_upper_threshold=candidate["three_way_upper_threshold"],
+
+        observations = predictions.iloc[positions].copy()
+        margin = pd.to_numeric(
+            observations["simca_margin"], errors="coerce"
+        ).to_numpy(dtype=float)
+        if not np.isfinite(margin).all():
+            raise RuntimeError(
+                f"Non-finite validation margin for projection_id={projection_id!r}."
+            )
+
+        direct_target, direct_uncertain = apply_locked_margin_decision(
+            margin,
+            decision_mode,
+            direct_2way_threshold=float(execution["lower_threshold"]),
+            three_way_lower_threshold=float(execution["lower_threshold"]),
+            three_way_upper_threshold=float(execution["upper_threshold"]),
         )
-        observations["__raw_target"] = target
-        observations["__uncertain"] = uncertain
+        observations["__raw_target"] = np.asarray(direct_target, dtype=bool)
+        observations["__uncertain"] = np.asarray(direct_uncertain, dtype=bool)
+
         for image_key, image_positions in observations.groupby(
             "source_image", sort=False
         ).indices.items():
             image_key = str(image_key)
             if image_key not in image_db:
-                raise KeyError(f"Validation image is absent from HDF5: {image_key}")
-            group = observations.iloc[image_positions]
+                raise KeyError(
+                    f"Validation image is absent from HDF5: {image_key!r}"
+                )
+            group = observations.iloc[image_positions].copy()
             if group.duplicated(["row", "col"]).any():
                 raise RuntimeError(
                     f"Duplicated validation pixel coordinates for {image_key}."
                 )
-            batch_values = pd.to_numeric(group["batch"], errors="raise").astype(int)
-            if set(batch_values) != set(
-                map(int, expcfg.SIMCA_CONCAT_REFIT_PROJECTION_BATCHES)
+
+            batch_values = pd.to_numeric(
+                group["batch"], errors="raise"
+            ).astype(int)
+            observed_batches = set(batch_values.tolist())
+            if len(observed_batches) != 1 or not observed_batches.issubset(
+                allowed_batches
             ):
-                raise RuntimeError("Spatial validation must use batch 3 only.")
+                raise RuntimeError(
+                    "Spatial validation observations must belong to exactly one "
+                    f"allowed batch; image={image_key!r}, batches={sorted(observed_batches)}."
+                )
+
             truth_result = pure_image_class_truth(
                 image_key,
                 dict(image_db),
                 target_class=expcfg.TARGET_CLASS,
                 allowed_batches=expcfg.SIMCA_CONCAT_REFIT_PROJECTION_BATCHES,
             )
-            shape = truth_result.truth_mask.shape
+            if str(truth_result.truth_level) != str(
+                expcfg.SIMCA_CONCAT_REFIT_TRUTH_SOURCE
+            ):
+                raise RuntimeError(
+                    "Validation spatial truth does not match the frozen 04C truth source."
+                )
+
+            shape = tuple(map(int, truth_result.truth_mask.shape))
+            image_labels = np.asarray(image_db[image_key]["labels"])
+            if image_labels.shape != shape:
+                raise RuntimeError(
+                    f"HDF5 label shape disagrees with truth for {image_key!r}."
+                )
+
             row = pd.to_numeric(group["row"], errors="raise").astype(int).to_numpy()
             col = pd.to_numeric(group["col"], errors="raise").astype(int).to_numpy()
             inside = (
@@ -945,17 +1551,21 @@ def build_locked_spatial_validation_outputs(
                 & (col < shape[1])
             )
             if not inside.all():
-                raise RuntimeError(f"Validation coordinates outside {image_key}.")
+                raise RuntimeError(f"Validation coordinates outside {image_key!r}.")
+
             valid = np.zeros(shape, dtype=bool)
             raw_target = np.zeros(shape, dtype=bool)
             uncertain_map = np.zeros(shape, dtype=bool)
             valid[row, col] = True
             raw_target[row, col] = group["__raw_target"].astype(bool).to_numpy()
             uncertain_map[row, col] = group["__uncertain"].astype(bool).to_numpy()
-            valid &= truth_result.available_mask
+
+            valid &= np.asarray(truth_result.available_mask, dtype=bool)
             raw_target &= valid
             uncertain_map &= valid
-            truth = truth_result.truth_mask & valid
+            raw_target &= ~uncertain_map
+            truth = np.asarray(truth_result.truth_mask, dtype=bool) & valid
+
             post_target, preserved_uncertain = apply_spatial_postprocessing(
                 raw_target,
                 uncertain_map,
@@ -967,14 +1577,12 @@ def build_locked_spatial_validation_outputs(
             )
             if not np.array_equal(preserved_uncertain, uncertain_map):
                 raise RuntimeError("Locked morphology modified uncertainty.")
+
             manifests.append(
                 {
-                    "validation_candidate_id": validation_candidate_id,
-                    "calibration_id": calibration_id,
-                    "evaluation_track": str(candidate["evaluation_track"]),
-                    "track_id": str(candidate["track_id"]),
-                    "projection_config_id": projection_id,
-                    "random_state": int(candidate["random_state"]),
+                    "model_id": model_id,
+                    "random_state": random_state,
+                    "track_id": track_id,
                     "source_image": image_key,
                     "batch": int(batch_values.iloc[0]),
                     "height": int(shape[0]),
@@ -985,24 +1593,22 @@ def build_locked_spatial_validation_outputs(
                     "uncertain_mask": encode_boolean_map(uncertain_map),
                     "postprocessed_target_mask": encode_boolean_map(post_target),
                     "truth_mask": encode_boolean_map(truth),
-                    "margin_source": (
-                        "validation_pixel_predictions.parquet#"
-                        f"projection_config_id={projection_id}"
-                    ),
-                    "truth_level": truth_result.truth_level,
+                    "truth_level": str(truth_result.truth_level),
                     "spatial_lock_sha256": lock_hash,
                 }
             )
 
-            image_labels = np.asarray(image_db[image_key]["labels"])
-            truth_component_labels = np.where(truth, image_labels, 0)
+            # Uncertain pixels stay a distinct non-evaluable layer, exactly as
+            # in the 03C spatial calibration code.
             evaluable = valid & ~uncertain_map
-            for map_variant, prediction in (
+            evaluable_truth = truth & evaluable
+            truth_component_labels = np.where(evaluable_truth, image_labels, 0)
+
+            for map_variant, raw_prediction in (
                 ("raw", raw_target),
                 ("locked_postprocessed", post_target),
             ):
-                prediction = np.asarray(prediction, dtype=bool) & evaluable
-                evaluable_truth = truth & evaluable
+                prediction = np.asarray(raw_prediction, dtype=bool) & evaluable
                 component_metrics = component_detection_metrics(
                     evaluable_truth,
                     prediction,
@@ -1022,50 +1628,66 @@ def build_locked_spatial_validation_outputs(
                     min_iou=expcfg.SIMCA_CONCAT_REFIT_COMPONENT_MIN_IOU,
                 )
                 if len(components):
-                    for column, value in (
-                        ("calibration_id", calibration_id),
-                        ("validation_candidate_id", validation_candidate_id),
-                        ("evaluation_track", str(candidate["evaluation_track"])),
-                        ("track_id", str(candidate["track_id"])),
-                        ("random_state", int(candidate["random_state"])),
-                        ("source_image", image_key),
-                        ("map_variant", map_variant),
-                        ("truth_level", truth_result.truth_level),
-                    ):
-                        components[column] = value
-                    component_parts.append(components)
-                intersection = int(np.count_nonzero(evaluable_truth & prediction))
+                    components = components.copy()
+                    components["model_id"] = model_id
+                    components["random_state"] = random_state
+                    components["track_id"] = track_id
+                    components["source_image"] = image_key
+                    components["map_variant"] = map_variant
+                    components["truth_level"] = str(truth_result.truth_level)
+                    component_parts.append(
+                        components.reindex(
+                            columns=expcfg.SIMCA_SPATIAL_COMPONENT_COLUMNS
+                        )
+                    )
+
+                intersection = int(
+                    np.count_nonzero(evaluable_truth & prediction)
+                )
                 union = int(np.count_nonzero(evaluable_truth | prediction))
                 n_truth_pixels = int(np.count_nonzero(evaluable_truth))
                 n_prediction_pixels = int(np.count_nonzero(prediction))
-                truth_components = components.loc[
-                    components.get("component_role", pd.Series(dtype=str)).eq("truth")
-                ] if len(components) else pd.DataFrame()
+
+                truth_components = (
+                    components.loc[
+                        components["component_role"].astype(str).eq("truth")
+                    ].copy()
+                    if len(components) and "component_role" in components.columns
+                    else pd.DataFrame()
+                )
                 observed_classes = set(
-                    truth_components.get("area_class", pd.Series(dtype=str)).astype(str)
+                    truth_components.get(
+                        "area_class", pd.Series(dtype="string")
+                    ).astype(str)
                 )
                 smallest = next(
-                    (label_name for label_name in labels if label_name in observed_classes),
+                    (
+                        label_name
+                        for label_name in labels
+                        if label_name in observed_classes
+                    ),
                     None,
                 )
                 smallest_rows = (
-                    truth_components.loc[truth_components["area_class"].eq(smallest)]
+                    truth_components.loc[
+                        truth_components["area_class"].astype(str).eq(smallest)
+                    ]
                     if smallest is not None
                     else truth_components.iloc[0:0]
                 )
+
                 metric_rows.append(
                     {
-                        "validation_candidate_id": validation_candidate_id,
-                        "calibration_id": calibration_id,
-                        "evaluation_track": str(candidate["evaluation_track"]),
-                        "track_id": str(candidate["track_id"]),
-                        "random_state": int(candidate["random_state"]),
+                        "model_id": model_id,
+                        "random_state": random_state,
+                        "track_id": track_id,
                         "source_image": image_key,
                         "aggregation_level": "source_image",
                         "map_variant": map_variant,
                         "n_valid_pixels": int(evaluable.sum()),
                         "dice": (
-                            2.0 * intersection / (n_truth_pixels + n_prediction_pixels)
+                            2.0 * intersection
+                            / (n_truth_pixels + n_prediction_pixels)
                             if n_truth_pixels + n_prediction_pixels
                             else 1.0
                         ),
@@ -1082,11 +1704,17 @@ def build_locked_spatial_validation_outputs(
                         ),
                         **component_metrics,
                         "smallest_fragment_recall": (
-                            float(smallest_rows["detected_or_matched"].mean())
+                            float(
+                                pd.to_numeric(
+                                    smallest_rows["detected_or_matched"],
+                                    errors="coerce",
+                                ).mean()
+                            )
                             if len(smallest_rows)
                             else np.nan
                         ),
-                        "truth_level": truth_result.truth_level,
+                        "truth_level": str(truth_result.truth_level),
+                        # Internal counters used only for exact pooled metrics.
                         "__truth_pixels": n_truth_pixels,
                         "__prediction_pixels": n_prediction_pixels,
                         "__intersection": intersection,
@@ -1094,33 +1722,43 @@ def build_locked_spatial_validation_outputs(
                     }
                 )
 
+    # ------------------------------------------------------------------
+    # Aggregate source-image spatial metrics to one execution-level row.
+    # ------------------------------------------------------------------
     image_metrics = pd.DataFrame(metric_rows)
-    overall_rows: list[dict] = []
+    components = (
+        pd.concat(component_parts, ignore_index=True, sort=False)
+        if component_parts
+        else pd.DataFrame(columns=expcfg.SIMCA_SPATIAL_COMPONENT_COLUMNS)
+    )
+    overall_rows: list[dict[str, object]] = []
+
     if len(image_metrics):
-        components_all = (
-            pd.concat(component_parts, ignore_index=True, sort=False)
-            if component_parts
-            else pd.DataFrame()
+        count_columns = (
+            "n_truth_components",
+            "n_predicted_components",
+            "n_detected_truth_components",
+            "n_matched_predicted_components",
+            "n_split_truth_components",
+            "n_merged_predicted_components",
         )
-        for keys, group in image_metrics.groupby(
-            [
-                "validation_candidate_id",
-                "calibration_id",
-                "evaluation_track",
-                "track_id",
-                "random_state",
-                "map_variant",
-            ],
-            sort=False,
+        missing_counts = sorted(set(count_columns) - set(image_metrics.columns))
+        if missing_counts:
+            raise RuntimeError(
+                "Spatial component metrics are missing pooled counters: "
+                f"{missing_counts}"
+            )
+
+        group_columns = [
+            "model_id",
+            "random_state",
+            "track_id",
+            "map_variant",
+        ]
+        for key, group in image_metrics.groupby(
+            group_columns, sort=False, dropna=False
         ):
-            (
-                validation_candidate_id,
-                calibration_id,
-                evaluation_track,
-                track_id,
-                random_state,
-                map_variant,
-            ) = keys
+            model_id, random_state, track_id, map_variant = key
             totals = group[
                 [
                     "n_valid_pixels",
@@ -1128,49 +1766,61 @@ def build_locked_spatial_validation_outputs(
                     "__prediction_pixels",
                     "__intersection",
                     "__union",
-                    "n_truth_components",
-                    "n_predicted_components",
-                    "n_detected_truth_components",
-                    "n_matched_predicted_components",
-                    "n_split_truth_components",
-                    "n_merged_predicted_components",
+                    *count_columns,
                 ]
             ].sum(numeric_only=True)
+
             truth_total = float(totals["__truth_pixels"])
             prediction_total = float(totals["__prediction_pixels"])
             intersection = float(totals["__intersection"])
             union = float(totals["__union"])
             truth_component_total = float(totals["n_truth_components"])
             predicted_component_total = float(totals["n_predicted_components"])
-            truth_components = components_all.loc[
-                components_all["validation_candidate_id"].astype(str).eq(
-                    str(validation_candidate_id)
-                )
-                & components_all["map_variant"].astype(str).eq(str(map_variant))
-                & components_all["component_role"].astype(str).eq("truth")
-            ] if len(components_all) else pd.DataFrame()
+
+            truth_components = (
+                components.loc[
+                    components["model_id"].astype(str).eq(str(model_id))
+                    & pd.to_numeric(
+                        components["random_state"], errors="coerce"
+                    ).eq(int(random_state))
+                    & components["track_id"].astype(str).eq(str(track_id))
+                    & components["map_variant"].astype(str).eq(str(map_variant))
+                    & components["component_role"].astype(str).eq("truth")
+                ].copy()
+                if len(components)
+                else pd.DataFrame()
+            )
             observed_classes = set(
-                truth_components.get("area_class", pd.Series(dtype=str)).astype(str)
+                truth_components.get(
+                    "area_class", pd.Series(dtype="string")
+                ).astype(str)
             )
             smallest = next(
                 (label_name for label_name in labels if label_name in observed_classes),
                 None,
             )
             smallest_rows = (
-                truth_components.loc[truth_components["area_class"].eq(smallest)]
+                truth_components.loc[
+                    truth_components["area_class"].astype(str).eq(smallest)
+                ]
                 if smallest is not None
                 else truth_components.iloc[0:0]
             )
+
+            truth_levels = set(group["truth_level"].astype(str))
+            if len(truth_levels) != 1:
+                raise RuntimeError(
+                    "One spatial execution/map variant mixes several truth levels."
+                )
+
             overall_rows.append(
                 {
-                    "validation_candidate_id": validation_candidate_id,
-                    "calibration_id": calibration_id,
-                    "evaluation_track": evaluation_track,
-                    "track_id": track_id,
+                    "model_id": str(model_id),
                     "random_state": int(random_state),
+                    "track_id": str(track_id),
                     "source_image": "all",
                     "aggregation_level": "overall",
-                    "map_variant": map_variant,
+                    "map_variant": str(map_variant),
                     "n_valid_pixels": int(totals["n_valid_pixels"]),
                     "dice": (
                         2.0 * intersection / (truth_total + prediction_total)
@@ -1213,33 +1863,113 @@ def build_locked_spatial_validation_outputs(
                         else 0.0
                     ),
                     "smallest_fragment_recall": (
-                        float(smallest_rows["detected_or_matched"].mean())
+                        float(
+                            pd.to_numeric(
+                                smallest_rows["detected_or_matched"],
+                                errors="coerce",
+                            ).mean()
+                        )
                         if len(smallest_rows)
                         else np.nan
                     ),
-                    "truth_level": expcfg.SIMCA_CONCAT_REFIT_TRUTH_SOURCE,
+                    "truth_level": next(iter(truth_levels)),
                 }
             )
-    components = (
-        pd.concat(component_parts, ignore_index=True, sort=False)
-        if component_parts
-        else pd.DataFrame(columns=expcfg.SIMCA_SPATIAL_COMPONENT_COLUMNS)
+
+    metrics = (
+        pd.concat(
+            [image_metrics, pd.DataFrame(overall_rows)],
+            ignore_index=True,
+            sort=False,
+        )
+        if len(image_metrics) or overall_rows
+        else pd.DataFrame(columns=expcfg.SIMCA_SPATIAL_COMPONENT_METRIC_COLUMNS)
     )
-    metrics = pd.concat(
-        [image_metrics, pd.DataFrame(overall_rows)],
-        ignore_index=True,
-        sort=False,
-    ) if len(image_metrics) or overall_rows else pd.DataFrame()
+    metrics = metrics.reindex(columns=expcfg.SIMCA_SPATIAL_COMPONENT_METRIC_COLUMNS)
+    manifests_df = pd.DataFrame(manifests).reindex(
+        columns=expcfg.SIMCA_PIXEL_MAP_MANIFEST_COLUMNS
+    )
+    components = components.reindex(columns=expcfg.SIMCA_SPATIAL_COMPONENT_COLUMNS)
+
+    # ------------------------------------------------------------------
+    # Final compact-contract checks: no legacy IDs and unique natural keys.
+    # ------------------------------------------------------------------
+    forbidden_legacy_ids = {
+        "validation_candidate_id",
+        "calibration_id",
+        "domain_config_id",
+        "evaluation_config_id",
+        "data_config_id",
+        "fit_config_id",
+        "projection_config_id",
+    }
+    for frame, name in (
+        (manifests_df, "pixel_maps_manifest"),
+        (components, "spatial_components"),
+        (metrics, "spatial_component_metrics"),
+    ):
+        leaked = sorted(forbidden_legacy_ids.intersection(frame.columns))
+        if leaked:
+            raise RuntimeError(f"Legacy identifiers leaked into {name}: {leaked}")
+
+    if len(manifests_df) and manifests_df.duplicated(
+        ["track_id", "model_id", "random_state", "source_image"]
+    ).any():
+        raise RuntimeError("pixel_maps_manifest duplicates its natural map key.")
+    if len(components) and components.duplicated(
+        [
+            "track_id",
+            "model_id",
+            "random_state",
+            "source_image",
+            "map_variant",
+            "component_role",
+            "component_id",
+        ]
+    ).any():
+        raise RuntimeError("spatial_components duplicates its natural component key.")
+    if len(metrics) and metrics.duplicated(
+        [
+            "track_id",
+            "model_id",
+            "random_state",
+            "source_image",
+            "aggregation_level",
+            "map_variant",
+        ]
+    ).any():
+        raise RuntimeError(
+            "spatial_component_metrics duplicates its natural metric key."
+        )
+
     return {
-        "pixel_maps_manifest": pd.DataFrame(manifests).reindex(
-            columns=expcfg.SIMCA_PIXEL_MAP_MANIFEST_COLUMNS
-        ),
-        "spatial_components": components.reindex(
-            columns=expcfg.SIMCA_SPATIAL_COMPONENT_COLUMNS
-        ),
-        "spatial_component_metrics": metrics.reindex(
-            columns=expcfg.SIMCA_SPATIAL_COMPONENT_METRIC_COLUMNS
-        ),
+        "pixel_maps_manifest": manifests_df.sort_values(
+            ["track_id", "model_id", "random_state", "source_image"],
+            kind="mergesort",
+        ).reset_index(drop=True),
+        "spatial_components": components.sort_values(
+            [
+                "track_id",
+                "model_id",
+                "random_state",
+                "source_image",
+                "map_variant",
+                "component_role",
+                "component_id",
+            ],
+            kind="mergesort",
+        ).reset_index(drop=True),
+        "spatial_component_metrics": metrics.sort_values(
+            [
+                "track_id",
+                "model_id",
+                "random_state",
+                "aggregation_level",
+                "source_image",
+                "map_variant",
+            ],
+            kind="mergesort",
+        ).reset_index(drop=True),
     }
 
 

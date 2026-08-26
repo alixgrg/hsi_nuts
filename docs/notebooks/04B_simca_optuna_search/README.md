@@ -1,64 +1,68 @@
-# Notebook 04B — benchmark budgété Optuna 8-tracks
+# Notebook 04B — contrôle négatif budgété Optuna
 
-`notebooks/04B_simca_optuna_search.ipynb` réalise les tâches 29 et 30 du
-protocole. Il crée un registre de huit études distinctes E1–E8. Un track sans
-domaine calibré conserve une étude vide explicite ; un track non soutenu par
-03C reste une étude diagnostique et ne devient jamais candidat downstream.
+`notebooks/04B_simca_optuna_search.ipynb` évalue, sans modifier la sélection,
+ce qu'un échantillonnage TPE catégoriel retrouve dans l'univers des modèles
+évaluables de 03B. La sélection scientifique reste exclusivement celle de
+`03B_selected_models`; 04A en fournit la référence auditée.
 
-## Source unique
+## Rôle scientifique
 
-04B ne recharge pas le H5 et ne réajuste aucun modèle. Il consomme uniquement
-les sorties contractuelles de 04A : domaine dédupliqué, métriques exhaustives,
-audit technique et fronts Pareto. Les empreintes SHA-256 du manifeste 04A sont
-vérifiées avant la création des études. Les seuils, folds et graines restent
-ceux de 03B/04A ; les batches 3 et 4 sont inaccessibles à l'objectif.
+Optuna ne reçoit ici qu'un paramètre catégoriel, `model_id`. Il ne voit donc
+aucune géométrie entre les hyperparamètres et ne peut pas apprendre qu'un
+modèle voisin est meilleur. Cette expérience n'est pas une nouvelle
+optimisation : c'est un contrôle négatif de couverture sous budget, comparé à
+un tirage uniforme avec remise.
 
-Optuna suggère un seul paramètre catégoriel : `domain_config_id`. Les graines
-de calibration ne sont pas des candidats concurrents. Le `calibration_id`
-relie chaque trial aux métriques et à la configuration principale de 04A.
+04B ne réajuste aucun modèle, ne recalcule aucun seuil et ne crée aucun
+candidat downstream. Ses sorties sont interdites comme source de sélection.
+Les tracks E3 et E4 non soutenus en projection par 03C restent explicitement
+`diagnostic_only`.
 
-## Objectifs et statuts
+## Entrées et identité
 
-Les noms et directions des objectifs sont dérivés de
-`SIMCA_EVALUATION_TRACK_SPECS`. Les projections pixel utilisent les métriques
-macro image et macro objet définies par 04A. Aucun objectif de stabilité
-supplémentaire, signe artificiel ou score pondéré n'est introduit.
+Le notebook valide les manifestes et empreintes SHA-256 avant tout calcul. Il
+consomme seulement :
 
-Une erreur technique ou un objectif non fini est pruné et documenté. Une
-configuration calculable hors garde-fous reste un trial complet : elle peut
-appartenir au front diagnostique mais pas au front protocolaire. Calculabilité,
-acceptabilité et éligibilité restent trois statuts indépendants.
+- depuis 03B : `track_contracts`, `model_catalog`, `model_metrics`,
+  `selected_models` et `selection_audit` ;
+- depuis 04A : `selected_model_reference.parquet` et `audit_manifest.json`.
 
-## Comparaison à l'exhaustif
+L'univers évaluable contient une ligne par `model_id` et par track, après
+vérification que toutes les métriques objectives définies dans
+`SIMCA_EVALUATION_TRACK_SPECS` sont finies. L'égalité entre la sélection 03B et
+la référence 04A est bloquante.
 
-Le rappel est mesuré contre les flags de `grid_pareto_reference.parquet`, sans
-recalcul local du front. Sous `B` tirages uniformes avec remise parmi `N`
-configurations, l'espérance du rappel vaut `1 - (1 - 1/N)^B`. Les seuils de
-conclusion `useful`, `neutral` ou `insufficient` sont centralisés dans
-`experiment_config.py`. Une recherche insuffisante ne retire jamais les
-candidats exhaustifs non visités.
+Aucun `calibration_id`, `domain_config_id`, identifiant d'étude ou hash du plan
+n'est répété dans les tables. `trial_number` est uniquement une coordonnée de
+séquence à l'intérieur du track, pas un nouvel identifiant scientifique.
 
-## Gel du plan d'ablation
+## Benchmark de couverture
 
-La fin de 04B produit `preregistered_ablation_plan.parquet`. Les références
-proviennent du front exhaustif 04A, jamais du sous-ensemble Optuna. Les paires
-exactes, sensibilités de seuil, opérations spatiales et interactions autorisées
-sont figées avant la prochaine exécution 8-tracks du batch 3. Les sorties
-legacy de 04C/05 sont déclarées comme exposition exploratoire antérieure ; le
-gel ne constitue pas une revendication de première ouverture historique du
-batch 3.
+Chaque track reçoit le budget centralisé
+`SIMCA_OPTUNA_N_TRIALS_PER_TRACK`. Le `TPESampler` suggère un `model_id`
+existant et les objectifs sont lus dans `model_metrics.parquet`; aucun accès
+au H5 ou aux batches externes n'est nécessaire.
 
-04C vérifie le hash de ce plan avant de charger le batch 3.
+Pour `N` modèles évaluables, `K` références sélectionnées et `B` tirages
+uniformes avec remise, l'espérance du rappel de chaque référence vaut :
 
-## Sorties
+`1 - (1 - 1/N)^B`.
 
-- `optuna_trials.parquet` : tous les trials, doublons, états et durées ;
-- `optuna_pareto_candidates.parquet` : identifiants et flags Pareto compacts ;
-- `optuna_errors.parquet` : échecs techniques ;
-- `optuna_search_efficiency.parquet` : une ligne pour chacun des huit tracks ;
-- `preregistered_ablation_plan.parquet` : plan prospectif versionné ;
-- `optuna_protocol.json` : provenance, hashes, études et règles d'interprétation ;
-- `optuna_studies.sqlite3` : stockage reproductible des huit études.
+Le notebook rapporte le rappel observé et son écart à cette espérance. Comme
+le TPE ne dispose que d'une catégorie opaque, cette comparaison mesure son
+absence de gain exploitable pour la sélection plutôt qu'une performance
+d'optimisation scientifique.
 
-04B ne choisit pas de modèle final et n'applique ni quota ni filtre de
-diversité.
+## Sorties minimales
+
+- `categorical_tpe_sampled_models.parquet` :
+  `track_id`, `trial_number`, `model_id`, `is_repeat`,
+  `is_selected_reference` ;
+- `categorical_tpe_coverage.parquet` : une ligne de couverture et de rappel
+  pour chacun des huit tracks ;
+- `audit_manifest.json` : provenance, hashes, règle analytique et interdiction
+  d'usage pour la sélection.
+
+Les objectifs et paramètres des modèles ne sont pas dupliqués dans ces
+sorties : ils restent joignables dans les artefacts 03B à partir de
+`model_id`.

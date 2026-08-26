@@ -7,6 +7,7 @@ from src.workflows.simca_final_selection import (
     build_final_selection_pool,
     apply_rate_threshold_filter_by_track,
     pareto_front_mask,
+    select_final_models_lexicographic,
     select_final_models_by_track,
     select_top_with_diversity,
     validate_final_selection_guardrails,
@@ -118,6 +119,55 @@ def test_pareto_front_mask_uses_rates_without_score():
     mask = pareto_front_mask(df, ["fn_rate", "fp_rate"])
 
     assert df.loc[mask, "selected_config_id"].tolist() == ["a", "b"]
+
+
+def test_lexicographic_selection_prioritizes_target_miss_without_score_or_diversity():
+    candidates = pd.DataFrame(
+        [
+            {
+                "calibration_id": "safer",
+                "evaluation_track": "object_train__object_projection__2way",
+                "track_id": "E1",
+                "decision_mode": "2way",
+                "final_candidate_status": "eligible_for_final_selection",
+                "eligibility_status": "eligible",
+                "safety_target_miss_rate": 0.00,
+                "worst_image_target_miss_rate": 0.00,
+                "worst_seed_target_miss_rate": 0.00,
+                "safety_false_accept_rate": 0.20,
+                "safety_uncertain_rate": 0.00,
+                "stability_status": "not_applicable_deterministic",
+                "preprocessing_steps": "snv",
+                "n_components": 5,
+            },
+            {
+                "calibration_id": "more_specific",
+                "evaluation_track": "object_train__object_projection__2way",
+                "track_id": "E1",
+                "decision_mode": "2way",
+                "final_candidate_status": "eligible_for_final_selection",
+                "eligibility_status": "eligible",
+                "safety_target_miss_rate": 0.03,
+                "worst_image_target_miss_rate": 0.03,
+                "worst_seed_target_miss_rate": 0.03,
+                "safety_false_accept_rate": 0.00,
+                "safety_uncertain_rate": 0.00,
+                "stability_status": "not_applicable_deterministic",
+                "preprocessing_steps": "snv",
+                "n_components": 4,
+            },
+        ]
+    )
+
+    selected, locked, protocol = select_final_models_lexicographic(
+        candidates,
+        expected_tracks=("object_train__object_projection__2way",),
+    )
+
+    assert selected["calibration_id"].tolist() == ["safer"]
+    assert set(locked["calibration_id"]) == {"safer"}
+    assert protocol.loc[0, "selection_method"] == "hard_guardrails_then_lexicographic"
+    assert not any("score" in column for column in selected.columns)
 
 
 def test_assign_pareto_tiers_repeats_non_dominated_fronts():

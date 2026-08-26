@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -26,18 +26,6 @@ SIMCA_RULE_METADATA: dict[str, dict[str, str]] = {
     "combined_index_chi2": {"rule_base": "combined_index", "rule_variant": "combined_index_chi2", "limit_source": "scaled_chi2"},
     "combined_index_emp_cv": {"rule_base": "combined_index", "rule_variant": "combined_index_emp_cv", "limit_source": "empirical_cv"},
 }
-
-
-def _float_metric(metrics: Mapping[str, Any], *names: str, default: float = np.nan) -> float:
-    for name in names:
-        value = metrics.get(name, np.nan)
-        try:
-            value = float(value)
-        except Exception:
-            value = np.nan
-        if np.isfinite(value):
-            return value
-    return float(default)
 
 
 # -----------------------------------------------------------------------------
@@ -149,7 +137,7 @@ def materialize_selection_metrics(
     """
     Create standard metric columns used by selection utilities.
 
-    This makes score/selection functions compatible with:
+    This makes selection functions compatible with:
     - classical grid summaries: fn_rate, fp_rate, balanced_accuracy
     - robust 04B summaries: mean_fn_rate, max_fn_rate, mean_fp_rate
     - Optuna 04B2 summaries: fn_rate_max, fp_rate_mean, balanced_accuracy_mean
@@ -222,116 +210,55 @@ def materialize_selection_metrics(
     return out
 
 
-def detection_selection_score(
-    metrics: Mapping[str, Any],
-    objective_metric: str = "fn_fp_hierarchical",
-    fn_weight: float = 10.0,
-    fp_weight: float = 1.0,
-    f1_weight: float = 0.05,
-    accuracy_weight: float = 0.02,
-    balanced_accuracy_weight: float = 0.0,
-    min_target_sensitivity: float | None = None,
-    min_non_target_specificity: float | None = None,
-    constraint_penalty: float = 2.0,
-) -> float:
-    """Return a scalar score for binary target-vs-non-target model selection.
-
-    Higher is better. The default objective prioritizes false negatives first,
-    then false positives, then weak tie-breakers such as F1 and accuracy.
-    """
-    target_sens = _float_metric(metrics, "target_sensitivity")
-    non_target_spec = _float_metric(metrics, "non_target_specificity")
-    fn_rate = _float_metric(metrics, "fn_rate")
-    fp_rate = _float_metric(metrics, "fp_rate")
-    f1 = _float_metric(metrics, "f1_score", default=0.0)
-    acc = _float_metric(metrics, "accuracy", default=0.0)
-    ba = _float_metric(metrics, "balanced_accuracy", default=0.0)
-
-    if not np.isfinite(fn_rate) and np.isfinite(target_sens):
-        fn_rate = 1.0 - target_sens
-    if not np.isfinite(fp_rate) and np.isfinite(non_target_spec):
-        fp_rate = 1.0 - non_target_spec
-
-    if objective_metric == "fn_fp_hierarchical":
-        if not np.isfinite(fn_rate) or not np.isfinite(fp_rate):
-            return -np.inf
-        score = (
-            -float(fn_weight) * fn_rate
-            -float(fp_weight) * fp_rate
-            +float(f1_weight) * (f1 if np.isfinite(f1) else 0.0)
-            +float(accuracy_weight) * (acc if np.isfinite(acc) else 0.0)
-            +float(balanced_accuracy_weight) * (ba if np.isfinite(ba) else 0.0)
-        )
-    elif objective_metric == "balanced_accuracy":
-        score = ba
-    elif objective_metric in metrics:
-        score = _float_metric(metrics, objective_metric, default=-np.inf)
-    else:
-        raise ValueError(
-            "objective_metric must be 'fn_fp_hierarchical', 'balanced_accuracy', "
-            "or a metric column present in the input."
-        )
-
-    if not np.isfinite(score):
-        return -np.inf
-
-    if min_target_sensitivity is not None and np.isfinite(target_sens):
-        score -= float(constraint_penalty) * max(0.0, float(min_target_sensitivity) - target_sens)
-    if min_non_target_specificity is not None and np.isfinite(non_target_spec):
-        score -= float(constraint_penalty) * max(0.0, float(min_non_target_specificity) - non_target_spec)
-
-    return float(score)
-
-
-def add_detection_selection_score(
-    df: pd.DataFrame,
-    score_col: str = "selection_score",
-    metric_aliases: dict[str, Sequence[str]] | None = None,
-    overwrite_metrics: bool = False,
-    **score_kwargs,
-) -> pd.DataFrame:
-    """
-    Add a scalar selection score to a binary detection result table.
-
-    The function is now compatible with classical metrics and aggregated
-    Optuna/robustness metrics through metric aliases.
-    """
-    out = materialize_selection_metrics(
-        df,
-        metric_aliases=metric_aliases,
-        overwrite=overwrite_metrics,
-        keep_source_columns=True,
-    )
-
-    out[score_col] = out.apply(
-        lambda row: detection_selection_score(row.to_dict(), **score_kwargs),
-        axis=1,
-    )
-
-    return out
+DEFAULT_DETECTION_SORT_PRIORITY: tuple[tuple[str, bool], ...] = (
+    ("fn_rate", True),
+    ("fp_rate", True),
+    ("balanced_accuracy", False),
+    ("f1_score", False),
+    ("accuracy", False),
+    ("precision", False),
+)
 
 
 def sort_detection_selection(
     df: pd.DataFrame,
-    score_col: str = "selection_score",
-    add_score: bool = True,
+    priority: Sequence[tuple[str, bool]] | None = None,
+    *,
+    materialize_metrics: bool = True,
 ) -> pd.DataFrame:
-    """Sort a detection result table with a FN-first hierarchy."""
+    """Sort binary-detection results without constructing a scalar score.
+
+    The default order is deliberately lexicographic: false negatives first,
+    false positives second, then descriptive performance metrics only as
+    deterministic tie-breakers. ``True`` means ascending for a priority item.
+    """
     if df is None or len(df) == 0:
         return pd.DataFrame() if df is None else df.copy()
 
-    out = add_detection_selection_score(df, score_col=score_col) if add_score else df.copy()
-    sort_cols = [
-        "fn_rate",
-        "fp_rate",
-        "f1_score",
-        "accuracy",
-        "balanced_accuracy",
-        score_col,
+    out = (
+        materialize_selection_metrics(
+            df,
+            keep_source_columns=False,
+        )
+        if materialize_metrics
+        else df.copy()
+    )
+    active_priority = tuple(priority or DEFAULT_DETECTION_SORT_PRIORITY)
+    sort_columns = [
+        column
+        for column, _ in active_priority
+        if column in out.columns
     ]
-    sort_cols = [col for col in sort_cols if col in out.columns]
-    ascending = [col in {"fn_rate", "fp_rate"} for col in sort_cols]
-    return out.sort_values(sort_cols, ascending=ascending).reset_index(drop=True)
+    if not sort_columns:
+        return out.reset_index(drop=True)
+
+    ascending_by_column = dict(active_priority)
+    return out.sort_values(
+        sort_columns,
+        ascending=[ascending_by_column[column] for column in sort_columns],
+        na_position="last",
+        kind="mergesort",
+    ).reset_index(drop=True)
 
 
 def infer_model_family_from_rule_token(rule_token: str) -> str:
@@ -499,104 +426,6 @@ def select_top_models(
     return sort_detection_selection(selected)
 
 
-def add_reference_selection_scores(
-    df: pd.DataFrame,
-    metric_aliases: dict[str, Sequence[str]] | None = None,
-    overwrite_metrics: bool = False,
-    score_prefix: str = "",
-) -> pd.DataFrame:
-    """
-    Add alternative reference scores for sensitivity/specificity trade-offs.
-
-    This version is robust to missing canonical columns.
-    It can use:
-    - fn_rate / fp_rate / balanced_accuracy
-    - fn_rate_max / fp_rate_mean / balanced_accuracy_mean
-    - validation_* metrics
-    - pure_test_* metrics
-    """
-    if df is None or len(df) == 0:
-        return pd.DataFrame() if df is None else df.copy()
-
-    out = materialize_selection_metrics(
-        df,
-        metric_aliases=metric_aliases,
-        overwrite=overwrite_metrics,
-        keep_source_columns=True,
-    )
-
-    n = len(out)
-
-    fn_rate = pd.to_numeric(
-        out.get("fn_rate", pd.Series(np.nan, index=out.index)),
-        errors="coerce",
-    )
-
-    fp_rate = pd.to_numeric(
-        out.get("fp_rate", pd.Series(np.nan, index=out.index)),
-        errors="coerce",
-    )
-
-    balanced_accuracy = pd.to_numeric(
-        out.get("balanced_accuracy", pd.Series(np.nan, index=out.index)),
-        errors="coerce",
-    )
-
-    non_target_specificity = pd.to_numeric(
-        out.get("non_target_specificity", pd.Series(np.nan, index=out.index)),
-        errors="coerce",
-    )
-
-    f1_score = pd.to_numeric(
-        out.get("f1_score", pd.Series(0.0, index=out.index)),
-        errors="coerce",
-    )
-
-    accuracy = pd.to_numeric(
-        out.get("accuracy", pd.Series(0.0, index=out.index)),
-        errors="coerce",
-    )
-
-    out[f"{score_prefix}score_conservative_target"] = (
-        -20.0 * fn_rate.fillna(1.0)
-        -2.0 * fp_rate.fillna(1.0)
-        +1.0 * balanced_accuracy.fillna(0.0)
-    )
-
-    out[f"{score_prefix}score_balanced_reference"] = (
-        +3.0 * balanced_accuracy.fillna(0.0)
-        +1.0 * f1_score.fillna(0.0)
-        +0.5 * accuracy.fillna(0.0)
-        -3.0 * fn_rate.fillna(1.0)
-        -1.0 * fp_rate.fillna(1.0)
-    )
-
-    out[f"{score_prefix}score_specificity_control"] = (
-        +3.0 * non_target_specificity.fillna(0.0)
-        -5.0 * fn_rate.fillna(1.0)
-        -3.0 * fp_rate.fillna(1.0)
-    )
-
-    return out
-
-
-def select_top_by_score(
-    df: pd.DataFrame,
-    score_col: str,
-    n_per_family: int,
-    strategy_name: str,
-) -> pd.DataFrame:
-    """Select top configurations per matrix family according to a score column."""
-    out = (
-        df.sort_values([score_col, "fn_rate", "fp_rate", "balanced_accuracy"], ascending=[False, True, True, False])
-        .groupby("matrix_family", group_keys=False, dropna=False)
-        .head(n_per_family)
-        .copy()
-    )
-    out["selection_strategy"] = strategy_name
-    return out
-
-
 def pareto_front(
     df: pd.DataFrame,
     minimize_cols: Sequence[str] = ("fn_rate", "fp_rate"),
@@ -631,90 +460,232 @@ def pareto_front_by_group(
     epsilon: float = 0.0,
     keep_group_cols: bool = True,
 ) -> pd.DataFrame:
+    """Return non-dominated rows independently inside each group.
+
+    Objectives to maximize are multiplied by -1 so every objective is treated
+    as a minimization objective. Exact duplicate objective vectors are reduced
+    before the skyline search and restored afterwards.
+
+    The implementation stores only the current non-dominated front. Its memory
+    use is therefore O(n_objectives * frontier_size), rather than O(n²).
     """
-    Return non-dominated rows independently inside each group.
+    if df is None:
+        return pd.DataFrame()
+    if df.empty:
+        return df.copy()
+    if float(epsilon) < 0.0:
+        raise ValueError("epsilon must be non-negative.")
 
-    A row j dominates row i if:
-    - j is <= i on every minimize_col,
-    - j is >= i on every maximize_col,
-    - and j is strictly better on at least one objective.
+    groups = [column for column in group_cols if column in df.columns]
+    minimize = [
+        column for column in minimize_cols if column in df.columns
+    ]
+    maximize = [
+        column for column in maximize_cols if column in df.columns
+    ]
+    objectives = [*minimize, *maximize]
+    if not objectives:
+        raise ValueError("At least one Pareto objective is required.")
 
-    epsilon avoids eliminating models for tiny numerical differences.
-    """
-    if df is None or len(df) == 0:
-        return pd.DataFrame() if df is None else df.copy()
-
-    group_cols = [col for col in group_cols if col in df.columns]
-    minimize_cols = [col for col in minimize_cols if col in df.columns]
-    maximize_cols = [col for col in maximize_cols if col in df.columns]
-
-    if not minimize_cols and not maximize_cols:
-        raise ValueError("At least one objective column is required.")
-
-    d = to_numeric_metrics(df, list(minimize_cols) + list(maximize_cols))
-    parts = []
-
-    grouped = d.groupby(group_cols, dropna=False) if group_cols else [((), d)]
-
-    for key, group in grouped:
-        g = group.copy().reset_index(drop=False)
-        n = len(g)
-
-        keep = np.ones(n, dtype=bool)
-
-        min_values = (
-            g[minimize_cols].to_numpy(dtype=float)
-            if minimize_cols else np.empty((n, 0))
-        )
-        max_values = (
-            g[maximize_cols].to_numpy(dtype=float)
-            if maximize_cols else np.empty((n, 0))
+    work = to_numeric_metrics(df, objectives).copy()
+    finite = np.isfinite(work[objectives].to_numpy(dtype=float)).all(axis=1)
+    if not finite.all():
+        bad = work.loc[~finite, objectives]
+        raise ValueError(
+            "Pareto objectives must be finite. "
+            f"Invalid row count: {len(bad)}."
         )
 
-        for i in range(n):
-            if not keep[i]:
+    work["_pareto_input_order"] = np.arange(len(work), dtype=np.int64)
+    grouped = (work.groupby(groups, dropna=False, sort=False)
+        if groups
+        else [((), work)]
+    )
+
+    kept_parts: list[pd.DataFrame] = []
+    for _, group in grouped:
+        group = group.copy()
+        minimize_values = (
+            group[minimize].to_numpy(dtype=float)
+            if minimize
+            else np.empty((len(group), 0), dtype=float)
+        )
+        maximize_values = (
+            -group[maximize].to_numpy(dtype=float)
+            if maximize
+            else np.empty((len(group), 0), dtype=float)
+        )
+        values = np.column_stack([minimize_values, maximize_values])
+        unique_values, inverse = np.unique(
+            values,
+            axis=0,
+            return_inverse=True,
+        )
+        # Sorting on the first minimization objective usually keeps the active
+        # skyline small. Later candidates can still remove earlier candidates
+        # when the first objective is equal within epsilon.
+        order = np.argsort(unique_values[:, 0], kind="mergesort")
+        frontier_indices: list[int] = []
+
+        for candidate_index in order:
+            candidate = unique_values[candidate_index]
+            if not frontier_indices:
+                frontier_indices.append(int(candidate_index))
                 continue
-
-            # j is at least as good as i
-            better_or_equal_min = (
-                min_values <= (min_values[i] + epsilon)
-                if minimize_cols else np.ones((n, 0), dtype=bool)
+            front_index_array = np.asarray(
+                frontier_indices,
+                dtype=np.int64,
             )
-            better_or_equal_max = (
-                max_values >= (max_values[i] - epsilon)
-                if maximize_cols else np.ones((n, 0), dtype=bool)
+            front_values = unique_values[front_index_array]
+            front_no_worse = np.all(
+                front_values <= candidate + float(epsilon),
+                axis=1,
+            )
+            front_strictly_better = np.any(
+                front_values < candidate - float(epsilon),
+                axis=1,
+            )
+            if np.any(front_no_worse & front_strictly_better):
+                continue
+            candidate_no_worse = np.all(
+                candidate <= front_values + float(epsilon),
+                axis=1,
+            )
+            candidate_strictly_better = np.any(
+                candidate < front_values - float(epsilon),
+                axis=1,
+            )
+            dominated_front = (
+                candidate_no_worse & candidate_strictly_better
+            )
+            if dominated_front.any():
+                frontier_indices = [
+                    index
+                    for index, dominated in zip(
+                        frontier_indices,
+                        dominated_front,
+                    )
+                    if not bool(dominated)
+                ]
+            frontier_indices.append(int(candidate_index))
+        frontier_unique = np.zeros(len(unique_values), dtype=bool)
+        frontier_unique[np.asarray(frontier_indices, dtype=int)] = True
+        keep = frontier_unique[inverse]
+        kept_parts.append(group.loc[keep])
+
+    result = pd.concat(kept_parts, ignore_index=False, sort=False)
+    result = result.sort_values(
+        "_pareto_input_order",
+        kind="mergesort",
+    ).drop(columns="_pareto_input_order")
+    if not keep_group_cols and groups:
+        result = result.drop(columns=groups)
+
+    return result.reset_index(drop=True)
+
+
+def pareto_front_with_witness(
+    df: pd.DataFrame,
+    *,
+    minimize_cols: Sequence[str],
+    maximize_cols: Sequence[str] = (),
+    epsilon: float = 0.0,
+) -> tuple[pd.Series, pd.Series]:
+    """Return Pareto membership and one final-front dominator per row."""
+    objectives = [
+        *minimize_cols,
+        *maximize_cols,
+    ]
+    values = df[objectives].to_numpy(dtype=float, copy=True)
+
+    if not np.isfinite(values).all():
+        raise ValueError("Pareto objectives must be finite.")
+
+    if maximize_cols:
+        start = len(minimize_cols)
+        values[:, start:] *= -1.0
+
+    unique_values, inverse = np.unique(
+        values,
+        axis=0,
+        return_inverse=True,
+    )
+    order = np.argsort(unique_values[:, 0], kind="mergesort")
+    frontier: list[int] = []
+
+    for candidate_index in order:
+        candidate = unique_values[candidate_index]
+        if not frontier:
+            frontier.append(int(candidate_index))
+            continue
+
+        front_indices = np.asarray(frontier, dtype=int)
+        front_values = unique_values[front_indices]
+
+        front_dominates = (
+            np.all(
+                front_values <= candidate + epsilon,
+                axis=1,
+            )
+            & np.any(
+                front_values < candidate - epsilon,
+                axis=1,
+            )
+        )
+        if front_dominates.any():
+            continue
+
+        candidate_dominates = (
+            np.all(
+                candidate <= front_values + epsilon,
+                axis=1,
+            )
+            & np.any(
+                candidate < front_values - epsilon,
+                axis=1,
+            )
+        )
+        frontier = [
+            index
+            for index, dominated in zip(
+                frontier,
+                candidate_dominates,
+            )
+            if not dominated
+        ]
+        frontier.append(int(candidate_index))
+
+    unique_front = np.zeros(len(unique_values), dtype=bool)
+    unique_front[np.asarray(frontier, dtype=int)] = True
+    front_mask = unique_front[inverse]
+
+    witness = np.full(len(df), "", dtype=object)
+    final_indices = np.flatnonzero(front_mask)
+    final_values = values[final_indices]
+
+    for row_index in np.flatnonzero(~front_mask):
+        candidate = values[row_index]
+        dominates = (
+            np.all(
+                final_values <= candidate + epsilon,
+                axis=1,
+            )
+            & np.any(
+                final_values < candidate - epsilon,
+                axis=1,
+            )
+        )
+        if dominates.any():
+            witness[row_index] = str(
+                df.iloc[
+                    final_indices[np.flatnonzero(dominates)[0]]
+                ]["model_id"]
             )
 
-            dominates_i = (
-                better_or_equal_min.all(axis=1)
-                & better_or_equal_max.all(axis=1)
-            )
-
-            strictly_better_min = (
-                (min_values < (min_values[i] - epsilon)).any(axis=1)
-                if minimize_cols else np.zeros(n, dtype=bool)
-            )
-            strictly_better_max = (
-                (max_values > (max_values[i] + epsilon)).any(axis=1)
-                if maximize_cols else np.zeros(n, dtype=bool)
-            )
-
-            dominated_by_other = dominates_i & (strictly_better_min | strictly_better_max)
-            dominated_by_other[i] = False
-
-            if dominated_by_other.any():
-                keep[i] = False
-
-        front = g.loc[keep].copy()
-        parts.append(front)
-
-    out = pd.concat(parts, ignore_index=True, sort=False)
-    original_index_col = "index"
-
-    if original_index_col in out.columns:
-        out = out.drop(columns=[original_index_col])
-
-    return out.reset_index(drop=True)
+    return (
+        pd.Series(front_mask, index=df.index),
+        pd.Series(witness, index=df.index),
+    )
 
 
 def sequential_pareto_filter(
@@ -833,7 +804,6 @@ def summarize_ablation_effects(
         "non_target_specificity",
         "fn_rate",
         "fp_rate",
-        "selection_score",
     ),
 ) -> pd.DataFrame:
     """
@@ -976,7 +946,6 @@ def summarize_metric_stability(
         "non_target_specificity",
         "fn_rate",
         "fp_rate",
-        "selection_score",
     ),
     seed_col: str = "random_state",
 ) -> pd.DataFrame:
@@ -1025,15 +994,6 @@ def summarize_metric_stability(
     if len(out) == 0:
         return out
 
-    if {"mean_fn_rate", "std_fn_rate", "mean_fp_rate", "std_fp_rate", "mean_balanced_accuracy"}.issubset(out.columns):
-        out["stability_score"] = (
-            -10.0 * out["mean_fn_rate"].fillna(1.0)
-            -5.0 * out["std_fn_rate"].fillna(1.0)
-            -2.0 * out["mean_fp_rate"].fillna(1.0)
-            -1.0 * out["std_fp_rate"].fillna(1.0)
-            +1.0 * out["mean_balanced_accuracy"].fillna(0.0)
-        )
-
     sort_cols = [
         col for col in [
             "mean_fn_rate",
@@ -1041,13 +1001,12 @@ def summarize_metric_stability(
             "mean_fp_rate",
             "std_fp_rate",
             "mean_balanced_accuracy",
-            "stability_score",
         ]
         if col in out.columns
     ]
 
     ascending = [
-        True if col != "mean_balanced_accuracy" and col != "stability_score" else False
+        col != "mean_balanced_accuracy"
         for col in sort_cols
     ]
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
+import tempfile
 from typing import Sequence
 
 import matplotlib.pyplot as plt
@@ -120,18 +121,33 @@ def build_pca_visual_review_pdf(
             f"{missing[:10]}"
         )
     page_by_candidate = {}
-    with PdfPages(
-        output_path,
-        metadata={"CreationDate": None, "ModDate": None},
-    ) as pdf:
-        for page, candidate_id in enumerate(candidate_ids, start=1):
-            figure, _ = plot_pca_review_panel(
-                candidate_results[candidate_id],
-                wavelengths=wavelengths,
-            )
-            pdf.savefig(figure, bbox_inches="tight")
-            plt.close(figure)
-            page_by_candidate[candidate_id] = page
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix=f".{output_path.stem}.",
+            suffix=".pdf",
+            dir=output_path.parent,
+            delete=False,
+        ) as stream:
+            temporary_path = Path(stream.name)
+        with PdfPages(
+            temporary_path,
+            metadata={"CreationDate": None, "ModDate": None},
+        ) as pdf:
+            for page, candidate_id in enumerate(candidate_ids, start=1):
+                figure, _ = plot_pca_review_panel(
+                    candidate_results[candidate_id],
+                    wavelengths=wavelengths,
+                )
+                try:
+                    pdf.savefig(figure, bbox_inches="tight")
+                finally:
+                    plt.close(figure)
+                page_by_candidate[candidate_id] = page
+        temporary_path.replace(output_path)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
     return page_by_candidate
 
 
