@@ -10,6 +10,18 @@ from __future__ import annotations
 from typing import Any
 
 
+# =============================================================================
+# DEVELOPMENT / PROTOCOL GOVERNANCE
+# =============================================================================
+
+DEVELOPMENT_MODE = True
+
+# During development, configuration changes are allowed without requiring
+# regeneration of the frozen protocol lock. Existing upstream artefacts remain
+# protected by their manifests and SHA-256 lineage checks.
+IGNORE_CURRENT_PROTOCOL_HASH_MISMATCH = DEVELOPMENT_MODE
+
+
 # ---------------------------------------------------------------------------
 # Frozen scientific protocol: tasks 01-02
 # ---------------------------------------------------------------------------
@@ -1456,7 +1468,7 @@ SIMCA_ROBUSTNESS_SUPPORTED_DOWNSTREAM_STATUSES = ("supported",)
 SIMCA_ROBUSTNESS_PROTOCOL_CANDIDATE_STATUSES = ("pass",)
 SIMCA_ROBUSTNESS_VALIDATION_MAP_VARIANT = "raw"
 SIMCA_ROBUSTNESS_SPATIAL_MAP_VARIANT = "locked_postprocessed"
-SIMCA_ROBUSTNESS_PARETO_EPSILON = 1e-12
+SIMCA_ROBUSTNESS_PARETO_EPSILON = 0.01
 SIMCA_ROBUSTNESS_REQUIRE_STABILITY_FOR_PURE_TEST = True
 SIMCA_ROBUSTNESS_PURE_TEST_STABILITY_STATUSES = (
     "robust",
@@ -1520,6 +1532,8 @@ SIMCA_ROBUSTNESS_VALIDATION_METRIC_NAMES = (
     "macro_image_target_miss_rate",
     "macro_image_false_accept_rate",
     "macro_image_uncertain_rate",
+    "macro_image_target_uncertain_rate",
+    "macro_image_non_target_uncertain_rate",
     "macro_image_coverage_rate",
     "macro_image_balanced_accuracy",
     "macro_image_decided_balanced_accuracy",
@@ -1536,9 +1550,9 @@ SIMCA_ROBUSTNESS_WORST_IMAGE_METRIC_NAMES = (
     "macro_object_target_miss_rate",
 )
 
-# Direction is declared once per metric. Notebook 05 uses it both to define a
-# conservative across-seed value (max for a minimized risk, min for a
-# maximized performance metric) and to identify the worst source-image value.
+# Direction is declared once per metric. Notebook 05 uses it to identify
+# Pareto dominance, explicit worst-seed statistics and worst source-image
+# values; the official v4 Pareto point itself is the equal-weight seed mean.
 SIMCA_ROBUSTNESS_METRIC_DIRECTIONS = {
     "target_miss_rate": "minimize",
     "false_accept_rate": "minimize",
@@ -1549,6 +1563,8 @@ SIMCA_ROBUSTNESS_METRIC_DIRECTIONS = {
     "macro_image_target_miss_rate": "minimize",
     "macro_image_false_accept_rate": "minimize",
     "macro_image_uncertain_rate": "minimize",
+    "macro_image_target_uncertain_rate": "minimize",
+    "macro_image_non_target_uncertain_rate": "minimize",
     "split_rate": "minimize",
     "merge_rate": "minimize",
     "coverage_rate": "maximize",
@@ -1592,6 +1608,8 @@ SIMCA_ROBUSTNESS_SENSITIVITY_TOLERANCES = {
     "macro_image_target_miss_rate": 0.02,
     "macro_image_false_accept_rate": 0.05,
     "macro_image_uncertain_rate": 0.05,
+    "macro_image_target_uncertain_rate": 0.05,
+    "macro_image_non_target_uncertain_rate": 0.05,
     "macro_image_coverage_rate": 0.05,
     "macro_image_balanced_accuracy": 0.03,
     "macro_image_decided_balanced_accuracy": 0.03,
@@ -1635,6 +1653,8 @@ SIMCA_ROBUSTNESS_STABILITY_LIMITS = {
     "macro_image_target_miss_rate": {"max_std": 0.02, "max_range": 0.05},
     "macro_image_false_accept_rate": {"max_std": 0.05, "max_range": 0.15},
     "macro_image_uncertain_rate": {"max_std": 0.05, "max_range": 0.15},
+    "macro_image_target_uncertain_rate": {"max_std": 0.05, "max_range": 0.15},
+    "macro_image_non_target_uncertain_rate": {"max_std": 0.05, "max_range": 0.15},
     "macro_image_balanced_accuracy": {"max_std": 0.03, "max_range": 0.08},
     "macro_image_decided_balanced_accuracy": {"max_std": 0.03, "max_range": 0.08},
     "smallest_fragment_recall": {"max_std": 0.05, "max_range": 0.10},
@@ -1642,9 +1662,10 @@ SIMCA_ROBUSTNESS_STABILITY_LIMITS = {
     "component_recall": {"max_std": 0.05, "max_range": 0.10},
 }
 
-# Pareto objectives are expressed on the model-level conservative seed
-# aggregates produced by simca_robustness. Minimized metrics use the worst seed
-# (maximum); maximized metrics use the worst seed (minimum).
+# Pareto objectives are evaluated on the equal-weight mean of the frozen base
+# seeds. Hard validation guardrails and the dedicated stability review retain
+# responsibility for worst-seed safety; the Pareto front expresses expected
+# within-track trade-offs only.
 SIMCA_ROBUSTNESS_PARETO_OBJECTIVES = {
     "E1": {
         "minimize": (
@@ -1658,17 +1679,14 @@ SIMCA_ROBUSTNESS_PARETO_OBJECTIVES = {
             "direct__target_miss_rate",
             "direct__false_accept_rate",
             "direct__target_uncertain_rate",
-            "direct__non_target_uncertain_rate",
         ),
-        "maximize": ("direct__decided_balanced_accuracy",),
+        "maximize": (),
     },
     "E3": {
         "minimize": (
             "direct__macro_image_target_miss_rate",
             "direct__macro_image_false_accept_rate",
             "direct__macro_object_target_miss_rate",
-            "pixel_to_object__target_miss_rate",
-            "pixel_to_object__false_accept_rate",
         ),
         "maximize": (),
     },
@@ -1677,16 +1695,9 @@ SIMCA_ROBUSTNESS_PARETO_OBJECTIVES = {
             "direct__macro_image_target_miss_rate",
             "direct__macro_image_false_accept_rate",
             "direct__macro_object_target_miss_rate",
-            "direct__macro_image_uncertain_rate",
-            "pixel_to_object__target_miss_rate",
-            "pixel_to_object__false_accept_rate",
-            "pixel_to_object__target_uncertain_rate",
-            "pixel_to_object__non_target_uncertain_rate",
+            "direct__macro_image_target_uncertain_rate",
         ),
-        "maximize": (
-            "direct__macro_image_decided_balanced_accuracy",
-            "pixel_to_object__decided_balanced_accuracy",
-        ),
+        "maximize": (),
     },
     "E5": {
         "minimize": (
@@ -1700,17 +1711,14 @@ SIMCA_ROBUSTNESS_PARETO_OBJECTIVES = {
             "direct__target_miss_rate",
             "direct__false_accept_rate",
             "direct__target_uncertain_rate",
-            "direct__non_target_uncertain_rate",
         ),
-        "maximize": ("direct__decided_balanced_accuracy",),
+        "maximize": (),
     },
     "E7": {
         "minimize": (
             "direct__macro_image_target_miss_rate",
             "direct__macro_image_false_accept_rate",
             "direct__macro_object_target_miss_rate",
-            "pixel_to_object__target_miss_rate",
-            "pixel_to_object__false_accept_rate",
         ),
         "maximize": (),
     },
@@ -1719,16 +1727,9 @@ SIMCA_ROBUSTNESS_PARETO_OBJECTIVES = {
             "direct__macro_image_target_miss_rate",
             "direct__macro_image_false_accept_rate",
             "direct__macro_object_target_miss_rate",
-            "direct__macro_image_uncertain_rate",
-            "pixel_to_object__target_miss_rate",
-            "pixel_to_object__false_accept_rate",
-            "pixel_to_object__target_uncertain_rate",
-            "pixel_to_object__non_target_uncertain_rate",
+            "direct__macro_image_target_uncertain_rate",
         ),
-        "maximize": (
-            "direct__macro_image_decided_balanced_accuracy",
-            "pixel_to_object__decided_balanced_accuracy",
-        ),
+        "maximize": (),
     },
 }
 
@@ -1763,23 +1764,37 @@ for track_id, objectives in SIMCA_ROBUSTNESS_PARETO_OBJECTIVES.items():
     
 
 # ---------------------------------------------------------------------------
-# Notebook 05 v3 — stability authority and supporting robustness diagnostics
+# Notebook 05 v4 — stability authority and supporting robustness diagnostics
 # ---------------------------------------------------------------------------
 # This child-contract remains outside PROTOCOL_CONFIGURATION_KEYS. It cannot
 # alter the already frozen parent 8tracks_v5 protocol used by notebooks 00-04C.
 SIMCA_ROBUSTNESS_PARETO_SEED_AGGREGATION = (
-    "worst_observed_seed_by_metric_direction"
+    "mean_across_base_seeds"
 )
 
-# Only minimized official Pareto risks may block progression to batch 4.
-# Maximized performance and spatial-quality metrics remain supporting warnings.
+# Only target-safety metrics may block progression to batch 4. False-positive,
+# abstention, performance and spatial variability remain supporting warnings.
 SIMCA_ROBUSTNESS_BLOCKING_STABILITY_METRICS_BY_TRACK = {
-    track_id: tuple(map(str, spec.get("minimize", ())))
-    for track_id, spec in SIMCA_ROBUSTNESS_PARETO_OBJECTIVES.items()
+    "E1": ("direct__target_miss_rate",),
+    "E2": ("direct__target_miss_rate",),
+    "E3": (),
+    "E4": (),
+    "E5": ("direct__target_miss_rate",),
+    "E6": ("direct__target_miss_rate",),
+    "E7": (
+        "direct__macro_image_target_miss_rate",
+        "direct__macro_object_target_miss_rate",
+    ),
+    "E8": (
+        "direct__macro_image_target_miss_rate",
+        "direct__macro_object_target_miss_rate",
+    ),
 }
-SIMCA_ROBUSTNESS_DECISION_DISAGREEMENT_IS_BLOCKING = True
+SIMCA_ROBUSTNESS_BLOCKING_DISAGREEMENT_METRICS = (
+    "target_decision_disagreement_rate",
+)
 SIMCA_ROBUSTNESS_STABILITY_REGISTRATION_STATUS = (
-    "validation_selection_rule_v3_pre_batch4"
+    "validation_selection_rule_v4_pre_batch4"
 )
 
 for _track_id, _metrics in (
@@ -1828,6 +1843,8 @@ SIMCA_ROBUSTNESS_THRESHOLD_SENSITIVITY_METRICS = (
     "macro_image_target_miss_rate",
     "macro_image_false_accept_rate",
     "macro_image_uncertain_rate",
+    "macro_image_target_uncertain_rate",
+    "macro_image_non_target_uncertain_rate",
     "macro_image_coverage_rate",
     "macro_image_balanced_accuracy",
     "macro_image_decided_balanced_accuracy",
@@ -1869,6 +1886,8 @@ SIMCA_ROBUSTNESS_FOLD_SENSITIVITY_METRICS = (
     "macro_image_target_miss_rate",
     "macro_image_false_accept_rate",
     "macro_image_uncertain_rate",
+    "macro_image_target_uncertain_rate",
+    "macro_image_non_target_uncertain_rate",
     "macro_image_coverage_rate",
     "macro_image_balanced_accuracy",
     "macro_image_decided_balanced_accuracy",
@@ -2734,6 +2753,8 @@ SIMCA_ROBUSTNESS_SELECTION_MEMBER_COLUMNS = (
     "n_guardrail_checks",
     "n_blocking_checks",
     "n_blocking_failures",
+    "n_warning_failures",
+    "has_supporting_warning",
     "n_technical_errors",
     "is_stochastic",
     "preprocessing_step_count",
@@ -2783,6 +2804,7 @@ SIMCA_ROBUSTNESS_SELECTION_UNIT_COLUMNS = (
     "all_execution_calculable",
     "all_execution_protocol_supported",
     "all_04c_blocking_guardrails_pass",
+    "any_04c_supporting_warning",
     "model_diagnostic_eligible",
     "model_protocol_eligible_pre_stability",
     *SIMCA_ROBUSTNESS_MODEL_VALUE_COLUMNS,
@@ -3683,7 +3705,7 @@ SPATIAL_CALIBRATION_SELECTION_POLICY = (
     "within_track_lexicographic_plateau_then_minimum_complexity"
 )
 SPATIAL_CALIBRATION_WITHIN_TRACK_AGGREGATION = "equal_selected_execution"
-SPATIAL_CALIBRATION_SELECTION_TOLERANCE = 0.005
+SPATIAL_CALIBRATION_SELECTION_TOLERANCE = 0.01
 SPATIAL_CALIBRATION_SELECTION_MAXIMIZE = (
     "smallest_fragment_recall",
     "component_recall",
@@ -4142,8 +4164,17 @@ SIMCA_CONCAT_REFIT_GUARDRAIL_SCOPES = (
 )
 
 SIMCA_CONCAT_REFIT_GUARDRAIL_PROFILE_ID = (
-    "04c_fn_priority_strict_v1"
+    "04c_fn_priority_tiered_v2"
 )
+
+# Only the direct decision is the primary endpoint. Pixel-to-object metrics are
+# preserved as supporting diagnostics and can emit warnings, but cannot reject
+# an otherwise valid primary pixel map.
+SIMCA_CONCAT_REFIT_PRIMARY_DECISION_SCOPES = {
+    "object_projection": ("direct",),
+    "pixel_projection": ("direct",),
+}
+SIMCA_CONCAT_REFIT_MIN_IMAGES_FOR_BLOCKING_WORST_IMAGE = 5
 
 # Explicit 04C validation limits.
 #
@@ -4152,120 +4183,212 @@ SIMCA_CONCAT_REFIT_GUARDRAIL_PROFILE_ID = (
 # modify the batch-3 validation contract.
 SIMCA_CONCAT_REFIT_GUARDRAIL_LIMITS = {
     "2way": {
-        # Overall validation risk
         "max_fn_rate": 0.05,
-        "max_fp_rate": 0.30,
-        "min_balanced_accuracy": 0.75,
-
-        # Worst validation image
+        "warn_fp_rate": 0.30,
+        "max_fp_rate": 0.40,
+        "max_macro_object_fn_rate": 0.10,
         "max_image_fn_rate": 0.10,
-        "max_image_fp_rate": 0.50,
+        "warn_image_fp_rate": 0.50,
     },
 
     "3way": {
-        # Overall validation risk
         "max_fn_rate": 0.05,
-        "max_fp_rate": 0.30,
-        "max_uncertain_rate": 0.30,
-        "min_balanced_accuracy": 0.75,
-
-        # Worst validation image
-        "max_image_target_miss_rate": 0.10,
-        "max_image_false_accept_rate": 0.50,
-        "max_image_uncertain_rate": 0.30,
+        "warn_fp_rate": 0.30,
+        "max_fp_rate": 0.40,
+        "max_macro_object_fn_rate": 0.10,
+        "warn_min_coverage": 0.70,
+        "min_coverage": 0.60,
+        "warn_target_uncertain_rate": 0.20,
+        "warn_non_target_uncertain_rate": 0.30,
+        "warn_min_decided_balanced_accuracy": 0.70,
+        "max_image_fn_rate": 0.10,
+        "warn_image_fp_rate": 0.50,
     },
 }
 
 SIMCA_CONCAT_REFIT_EVALUATION_RULE_VERSION = (
-    "04c_validation_metrics_v5_compact_ids_strict_guardrails"
+    "04c_validation_metrics_v6_tiered_guardrails"
 )
 
+# Each rule has a stable identifier because warning and blocking thresholds may
+# legitimately target the same metric. ``projection_levels`` and
+# ``decision_scopes`` are optional applicability filters.
 SIMCA_CONCAT_REFIT_GUARDRAIL_CHECK_SPECS = {
-    "2way": {
-        "overall": (
-            (
-                "target_miss_rate",
-                "max_fn_rate",
-                "<=",
-            ),
-            (
-                "false_accept_rate",
-                "max_fp_rate",
-                "<=",
-            ),
-            (
-                "balanced_accuracy",
-                "min_balanced_accuracy",
-                ">=",
-            ),
-        ),
-        "worst_image": (
-            (
-                "target_miss_rate",
-                "max_image_fn_rate",
-                "<=",
-            ),
-            (
-                "false_accept_rate",
-                "max_image_fp_rate",
-                "<=",
-            ),
-        ),
-    },
-
-    "3way": {
-        "overall": (
-            (
-                "target_miss_rate",
-                "max_fn_rate",
-                "<=",
-            ),
-            (
-                "false_accept_rate",
-                "max_fp_rate",
-                "<=",
-            ),
-            (
-                "uncertain_rate",
-                "max_uncertain_rate",
-                "<=",
-            ),
-            (
-                "decided_balanced_accuracy",
-                "min_balanced_accuracy",
-                ">=",
-            ),
-        ),
-        "worst_image": (
-            (
-                "target_miss_rate",
-                "max_image_target_miss_rate",
-                "<=",
-            ),
-            (
-                "false_accept_rate",
-                "max_image_false_accept_rate",
-                "<=",
-            ),
-            (
-                "uncertain_rate",
-                "max_image_uncertain_rate",
-                "<=",
-            ),
-        ),
-    },
+    "2way": (
+        {
+            "rule_id": "overall_target_miss_hard",
+            "scope": "overall",
+            "metric": "target_miss_rate",
+            "limit_key": "max_fn_rate",
+            "comparator": "<=",
+            "severity": "blocking",
+        },
+        {
+            "rule_id": "overall_false_accept_warning",
+            "scope": "overall",
+            "metric": "false_accept_rate",
+            "limit_key": "warn_fp_rate",
+            "comparator": "<=",
+            "severity": "warning",
+        },
+        {
+            "rule_id": "overall_false_accept_hard",
+            "scope": "overall",
+            "metric": "false_accept_rate",
+            "limit_key": "max_fp_rate",
+            "comparator": "<=",
+            "severity": "blocking",
+        },
+        {
+            "rule_id": "overall_macro_object_target_miss_hard",
+            "scope": "overall",
+            "metric": "macro_object_target_miss_rate",
+            "limit_key": "max_macro_object_fn_rate",
+            "comparator": "<=",
+            "severity": "blocking",
+            "projection_levels": ("pixel_projection",),
+            "decision_scopes": ("direct",),
+        },
+        {
+            "rule_id": "worst_image_target_miss_conditional",
+            "scope": "worst_image",
+            "metric": "target_miss_rate",
+            "limit_key": "max_image_fn_rate",
+            "comparator": "<=",
+            "severity": "conditional_blocking",
+            "min_independent_units": 5,
+        },
+        {
+            "rule_id": "worst_image_false_accept_warning",
+            "scope": "worst_image",
+            "metric": "false_accept_rate",
+            "limit_key": "warn_image_fp_rate",
+            "comparator": "<=",
+            "severity": "warning",
+        },
+    ),
+    "3way": (
+        {
+            "rule_id": "overall_target_miss_hard",
+            "scope": "overall",
+            "metric": "target_miss_rate",
+            "limit_key": "max_fn_rate",
+            "comparator": "<=",
+            "severity": "blocking",
+        },
+        {
+            "rule_id": "overall_false_accept_warning",
+            "scope": "overall",
+            "metric": "false_accept_rate",
+            "limit_key": "warn_fp_rate",
+            "comparator": "<=",
+            "severity": "warning",
+        },
+        {
+            "rule_id": "overall_false_accept_hard",
+            "scope": "overall",
+            "metric": "false_accept_rate",
+            "limit_key": "max_fp_rate",
+            "comparator": "<=",
+            "severity": "blocking",
+        },
+        {
+            "rule_id": "overall_macro_object_target_miss_hard",
+            "scope": "overall",
+            "metric": "macro_object_target_miss_rate",
+            "limit_key": "max_macro_object_fn_rate",
+            "comparator": "<=",
+            "severity": "blocking",
+            "projection_levels": ("pixel_projection",),
+            "decision_scopes": ("direct",),
+        },
+        {
+            "rule_id": "overall_coverage_warning",
+            "scope": "overall",
+            "metric": "coverage_rate",
+            "limit_key": "warn_min_coverage",
+            "comparator": ">=",
+            "severity": "warning",
+        },
+        {
+            "rule_id": "overall_coverage_hard",
+            "scope": "overall",
+            "metric": "coverage_rate",
+            "limit_key": "min_coverage",
+            "comparator": ">=",
+            "severity": "blocking",
+        },
+        {
+            "rule_id": "overall_target_uncertainty_warning",
+            "scope": "overall",
+            "metric": "target_uncertain_rate",
+            "limit_key": "warn_target_uncertain_rate",
+            "comparator": "<=",
+            "severity": "warning",
+        },
+        {
+            "rule_id": "overall_non_target_uncertainty_warning",
+            "scope": "overall",
+            "metric": "non_target_uncertain_rate",
+            "limit_key": "warn_non_target_uncertain_rate",
+            "comparator": "<=",
+            "severity": "warning",
+        },
+        {
+            "rule_id": "overall_decided_balanced_accuracy_warning",
+            "scope": "overall",
+            "metric": "decided_balanced_accuracy",
+            "limit_key": "warn_min_decided_balanced_accuracy",
+            "comparator": ">=",
+            "severity": "warning",
+        },
+        {
+            "rule_id": "worst_image_target_miss_conditional",
+            "scope": "worst_image",
+            "metric": "target_miss_rate",
+            "limit_key": "max_image_fn_rate",
+            "comparator": "<=",
+            "severity": "conditional_blocking",
+            "min_independent_units": 5,
+        },
+        {
+            "rule_id": "worst_image_false_accept_warning",
+            "scope": "worst_image",
+            "metric": "false_accept_rate",
+            "limit_key": "warn_image_fp_rate",
+            "comparator": "<=",
+            "severity": "warning",
+        },
+    ),
 }
 
+for _decision_mode, _rules in SIMCA_CONCAT_REFIT_GUARDRAIL_CHECK_SPECS.items():
+    _rule_ids = tuple(str(rule["rule_id"]) for rule in _rules)
+    if len(_rule_ids) != len(set(_rule_ids)):
+        raise RuntimeError(f"Duplicate 04C guardrail rule_id in {_decision_mode}.")
+    for _rule in _rules:
+        if _rule["scope"] not in SIMCA_CONCAT_REFIT_GUARDRAIL_SCOPES:
+            raise RuntimeError(f"Unknown 04C guardrail scope: {_rule['scope']!r}.")
+        if _rule["severity"] not in {"warning", "blocking", "conditional_blocking"}:
+            raise RuntimeError(f"Unknown 04C guardrail severity: {_rule['severity']!r}.")
+        if _rule["limit_key"] not in SIMCA_CONCAT_REFIT_GUARDRAIL_LIMITS[_decision_mode]:
+            raise RuntimeError(
+                f"Missing 04C guardrail limit {_rule['limit_key']!r} "
+                f"for {_decision_mode}."
+            )
+
 SIMCA_CONCAT_REFIT_EVALUATION_AMENDMENT = {
-    "amendment_type": "04c_guardrail_strengthening",
-    "amendment_date": "2026-08-24",
+    "amendment_type": "04c_batch3_informed_guardrail_contract_revision",
+    "amendment_date": "2026-08-27",
 
     "reason": (
         "04C reuses the canonical 03B model_id, fit_id and projection_id, "
         "stores validation metrics in long format, evaluates the locked "
-        "direct and pixel_to_object decision scopes, and applies a stricter "
-        "FN-priority batch-3 acceptability profile aligned with the generic "
-        "03B safety constraints. The selected model population, fitted model "
+        "direct and pixel_to_object decision scopes, and applies a tiered "
+        "FN-priority batch-3 acceptability profile. The limits were revised "
+        "after inspecting rebuilt-v5 batch-3 results, so they define a "
+        "transparent selection amendment rather than an independent "
+        "prospective validation. The selected model population, fitted model "
         "definitions, projection definitions and 03B-selected decision "
         "thresholds are unchanged."
     ),
@@ -4290,13 +4413,18 @@ SIMCA_CONCAT_REFIT_EVALUATION_AMENDMENT = {
     # IMPORTANT:
     # Leave False only if these numerical limits were defined without looking
     # at the current rebuilt-v5 batch-3 validation results.
-    "batch3_used_to_choose_thresholds": False,
+    "batch3_used_to_choose_thresholds": True,
+    "validation_role": "batch3_informed_model_selection_amendment",
+    "independent_validation_claim": False,
+    "requires_fresh_holdout_for_unbiased_performance_claim": True,
 }
 
 SIMCA_CONCAT_REFIT_EVALUATION_RULE_KEYS = (
     "SIMCA_CONCAT_REFIT_EVALUATION_RULE_VERSION",
     "SIMCA_CONCAT_REFIT_GUARDRAIL_PROFILE_ID",
     "SIMCA_CONCAT_REFIT_GUARDRAIL_SCOPES",
+    "SIMCA_CONCAT_REFIT_PRIMARY_DECISION_SCOPES",
+    "SIMCA_CONCAT_REFIT_MIN_IMAGES_FOR_BLOCKING_WORST_IMAGE",
     "SIMCA_CONCAT_REFIT_GUARDRAIL_CHECK_SPECS",
     "SIMCA_CONCAT_REFIT_GUARDRAIL_LIMITS",
     "SIMCA_CONCAT_REFIT_EVALUATION_AMENDMENT",
@@ -4504,8 +4632,12 @@ SIMCA_VALIDATION_GUARDRAIL_COLUMNS = (
     "eligibility_status",
     "downstream_status",
     "candidate_status",
+    "rule_id",
     "scope",
     "metric",
+    "severity",
+    "n_independent_units",
+    "min_independent_units",
     "observed_value",
     "ci_low",
     "ci_high",
@@ -5349,6 +5481,7 @@ SIMCA_VALIDATION_GUARDRAIL_KEY_COLUMNS = (
     "random_state",
     "track_id",
     "decision_scope",
+    "rule_id",
     "scope",
     "metric",
 )

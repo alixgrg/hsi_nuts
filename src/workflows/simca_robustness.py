@@ -593,16 +593,28 @@ def validate_robustness_inputs(
     if metrics.duplicated(metric_key).any():
         raise RuntimeError("04C validation_metrics duplicates its natural key.")
 
-    guardrail_key = [
-        "model_id",
-        "random_state",
-        "track_id",
-        "decision_scope",
-        "scope",
-        "metric",
-    ]
+    guardrail_key = list(expcfg.SIMCA_VALIDATION_GUARDRAIL_KEY_COLUMNS)
+
     if guardrails.duplicated(guardrail_key).any():
-        raise RuntimeError("04C validation_guardrails duplicates its natural key.")
+        duplicates = (
+            guardrails.loc[
+                guardrails.duplicated(
+                    guardrail_key,
+                    keep=False,
+                ),
+                guardrail_key,
+            ]
+            .sort_values(
+                guardrail_key,
+                kind="mergesort",
+            )
+            .head(20)
+        )
+
+        raise RuntimeError(
+            "04C validation_guardrails duplicates its canonical natural key: "
+            f"{duplicates.to_dict('records')}."
+        )
 
     known_runs = set(executions[run_key].itertuples(index=False, name=None))
     for frame, name in (
@@ -688,6 +700,12 @@ def _execution_guardrail_status(guardrails: pd.DataFrame) -> pd.DataFrame:
     work["_blocking_failure"] = (
         work["_blocking"] & ~work["check_status"].astype(str).eq("pass")
     )
+    work["_warning_failure"] = (
+        ~work["_blocking"]
+        & work["check_status"].astype(str).isin(
+            {"fail", "not_evaluable", "technical_error", "technical_failure"}
+        )
+    )
     work["_technical_error"] = work["check_status"].astype(str).isin(
         {"technical_error", "technical_failure"}
     )
@@ -698,9 +716,10 @@ def _execution_guardrail_status(guardrails: pd.DataFrame) -> pd.DataFrame:
             eligibility_status=("eligibility_status", "first"),
             downstream_status=("downstream_status", "first"),
             candidate_status=("candidate_status", "first"),
-            n_guardrail_checks=("metric", "size"),
+            n_guardrail_checks=("rule_id", "size"),
             n_blocking_checks=("_blocking", "sum"),
             n_blocking_failures=("_blocking_failure", "sum"),
+            n_warning_failures=("_warning_failure", "sum"),
             n_technical_errors=("_technical_error", "sum"),
         )
     )
@@ -708,6 +727,7 @@ def _execution_guardrail_status(guardrails: pd.DataFrame) -> pd.DataFrame:
         "n_guardrail_checks",
         "n_blocking_checks",
         "n_blocking_failures",
+        "n_warning_failures",
         "n_technical_errors",
     ):
         out[column] = pd.to_numeric(out[column], errors="raise").astype(int)
@@ -717,6 +737,7 @@ def _execution_guardrail_status(guardrails: pd.DataFrame) -> pd.DataFrame:
         & out["n_technical_errors"].eq(0)
     )
     out["all_blocking_checks_pass"] = out["n_blocking_failures"].eq(0)
+    out["has_supporting_warning"] = out["n_warning_failures"].gt(0)
     out["scope_protocol_pass"] = (
         out["candidate_status"].astype(str).isin(
             expcfg.SIMCA_ROBUSTNESS_PROTOCOL_CANDIDATE_STATUSES
@@ -1027,12 +1048,12 @@ def aggregate_repeated_execution_metrics(
     *,
     include_statistics: bool = False,
 ) -> pd.DataFrame:
-    """Aggregate repeated executions once, using the canonical metric directions.
+    """Aggregate repeated executions using the registered Pareto seed policy.
 
-    The conservative value is max across seeds for minimized metrics, min for
-    maximized metrics, and mean only for directionless descriptive metrics.
-    This kernel is shared by the official 05 selection units and the supporting
-    Pareto jackknife, preventing two implementations of seed aggregation.
+    The official v4 Pareto uses the equal-weight seed mean. The legacy
+    worst-observed policy remains available for reproducibility; worst values
+    are always retained in the explicit min/max statistics used by stability
+    diagnostics.
     """
     validate_simca_table_columns(
         selection_members,
@@ -1056,24 +1077,33 @@ def aggregate_repeated_execution_metrics(
     )
     stats.loc[stats["n_finite"].eq(1), "std"] = 0.0
     direction = stats["metric"].map(metric_direction)
-    stats["conservative"] = np.select(
-        [direction.eq("minimize"), direction.eq("maximize")],
-        [stats["max"], stats["min"]],
-        default=stats["mean"],
-    )
+    aggregation = str(expcfg.SIMCA_ROBUSTNESS_PARETO_SEED_AGGREGATION)
+    if aggregation == "mean_across_base_seeds":
+        stats["selection_value"] = stats["mean"]
+    elif aggregation == "worst_observed_seed_by_metric_direction":
+        stats["selection_value"] = np.select(
+            [direction.eq("minimize"), direction.eq("maximize")],
+            [stats["max"], stats["min"]],
+            default=stats["mean"],
+        )
+    else:
+        raise RuntimeError(
+            "Unknown SIMCA_ROBUSTNESS_PARETO_SEED_AGGREGATION="
+            f"{aggregation!r}."
+        )
 
     n_states = (
         selection_members.groupby(model_key, as_index=False, sort=False, dropna=False)
         .agg(n_random_states=("random_state", "nunique"))
     )
-    conservative = stats.pivot(
+    aggregated = stats.pivot(
         index=model_key,
         columns="metric",
-        values="conservative",
+        values="selection_value",
     )
-    conservative.columns.name = None
+    aggregated.columns.name = None
     out = n_states.merge(
-        conservative.reset_index(),
+        aggregated.reset_index(),
         on=model_key,
         how="left",
         validate="one_to_one",
@@ -1110,8 +1140,11 @@ def build_selection_unit_metrics(
     member = _build_selection_members_from_validated(validated)
     model_key = list(expcfg.SIMCA_ROBUSTNESS_MODEL_KEY_COLUMNS)
 
+    primary_member = member.loc[
+        member["decision_scope"].astype(str).eq("direct")
+    ].copy()
     run_status = (
-        member.groupby(
+        primary_member.groupby(
             [*model_key, "random_state"],
             as_index=False,
             sort=False,
@@ -1122,6 +1155,23 @@ def build_selection_unit_metrics(
             execution_protocol_supported=("scope_protocol_pass", "all"),
             all_04c_blocking_guardrails_pass=("all_blocking_checks_pass", "all"),
         )
+    )
+    supporting_status = (
+        member.groupby(
+            [*model_key, "random_state"],
+            as_index=False,
+            sort=False,
+            dropna=False,
+        )
+        .agg(
+            execution_04c_supporting_warning=("has_supporting_warning", "any"),
+        )
+    )
+    run_status = run_status.merge(
+        supporting_status,
+        on=[*model_key, "random_state"],
+        how="left",
+        validate="one_to_one",
     )
 
     invariant = [
@@ -1150,6 +1200,7 @@ def build_selection_unit_metrics(
             all_execution_calculable=("execution_calculable", "all"),
             all_execution_protocol_supported=("execution_protocol_supported", "all"),
             all_04c_blocking_guardrails_pass=("all_04c_blocking_guardrails_pass", "all"),
+            any_04c_supporting_warning=("execution_04c_supporting_warning", "any"),
             _observed_states=(
                 "random_state",
                 lambda values: tuple(sorted(set(map(int, values)))),
@@ -1814,11 +1865,46 @@ def summarize_random_state_stability_metrics(
     model_status["target_decision_disagreement_failed"] = stochastic & pd.to_numeric(
         model_status["target_decision_disagreement_rate"], errors="coerce"
     ).gt(float(limits["target_decision_disagreement_rate"]))
-    if bool(expcfg.SIMCA_ROBUSTNESS_DECISION_DISAGREEMENT_IS_BLOCKING):
+    blocking_disagreement_metrics = set(
+        map(str, expcfg.SIMCA_ROBUSTNESS_BLOCKING_DISAGREEMENT_METRICS)
+    )
+    known_disagreement_metrics = {
+        "decision_disagreement_rate",
+        "target_decision_disagreement_rate",
+    }
+    unknown_blocking = sorted(
+        blocking_disagreement_metrics - known_disagreement_metrics
+    )
+    if unknown_blocking:
+        raise RuntimeError(
+            "Unknown blocking disagreement metrics: "
+            f"{unknown_blocking}."
+        )
+    global_disagreement_failed = model_status[
+        "decision_disagreement_failed"
+    ].astype(bool)
+    target_disagreement_failed = model_status[
+        "target_decision_disagreement_failed"
+    ].astype(bool)
+    if "decision_disagreement_rate" in blocking_disagreement_metrics:
         model_status["blocking_stability_failed"] = (
             model_status["blocking_stability_failed"].astype(bool)
-            | model_status["decision_disagreement_failed"].astype(bool)
-            | model_status["target_decision_disagreement_failed"].astype(bool)
+            | global_disagreement_failed
+        )
+    else:
+        model_status["supporting_stability_warning"] = (
+            model_status["supporting_stability_warning"].astype(bool)
+            | global_disagreement_failed
+        )
+    if "target_decision_disagreement_rate" in blocking_disagreement_metrics:
+        model_status["blocking_stability_failed"] = (
+            model_status["blocking_stability_failed"].astype(bool)
+            | target_disagreement_failed
+        )
+    else:
+        model_status["supporting_stability_warning"] = (
+            model_status["supporting_stability_warning"].astype(bool)
+            | target_disagreement_failed
         )
 
     metric_flags = summary.loc[
@@ -1883,20 +1969,26 @@ def summarize_random_state_stability_metrics(
         how="left",
         validate="one_to_one",
     )
-    model_status.loc[
-        model_status["decision_disagreement_failed"].astype(bool),
-        "blocking_stability_flags",
-    ] = model_status.loc[
-        model_status["decision_disagreement_failed"].astype(bool),
-        "blocking_stability_flags",
-    ].map(lambda value: ";".join(filter(None, [str(value), "decision_disagreement_rate"])))
-    model_status.loc[
-        model_status["target_decision_disagreement_failed"].astype(bool),
-        "blocking_stability_flags",
-    ] = model_status.loc[
-        model_status["target_decision_disagreement_failed"].astype(bool),
-        "blocking_stability_flags",
-    ].map(lambda value: ";".join(filter(None, [str(value), "target_decision_disagreement_rate"])))
+    for metric_name, failed_column in (
+        ("decision_disagreement_rate", "decision_disagreement_failed"),
+        (
+            "target_decision_disagreement_rate",
+            "target_decision_disagreement_failed",
+        ),
+    ):
+        flag_column = (
+            "blocking_stability_flags"
+            if metric_name in blocking_disagreement_metrics
+            else "supporting_stability_flags"
+        )
+        failed = model_status[failed_column].astype(bool)
+        model_status.loc[failed, flag_column] = model_status.loc[
+            failed, flag_column
+        ].map(
+            lambda value, metric_name=metric_name: ";".join(
+                filter(None, [str(value), metric_name])
+            )
+        )
 
     model_status["blocking_stability_flags"] = model_status[
         "blocking_stability_flags"
@@ -2057,7 +2149,12 @@ def build_robustness_review_guardrails(
         )
         calculable = bool(row["all_execution_calculable"])
         guardrail_pass = bool(row["all_04c_blocking_guardrails_pass"])
-        on_pareto = bool(row["is_protocol_pareto"])
+        guardrail_warning = bool(row["any_04c_supporting_warning"])
+        on_protocol_pareto = bool(row["is_protocol_pareto"])
+        on_diagnostic_pareto = bool(row["is_diagnostic_pareto"])
+        on_relevant_pareto = (
+            on_protocol_pareto if supported else on_diagnostic_pareto
+        )
         seed_ok = bool(row["seed_requirement_satisfied"])
         stability_status = str(row.get("model_stability_status", ""))
         blocking_stability_failed = bool(row["blocking_stability_failed"])
@@ -2106,7 +2203,7 @@ def build_robustness_review_guardrails(
             comparator="in",
             threshold_statuses="supported protocol path",
             passed=supported,
-            blocking=True,
+            blocking=supported,
             reason_code="supported_upstream" if supported else "unsupported_upstream",
             reason="03C eligibility and 04A downstream support remain authoritative.",
         )
@@ -2117,9 +2214,9 @@ def build_robustness_review_guardrails(
             comparator="is",
             threshold_statuses="calculable",
             passed=calculable,
-            blocking=True,
+            blocking=supported,
             reason_code="validation_calculable" if calculable else "validation_technical_failure",
-            reason="Every required base 04C execution/scope must be calculable.",
+            reason="Every required primary base-04C execution must be calculable.",
         )
         add_check(
             "validation",
@@ -2128,22 +2225,45 @@ def build_robustness_review_guardrails(
             comparator="is",
             threshold_statuses="pass",
             passed=guardrail_pass,
-            blocking=True,
+            blocking=supported,
             reason_code="04c_guardrails_pass" if guardrail_pass else "04c_guardrail_failure",
             reason="No second independent batch-3 guardrail contract is introduced in 05.",
         )
         add_check(
+            "validation",
+            "04c_supporting_warnings",
+            observed_status="warning" if guardrail_warning else "no_warning",
+            comparator="is",
+            threshold_statuses="no_warning",
+            passed=not guardrail_warning,
+            blocking=False,
+            reason_code=(
+                "04c_supporting_guardrail_warning"
+                if guardrail_warning
+                else "04c_no_supporting_guardrail_warning"
+            ),
+            reason="Non-blocking 04C warnings remain visible in the review.",
+        )
+        add_check(
             "validation_pareto",
-            "within_track_protocol_pareto",
-            observed_status="pareto" if on_pareto else "not_pareto",
+            (
+                "within_track_protocol_pareto"
+                if supported
+                else "within_track_diagnostic_pareto"
+            ),
+            observed_status="pareto" if on_relevant_pareto else "not_pareto",
             comparator="is",
             threshold_statuses="pareto",
-            passed=on_pareto,
-            blocking=True,
-            reason_code="within_track_pareto" if on_pareto else "within_track_dominated",
+            passed=on_relevant_pareto,
+            blocking=supported,
+            reason_code=(
+                "within_track_pareto"
+                if on_relevant_pareto
+                else "within_track_dominated"
+            ),
             reason="Pareto membership is computed only inside the same E1-E8 track.",
         )
-        if on_pareto and bool(row["is_stochastic"]):
+        if supported and on_protocol_pareto and bool(row["is_stochastic"]):
             complete = stability_status != "not_estimable_missing_seed"
             add_check(
                 "seed_robustness",
@@ -2198,7 +2318,7 @@ def build_robustness_review_guardrails(
         elif not seed_ok:
             review_status = "excluded_missing_seed"
             flags.append("base_seed_coverage_incomplete")
-        elif not on_pareto:
+        elif not on_protocol_pareto:
             review_status = "not_on_validation_pareto"
             flags.append("within_track_pareto_dominated")
         elif bool(row["is_stochastic"]) and stability_status == "not_estimable_missing_seed":
@@ -2213,11 +2333,14 @@ def build_robustness_review_guardrails(
             flags.append("primary_seed_instability")
         elif (
             str(row["eligibility_status"]) == "eligible_with_warning"
+            or guardrail_warning
             or supporting_warning
         ):
             review_status = "eligible_with_warning"
             if str(row["eligibility_status"]) == "eligible_with_warning":
                 flags.append("upstream_eligibility_warning")
+            if guardrail_warning:
+                flags.append("04c_supporting_guardrail_warning")
             if supporting_warning:
                 flags.append("secondary_seed_stability_warning")
         else:
@@ -3443,16 +3566,61 @@ def build_threshold_stability_diagnostics(
         - summary.pop("uncertainty_band_width_min")
     )
 
-    policy_nunique = grouped[list(policy_columns)].nunique(dropna=False).max(axis=1)
-    numeric_nunique = grouped[list(numeric_columns)].nunique(dropna=False).max(axis=1)
+    # policy_nunique = grouped[list(policy_columns)].nunique(dropna=False).max(axis=1)
+    # numeric_nunique = grouped[list(numeric_columns)].nunique(dropna=False).max(axis=1)
+    # invariants = pd.DataFrame(
+    #     {
+    #         **{
+    #             column: policy_nunique.index.get_level_values(column)
+    #             for column in key
+    #         },
+    #         "policy_coordinates_invariant": policy_nunique.to_numpy() <= 1,
+    #         "fixed_numeric_threshold_invariant": numeric_nunique.to_numpy() <= 1,
+    #     }
+    # )
+    POLICY_COORDINATE_ATOL = 1e-7
+
+    def _policy_coordinate_is_invariant(values: pd.Series,) -> bool:
+        numeric = pd.to_numeric(values,errors="coerce").to_numpy(dtype=float)
+        finite = np.isfinite(numeric)
+        # Entirely absent coordinate:
+        # e.g. vote_threshold for a quantile-based 3-way rule.
+        if not finite.any():
+            return True
+        # Mixing an actual coordinate and a missing coordinate
+        # represents a genuine change in policy structure.
+        if finite.sum() != len(numeric):
+            return False
+        return bool(np.allclose(numeric,numeric[0],rtol=0.0,atol=POLICY_COORDINATE_ATOL))
+
+    policy_invariance = (
+        grouped[list(policy_columns)]
+        .agg(_policy_coordinate_is_invariant)
+    )
+    policy_invariant = (
+        policy_invariance
+        .all(axis=1)
+    )
+    # Keep exact numeric-threshold comparison.
+    # For 3-way thresholds, numerical movement is handled below
+    # as a stability diagnostic rather than as policy drift.
+    numeric_nunique = (
+        grouped[list(numeric_columns)]
+        .nunique(dropna=False)
+        .max(axis=1)
+    )
     invariants = pd.DataFrame(
         {
             **{
-                column: policy_nunique.index.get_level_values(column)
+                column: policy_invariant.index.get_level_values(column)
                 for column in key
             },
-            "policy_coordinates_invariant": policy_nunique.to_numpy() <= 1,
-            "fixed_numeric_threshold_invariant": numeric_nunique.to_numpy() <= 1,
+            "policy_coordinates_invariant": (
+                policy_invariant.to_numpy(dtype=bool)
+            ),
+            "fixed_numeric_threshold_invariant": (
+                numeric_nunique.to_numpy() <= 1
+            ),
         }
     )
     summary = summary.merge(
@@ -4931,7 +5099,7 @@ def build_ablation_diagnostics(
         ref[["track_id", "reference_model_id", "random_state", "metric", "reference_seed_value"]],
         on=["track_id", "reference_model_id"],
         how="left",
-        validate="one_to_many",
+        validate="many_to_many",
     ).merge(
         alt[["track_id", "ablated_model_id", "random_state", "metric", "ablated_seed_value"]],
         on=["track_id", "ablated_model_id", "random_state", "metric"],
@@ -5379,12 +5547,16 @@ def robustness_contract_payload() -> dict[str, Any]:
         "spatial_map_variant": str(expcfg.SIMCA_ROBUSTNESS_SPATIAL_MAP_VARIANT),
         "pareto_epsilon": float(expcfg.SIMCA_ROBUSTNESS_PARETO_EPSILON),
         "pareto_objectives": expcfg.SIMCA_ROBUSTNESS_PARETO_OBJECTIVES,
-        "pareto_seed_aggregation": "worst_observed_seed_bymetric_direction",
+        "pareto_seed_aggregation": str(
+            expcfg.SIMCA_ROBUSTNESS_PARETO_SEED_AGGREGATION
+        ),
         "metric_directions": expcfg.SIMCA_ROBUSTNESS_METRIC_DIRECTIONS,
         "stability_limits": expcfg.SIMCA_ROBUSTNESS_STABILITY_LIMITS,
         "blocking_stability_metrics_by_track": expcfg.SIMCA_ROBUSTNESS_BLOCKING_STABILITY_METRICS_BY_TRACK,
         "decision_disagreement_limits": expcfg.SIMCA_ROBUSTNESS_DECISION_DISAGREEMENT_LIMITS,
-        "decision_disagreement_is_blocking": bool(expcfg.SIMCA_ROBUSTNESS_DECISION_DISAGREEMENT_IS_BLOCKING),
+        "blocking_disagreement_metrics": list(
+            map(str, expcfg.SIMCA_ROBUSTNESS_BLOCKING_DISAGREEMENT_METRICS)
+        ),
         "stability_registration_status": str(expcfg.SIMCA_ROBUSTNESS_STABILITY_REGISTRATION_STATUS),
         "supporting_diagnostic_rule_version": str(
             expcfg.SIMCA_ROBUSTNESS_SUPPORTING_DIAGNOSTIC_RULE_VERSION

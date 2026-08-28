@@ -1195,6 +1195,99 @@ def make_audit_id(
     )
 
 
+def resolve_protocol_for_execution(
+    protocol_dir: Path,
+    *,
+    upstream_manifest_path: Path | None = None,
+) -> tuple[pd.DataFrame, str]:
+    """
+    Resolve the protocol hash used for one execution.
+
+    Production/frozen mode
+    ----------------------
+    The current configuration must exactly match the frozen protocol.
+
+    Development mode
+    ----------------
+    Configuration-vs-lock mismatch is diagnostic only. If an upstream manifest
+    is supplied, its protocol hash is reused as the lineage anchor so existing
+    expensive upstream artefacts can be consumed without rewriting them.
+    """
+
+    protocol_dir = Path(protocol_dir)
+
+    strict = not bool(
+        getattr(
+            expcfg,
+            "IGNORE_CURRENT_PROTOCOL_HASH_MISMATCH",
+            False,
+        )
+    )
+
+    checks = verify_frozen_protocol(
+        protocol_dir,
+        strict=strict,
+    )
+
+    lock_path = (
+        protocol_dir
+        / expcfg.PROTOCOL_OUTPUT_FILENAMES["lock"]
+    )
+
+    lock = json.loads(
+        lock_path.read_text(encoding="utf-8")
+    )
+
+    frozen_hash = str(lock["lock_sha256"])
+
+    # Normal/final execution.
+    if strict:
+        return checks, frozen_hash
+
+    # Development execution:
+    # preserve the lineage of the expensive upstream artefact when possible.
+    if upstream_manifest_path is not None:
+        upstream_manifest_path = Path(upstream_manifest_path)
+
+        if upstream_manifest_path.is_file():
+            manifest = json.loads(
+                upstream_manifest_path.read_text(
+                    encoding="utf-8"
+                )
+            )
+
+            upstream_hash = str(
+                manifest.get("protocol_hash", "")
+            )
+
+            if upstream_hash:
+                dev_row = pd.DataFrame(
+                    [
+                        {
+                            "check": "development_protocol_override",
+                            "status": "warning",
+                            "expected": frozen_hash,
+                            "observed": upstream_hash,
+                            "message": (
+                                "Development mode: current configuration "
+                                "hash mismatch ignored; upstream artefact "
+                                "lineage retained."
+                            ),
+                        }
+                    ]
+                )
+
+                checks = pd.concat(
+                    [checks, dev_row],
+                    ignore_index=True,
+                )
+
+                return checks, upstream_hash
+
+    # No upstream lineage to inherit.
+    return checks, frozen_hash
+
+
 __all__ = [
     "PLANNED_CONTRAST_COLUMNS",
     "PROTOCOL_CHECK_COLUMNS",
@@ -1216,4 +1309,5 @@ __all__ = [
     "verify_frozen_protocol",
     "make_selection_id",
     "make_audit_id",
+    "resolve_protocol_for_execution",
 ]

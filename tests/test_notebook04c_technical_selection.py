@@ -40,7 +40,7 @@ def test_notebook_04c_is_clean_and_implements_tasks_31_to_33():
         "verify_spatial_postprocessing_lock",
         "VALIDATION_PLAN_HASH",
         "expected_ablation_hash",
-        "unsupported_domain_shift_diagnostic",
+        "diagnostic_only",
         "validation_object_predictions.parquet",
         "validation_pixel_predictions.parquet",
         "pixel_maps_manifest.parquet",
@@ -457,11 +457,18 @@ def test_validation_evaluation_rule_hash_is_deterministic_and_sensitive(
     assert len(original_hash) == 64
 
     changed = {
-        mode: {scope: tuple(specs) for scope, specs in scopes.items()}
-        for mode, scopes in expcfg.SIMCA_CONCAT_REFIT_GUARDRAIL_CHECK_SPECS.items()
+        mode: tuple(dict(spec) for spec in specs)
+        for mode, specs in expcfg.SIMCA_CONCAT_REFIT_GUARDRAIL_CHECK_SPECS.items()
     }
-    changed["2way"]["worst_image"] += (
-        ("coverage_rate", "min_coverage", ">="),
+    changed["2way"] += (
+        {
+            "rule_id": "hash_sensitivity_probe",
+            "scope": "overall",
+            "metric": "target_miss_rate",
+            "limit_key": "max_fn_rate",
+            "comparator": "<=",
+            "severity": "warning",
+        },
     )
     monkeypatch.setattr(
         expcfg,
@@ -506,9 +513,7 @@ def test_guardrails_keep_unsupported_track_as_diagnostic():
         guardrails.loc[
             guardrails["calibration_id"].eq("unsupported"), "candidate_status"
         ]
-    ) == {
-        "unsupported_domain_shift_diagnostic"
-    }
+    ) == {"diagnostic_only"}
 
 
 def test_boolean_map_encoding_roundtrip():

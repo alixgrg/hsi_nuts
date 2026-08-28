@@ -19,6 +19,9 @@ from src.workflows.simca_internal_calibration import (
     attach_internal_calibration_runner_group_ids,
     iter_internal_calibration_checkpoint_shards_8tracks,
 )
+from src.workflows.simca_thresholds_calibration import (
+    evaluate_calibration_thresholds,
+)
 from src.workflows.simca_selection_utils import (
     pareto_front_with_witness,
 )
@@ -108,6 +111,7 @@ _THRESHOLD_CANDIDATE_CACHE_FORMAT = "threshold_candidates_v1"
 _MODEL_METRICS = (
     "target_miss_rate",
     "false_accept_rate",
+    "macro_object_target_miss_rate",
     "uncertain_rate",
     "target_uncertain_rate",
     "non_target_uncertain_rate",
@@ -534,6 +538,7 @@ def aggregate_threshold_candidates(
     lower_metrics = (
         "target_miss_rate",
         "false_accept_rate",
+        "macro_object_target_miss_rate",
         "uncertain_rate",
         "target_uncertain_rate",
         "non_target_uncertain_rate",
@@ -2160,6 +2165,7 @@ def reduce_threshold_policies_from_checkpoint_8tracks(
     threshold_audit_output_path: str | Path,
     threshold_candidates_output_path: str | Path | None = None,
     threshold_candidate_cache_context: Mapping[str, object] | None = None,
+    recompute_threshold_metrics_from_oof: bool = False,
     verbose: bool = True,
 ) -> dict[str, object]:
     """Reduce threshold shards by seed-family with bounded peak memory.
@@ -2197,18 +2203,36 @@ def reduce_threshold_policies_from_checkpoint_8tracks(
     if model_family_identity.gt(1).any():
         raise RuntimeError("A model_id spans multiple checkpoint families.")
 
-    shard_by_runner: dict[str, Path] = {}
-    for runner_group_id, path in (
-        iter_internal_calibration_checkpoint_shards_8tracks(
-            checkpoint_run_dir,
-            "threshold_metrics",
-        )
-    ):
-        if runner_group_id in shard_by_runner:
-            raise RuntimeError(
-                f"Duplicate threshold shard for {runner_group_id}."
+    def shard_lookup(
+        table_name: str,
+    ) -> dict[str, Path]:
+        lookup: dict[str, Path] = {}
+        for runner_group_id, path in (
+            iter_internal_calibration_checkpoint_shards_8tracks(
+                checkpoint_run_dir,
+                table_name,
             )
-        shard_by_runner[runner_group_id] = path
+        ):
+            runner_group_id = str(runner_group_id)
+            if runner_group_id in lookup:
+                raise RuntimeError(f"Duplicate {table_name} shard for {runner_group_id}.")
+            lookup[runner_group_id] = path
+        return lookup
+
+    if recompute_threshold_metrics_from_oof:
+        object_shard_by_runner = shard_lookup(
+            "oof_object_predictions"
+        )
+        pixel_shard_by_runner = shard_lookup(
+            "oof_pixel_predictions"
+        )
+        shard_by_runner = {}
+    else:
+        shard_by_runner = shard_lookup(
+            "threshold_metrics"
+        )
+        object_shard_by_runner = {}
+        pixel_shard_by_runner = {}
 
     expected_runner_ids = set(work["_runner_group_id"].astype(str))
     unexpected_runner_ids = set(shard_by_runner) - expected_runner_ids
@@ -2261,12 +2285,57 @@ def reduce_threshold_policies_from_checkpoint_8tracks(
             )
             metric_parts: list[pd.DataFrame] = []
             for runner_group_id in runner_ids:
-                path = shard_by_runner.get(runner_group_id)
-                if path is None:
-                    continue
-                table = pq.read_table(path)
-                metrics_writer.write_table(table)
-                metric_parts.append(table.to_pandas())
+                if recompute_threshold_metrics_from_oof:
+                    runner_configurations = (
+                        group_configurations.loc[
+                            group_configurations[
+                                "_runner_group_id"
+                            ].astype(str).eq(
+                                str(runner_group_id)
+                            )
+                        ]
+                        .copy()
+                    )
+
+                    object_path = object_shard_by_runner.get(str(runner_group_id))
+                    pixel_path = pixel_shard_by_runner.get(str(runner_group_id))
+
+                    oof_objects = (
+                        pq.read_table(object_path).to_pandas()
+                        if object_path is not None
+                        else pd.DataFrame()
+                    )
+                    oof_pixels = (
+                        pq.read_table(pixel_path).to_pandas()
+                        if pixel_path is not None
+                        else pd.DataFrame()
+                    )
+
+                    recomputed_metrics = (
+                        evaluate_calibration_thresholds(
+                            oof_objects,
+                            oof_pixels,
+                            runner_configurations,
+                        )
+                    )
+                    if recomputed_metrics.empty:
+                        continue
+                    recomputed_metrics = (
+                        recomputed_metrics.reindex(
+                            columns=(expcfg.INTERNAL_CALIBRATION_THRESHOLD_METRIC_COLUMNS)
+                        )
+                    )
+                    table = pa.Table.from_pandas(recomputed_metrics,preserve_index=False)
+                    metrics_writer.write_table(table)
+                    metric_parts.append(recomputed_metrics)
+
+                else:
+                    path = shard_by_runner.get(str(runner_group_id))
+                    if path is None:
+                        continue
+                    table = pq.read_table(path)
+                    metrics_writer.write_table(table)
+                    metric_parts.append(table.to_pandas())
 
             group_metrics = (
                 pd.concat(
@@ -2831,8 +2900,13 @@ def select_calibrated_models(
     model_metrics: pd.DataFrame,
     rule_diagnostics: pd.DataFrame,
     expected_n_folds: int,
+    pareto_objectives: Mapping[str,Mapping[str, Sequence[str]],] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Select calibrated models using constraints, plateaus and Pareto."""
+    effective_pareto_objectives = (expcfg.INTERNAL_CALIBRATION_PARETO_OBJECTIVES
+        if pareto_objectives is None
+        else pareto_objectives
+    )
     require_columns(
         model_catalog,
         expcfg.INTERNAL_CALIBRATION_MODEL_CATALOG_COLUMNS,
@@ -3198,15 +3272,11 @@ def select_calibrated_models(
         dropna=False,
     ):
         track_id = str(track_id)
-        if track_id not in (
-            expcfg.INTERNAL_CALIBRATION_PARETO_OBJECTIVES
-        ):
+        if track_id not in effective_pareto_objectives:
             raise KeyError(
                 f"No Pareto objectives configured for {track_id}."
             )
-        objectives = (
-            expcfg.INTERNAL_CALIBRATION_PARETO_OBJECTIVES[track_id]
-        )
+        objectives = effective_pareto_objectives[track_id]
         minimize = tuple(objectives["minimize"])
         maximize = tuple(objectives["maximize"])
         objective_columns = [*minimize, *maximize]

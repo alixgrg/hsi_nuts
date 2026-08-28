@@ -1081,6 +1081,8 @@ def _macro_image_decision_metrics(
         "target_miss_rate",
         "false_accept_rate",
         "uncertain_rate",
+        "target_uncertain_rate",
+        "non_target_uncertain_rate",
         "coverage_rate",
     ):
         mean, low, high = _finite_mean_interval(by_image[metric])
@@ -1333,6 +1335,8 @@ def evaluate_locked_validation_predictions(
         "macro_image_target_miss_rate",
         "macro_image_false_accept_rate",
         "macro_image_uncertain_rate",
+        "macro_image_target_uncertain_rate",
+        "macro_image_non_target_uncertain_rate",
         "macro_image_coverage_rate",
         "macro_image_balanced_accuracy",
         "macro_image_decided_balanced_accuracy",
@@ -1778,14 +1782,25 @@ def build_validation_guardrails(
             )
         if decision_mode not in expcfg.SIMCA_CONCAT_REFIT_GUARDRAIL_CHECK_SPECS:
             raise RuntimeError(f"Unknown decision mode: {decision_mode!r}.")
+        if projection_level not in expcfg.SIMCA_CONCAT_REFIT_PRIMARY_DECISION_SCOPES:
+            raise RuntimeError(f"Unknown projection level: {projection_level!r}.")
 
         decision_scopes = (
             ("direct", "pixel_to_object")
             if projection_level == "pixel_projection"
             else ("direct",)
         )
+        primary_decision_scopes = set(
+            map(
+                str,
+                expcfg.SIMCA_CONCAT_REFIT_PRIMARY_DECISION_SCOPES[
+                    projection_level
+                ],
+            )
+        )
         for decision_scope in decision_scopes:
             is_protocol_supported = downstream_status == "supported"
+            is_primary_scope = decision_scope in primary_decision_scopes
             blocking_failures: list[bool] = []
             technical_failure = False
 
@@ -1810,15 +1825,21 @@ def build_validation_guardrails(
                         "eligibility_status": eligibility_status,
                         "downstream_status": downstream_status,
                         "candidate_status": "technical_failure",
+                        "rule_id": "technical_calculability",
                         "scope": "overall",
                         "metric": "technical_calculability",
+                        "severity": "blocking",
+                        "n_independent_units": 0,
+                        "min_independent_units": np.nan,
                         "observed_value": np.nan,
                         "ci_low": np.nan,
                         "ci_high": np.nan,
                         "comparator": "is",
                         "threshold": np.nan,
                         "check_status": "technical_error",
-                        "is_blocking": bool(is_protocol_supported),
+                        "is_blocking": bool(
+                            is_protocol_supported and is_primary_scope
+                        ),
                         "reason_code": "validation_technical_failure",
                         "reason": (
                             f"{first.get('error_type', '')}: "
@@ -1834,125 +1855,193 @@ def build_validation_guardrails(
             constraints = expcfg.SIMCA_CONCAT_REFIT_GUARDRAIL_LIMITS[
                 decision_mode
             ]
-            for scope in expcfg.SIMCA_CONCAT_REFIT_GUARDRAIL_SCOPES:
-                specs = expcfg.SIMCA_CONCAT_REFIT_GUARDRAIL_CHECK_SPECS[
-                    decision_mode
-                ][scope]
-                for metric_name, constraint_name, comparator in specs:
-                    # Direct pixel decisions retain the image-macro primary
-                    # evaluation used before this schema refactor. The secondary
-                    # pixel-to-object scope is an object decision and therefore
-                    # uses the pooled object-level metric.
-                    reported_metric = (
-                        f"macro_image_{metric_name}"
-                        if scope == "overall"
-                        and decision_scope == "direct"
-                        and projection_level == "pixel_projection"
-                        else metric_name
-                    )
-                    if scope == "overall":
-                        observed, ci_low, ci_high, status, error_type, error_message = (
-                            metric_value(
-                                model_id,
-                                random_state,
-                                decision_scope,
-                                "overall",
-                                "all",
-                                reported_metric,
-                            )
-                        )
-                    else:
-                        group = metrics.loc[
-                            metrics["model_id"].eq(model_id)
-                            & metrics["random_state"].eq(random_state)
-                            & metrics["decision_scope"].eq(decision_scope)
-                            & metrics["map_variant"].astype(str).eq("raw")
-                            & metrics["aggregation_level"].astype(str).eq(
-                                "source_image"
-                            )
-                            & metrics["metric"].astype(str).eq(reported_metric)
-                            & metrics["status"].astype(str).eq("calculable")
-                        ].copy()
-                        values = pd.to_numeric(group["value"], errors="coerce")
-                        finite = values[np.isfinite(values)]
-                        if finite.empty:
-                            observed = ci_low = ci_high = np.nan
-                            status = "missing"
-                            error_type = ""
-                            error_message = ""
-                        else:
-                            index = (
-                                finite.idxmax()
-                                if comparator == "<="
-                                else finite.idxmin()
-                            )
-                            selected = group.loc[index]
-                            observed = float(selected["value"])
-                            ci_low = float(
-                                pd.to_numeric(
-                                    pd.Series([selected["ci_low"]]),
-                                    errors="coerce",
-                                ).iloc[0]
-                            )
-                            ci_high = float(
-                                pd.to_numeric(
-                                    pd.Series([selected["ci_high"]]),
-                                    errors="coerce",
-                                ).iloc[0]
-                            )
-                            status = str(selected["status"])
-                            error_type = str(selected["error_type"])
-                            error_message = str(selected["error_message"])
+            specs = expcfg.SIMCA_CONCAT_REFIT_GUARDRAIL_CHECK_SPECS[
+                decision_mode
+            ]
+            for spec in specs:
+                projection_levels = tuple(
+                    map(str, spec.get("projection_levels", ()))
+                )
+                if projection_levels and projection_level not in projection_levels:
+                    continue
+                applicable_scopes = tuple(
+                    map(str, spec.get("decision_scopes", ()))
+                )
+                if applicable_scopes and decision_scope not in applicable_scopes:
+                    continue
 
-                    threshold = float(constraints[constraint_name])
-                    is_blocking = bool(is_protocol_supported)
-                    if status != "calculable" or not np.isfinite(observed):
-                        passed = False
-                        check_status = "technical_error"
-                        reason_code = "required_guardrail_metric_non_finite"
-                        reason = (
-                            error_message
-                            or f"Required guardrail metric {reported_metric} is unavailable."
+                rule_id = str(spec["rule_id"])
+                scope = str(spec["scope"])
+                metric_name = str(spec["metric"])
+                constraint_name = str(spec["limit_key"])
+                comparator = str(spec["comparator"])
+                severity = str(spec["severity"])
+                min_independent_units_raw = spec.get("min_independent_units")
+                min_independent_units = (
+                    int(min_independent_units_raw)
+                    if min_independent_units_raw is not None
+                    else None
+                )
+
+                # Direct pixel decisions use equal-image macro summaries for
+                # their primary overall endpoint. Explicit macro metrics, such
+                # as macro-object miss, are already fully qualified.
+                reported_metric = (
+                    f"macro_image_{metric_name}"
+                    if scope == "overall"
+                    and decision_scope == "direct"
+                    and projection_level == "pixel_projection"
+                    and not metric_name.startswith("macro_")
+                    else metric_name
+                )
+                n_independent_units = np.nan
+                if scope == "overall":
+                    observed, ci_low, ci_high, status, error_type, error_message = (
+                        metric_value(
+                            model_id,
+                            random_state,
+                            decision_scope,
+                            "overall",
+                            "all",
+                            reported_metric,
                         )
-                        technical_failure = True
-                    else:
-                        passed = bool(
-                            observed <= threshold
-                            if comparator == "<="
-                            else observed >= threshold
-                        )
-                        check_status = "pass" if passed else "fail"
-                        direction = "above" if comparator == "<=" else "below"
-                        reason_code = (
-                            f"{scope}_{reported_metric}_within_limit"
-                            if passed
-                            else f"{scope}_{reported_metric}_{direction}_limit"
-                        )
-                        reason = "Prespecified point-estimate guardrail."
-                    if is_blocking:
-                        blocking_failures.append(not passed)
-                    rows.append(
-                        {
-                            "model_id": model_id,
-                            "random_state": random_state,
-                            "track_id": track_id,
-                            "decision_scope": decision_scope,
-                            "eligibility_status": eligibility_status,
-                            "downstream_status": downstream_status,
-                            "candidate_status": "pending",
-                            "scope": str(scope),
-                            "metric": str(reported_metric),
-                            "observed_value": observed,
-                            "ci_low": ci_low,
-                            "ci_high": ci_high,
-                            "comparator": str(comparator),
-                            "threshold": threshold,
-                            "check_status": check_status,
-                            "is_blocking": is_blocking,
-                            "reason_code": reason_code,
-                            "reason": reason,
-                        }
                     )
+                else:
+                    group = metrics.loc[
+                        metrics["model_id"].eq(model_id)
+                        & metrics["random_state"].eq(random_state)
+                        & metrics["decision_scope"].eq(decision_scope)
+                        & metrics["map_variant"].astype(str).eq("raw")
+                        & metrics["aggregation_level"].astype(str).eq(
+                            "source_image"
+                        )
+                        & metrics["metric"].astype(str).eq(reported_metric)
+                        & metrics["status"].astype(str).eq("calculable")
+                    ].copy()
+                    values = pd.to_numeric(group["value"], errors="coerce")
+                    finite = values[np.isfinite(values)]
+                    n_independent_units = int(
+                        group.loc[finite.index, "group_id"].astype(str).nunique()
+                    )
+                    if finite.empty:
+                        observed = ci_low = ci_high = np.nan
+                        status = "missing"
+                        error_type = ""
+                        error_message = ""
+                    else:
+                        index = (
+                            finite.idxmax()
+                            if comparator == "<="
+                            else finite.idxmin()
+                        )
+                        selected = group.loc[index]
+                        observed = float(selected["value"])
+                        ci_low = float(
+                            pd.to_numeric(
+                                pd.Series([selected["ci_low"]]),
+                                errors="coerce",
+                            ).iloc[0]
+                        )
+                        ci_high = float(
+                            pd.to_numeric(
+                                pd.Series([selected["ci_high"]]),
+                                errors="coerce",
+                            ).iloc[0]
+                        )
+                        status = str(selected["status"])
+                        error_type = str(selected["error_type"])
+                        error_message = str(selected["error_message"])
+
+                enough_independent_units = bool(
+                    min_independent_units is None
+                    or (
+                        np.isfinite(n_independent_units)
+                        and int(n_independent_units) >= min_independent_units
+                    )
+                )
+                rule_can_block = bool(
+                    severity == "blocking"
+                    or (
+                        severity == "conditional_blocking"
+                        and enough_independent_units
+                    )
+                )
+                is_blocking = bool(
+                    is_protocol_supported
+                    and is_primary_scope
+                    and rule_can_block
+                )
+                threshold = float(constraints[constraint_name])
+                if status != "calculable" or not np.isfinite(observed):
+                    passed = False
+                    check_status = (
+                        "technical_error" if is_blocking else "not_evaluable"
+                    )
+                    reason_code = (
+                        "required_guardrail_metric_non_finite"
+                        if is_blocking
+                        else "supporting_guardrail_metric_non_finite"
+                    )
+                    reason = (
+                        error_message
+                        or f"Guardrail metric {reported_metric} is unavailable."
+                    )
+                    technical_failure = bool(technical_failure or is_blocking)
+                else:
+                    passed = bool(
+                        observed <= threshold
+                        if comparator == "<="
+                        else observed >= threshold
+                    )
+                    check_status = "pass" if passed else "fail"
+                    direction = "above" if comparator == "<=" else "below"
+                    reason_code = (
+                        f"{rule_id}_within_limit"
+                        if passed
+                        else f"{rule_id}_{direction}_limit"
+                    )
+                    if (
+                        severity == "conditional_blocking"
+                        and not enough_independent_units
+                    ):
+                        reason = (
+                            "Point-estimate alert only: too few independent "
+                            "source images for a blocking worst-image rule."
+                        )
+                    else:
+                        reason = f"Prespecified {severity} point-estimate guardrail."
+                if is_blocking:
+                    blocking_failures.append(not passed)
+                rows.append(
+                    {
+                        "model_id": model_id,
+                        "random_state": random_state,
+                        "track_id": track_id,
+                        "decision_scope": decision_scope,
+                        "eligibility_status": eligibility_status,
+                        "downstream_status": downstream_status,
+                        "candidate_status": "pending",
+                        "rule_id": rule_id,
+                        "scope": scope,
+                        "metric": reported_metric,
+                        "severity": severity,
+                        "n_independent_units": n_independent_units,
+                        "min_independent_units": (
+                            min_independent_units
+                            if min_independent_units is not None
+                            else np.nan
+                        ),
+                        "observed_value": observed,
+                        "ci_low": ci_low,
+                        "ci_high": ci_high,
+                        "comparator": comparator,
+                        "threshold": threshold,
+                        "check_status": check_status,
+                        "is_blocking": is_blocking,
+                        "reason_code": reason_code,
+                        "reason": reason,
+                    }
+                )
 
             # Spatial morphology acts on the direct pixel map only. The
             # pixel-to-object scope has no map and therefore no spatial check.
@@ -1963,6 +2052,7 @@ def build_validation_guardrails(
                 )
                 if fragment_threshold is None:
                     is_blocking = False
+                    severity = "diagnostic"
                     comparator = "not_thresholded"
                     threshold = np.nan
                     check_status = (
@@ -1977,8 +2067,11 @@ def build_validation_guardrails(
                     )
                 else:
                     threshold = float(fragment_threshold)
+                    severity = "blocking"
                     comparator = ">="
-                    is_blocking = bool(is_protocol_supported)
+                    is_blocking = bool(
+                        is_protocol_supported and is_primary_scope
+                    )
                     if not np.isfinite(observed):
                         check_status = "technical_error"
                         technical_failure = True
@@ -2005,8 +2098,12 @@ def build_validation_guardrails(
                         "eligibility_status": eligibility_status,
                         "downstream_status": downstream_status,
                         "candidate_status": "pending",
+                        "rule_id": "smallest_fragment_recall",
                         "scope": "smallest_fragment_class",
                         "metric": "smallest_fragment_recall",
+                        "severity": severity,
+                        "n_independent_units": np.nan,
+                        "min_independent_units": np.nan,
                         "observed_value": observed,
                         "ci_low": np.nan,
                         "ci_high": np.nan,
@@ -2054,6 +2151,7 @@ def build_validation_guardrails(
         "model_id",
         "random_state",
         "decision_scope",
+        "rule_id",
         "scope",
         "metric",
     ]

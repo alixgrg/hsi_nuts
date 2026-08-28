@@ -206,6 +206,183 @@ def _reduce_metric_parts(
     raise ValueError(f"Unsupported reduction: {reduction!r}")
 
 
+def _macro_object_target_miss_rate(
+    frame: pd.DataFrame,
+    *,
+    score_col: str,
+    decision_mode: str,
+    lower: np.ndarray,
+    upper: np.ndarray,
+) -> np.ndarray:
+    """Mean pixel-level target miss rate across target objects.
+
+    Each target object receives the same weight, independently of its
+    number of pixels.
+
+    For 3-way decisions, the definition follows the frozen uncertainty
+    policy:
+    - safe_reject: uncertain target pixels are not counted as misses;
+    - counts_as_miss: uncertain target pixels are counted as misses.
+    """
+    require_columns(
+        frame,
+        (
+            "source_image",
+            "object_id",
+            "truth",
+            score_col,
+        ),
+        "pixel observations for macro-object metric",
+    )
+
+    work = frame[
+        [
+            "source_image",
+            "object_id",
+            "truth",
+            score_col,
+        ]
+    ].copy()
+
+    truth = pd.to_numeric(
+        work["truth"],
+        errors="coerce",
+    )
+    if not truth.isin((0, 1)).all():
+        raise ValueError(
+            "truth must contain only binary values."
+        )
+    work["truth"] = truth.astype(bool)
+
+    score = pd.to_numeric(
+        work[score_col],
+        errors="coerce",
+    )
+    if not np.isfinite(
+        score.to_numpy(dtype=float)
+    ).all():
+        raise ValueError(
+            f"{score_col!r} contains non-finite values."
+        )
+    work[score_col] = score.astype(float)
+
+    # One object must have one unique class label.
+    truth_counts = (
+        work.groupby(
+            ["source_image", "object_id"],
+            sort=False,
+            dropna=False,
+        )["truth"]
+        .nunique(dropna=False)
+    )
+    if truth_counts.gt(1).any():
+        raise RuntimeError(
+            "Pixels from one object have inconsistent truth labels."
+        )
+
+    # Only target objects contribute to a target-miss metric.
+    target_work = (
+        work.loc[
+            work["truth"].astype(bool),
+            [
+                "source_image",
+                "object_id",
+                score_col,
+            ],
+        ]
+        .reset_index(drop=True)
+    )
+
+    lower_array = np.asarray(
+        lower,
+        dtype=float,
+    ).reshape(1, -1)
+    upper_array = np.asarray(
+        upper,
+        dtype=float,
+    ).reshape(1, -1)
+
+    n_policies = lower_array.shape[1]
+
+    if target_work.empty:
+        return np.full(
+            n_policies,
+            np.nan,
+            dtype=float,
+        )
+
+    scores = target_work[
+        score_col
+    ].to_numpy(dtype=float)
+
+    object_rates = []
+
+    grouped_positions = (
+        target_work.groupby(
+            ["source_image", "object_id"],
+            sort=False,
+            dropna=False,
+        )
+        .indices
+        .values()
+    )
+
+    for positions in grouped_positions:
+        positions = np.asarray(
+            positions,
+            dtype=int,
+        )
+        object_scores = scores[
+            positions
+        ].reshape(-1, 1)
+
+        if decision_mode == "2way":
+            # predicted_target = score >= threshold
+            missed = (
+                object_scores < lower_array
+            )
+
+        elif decision_mode == "3way":
+            policy = str(
+                expcfg.INTERNAL_CALIBRATION_TARGET_UNCERTAIN_POLICY
+            )
+
+            if policy == "safe_reject":
+                # Only an explicit non-target decision is a miss.
+                # predicted_non_target = score <= lower
+                missed = (
+                    object_scores <= lower_array
+                )
+
+            elif policy == "counts_as_miss":
+                # Non-target + uncertain = anything not predicted target.
+                # predicted_target = score >= upper
+                missed = (
+                    object_scores < upper_array
+                )
+
+            else:
+                raise ValueError(
+                    "Unsupported "
+                    "INTERNAL_CALIBRATION_TARGET_UNCERTAIN_POLICY: "
+                    f"{policy!r}"
+                )
+
+        else:
+            raise ValueError(
+                f"Unsupported decision mode: {decision_mode!r}"
+            )
+
+        object_rates.append(
+            missed.mean(axis=0)
+        )
+
+    return np.mean(
+        np.vstack(object_rates),
+        axis=0,
+    )
+
+
 def _evaluate_threshold_block(
     frame: pd.DataFrame,
     *,
@@ -215,20 +392,40 @@ def _evaluate_threshold_block(
     upper: np.ndarray,
     primary_unit: str,
 ) -> pd.DataFrame:
-    score = frame[score_col].to_numpy(dtype=float)
-    truth = frame["truth"].to_numpy(dtype=bool)
+    score = frame[
+        score_col
+    ].to_numpy(
+        dtype=float
+    )
+
+    truth = frame[
+        "truth"
+    ].to_numpy(
+        dtype=bool
+    )
 
     def evaluate(
         positions: np.ndarray | None = None,
     ) -> dict[str, np.ndarray]:
-        selected_score = score if positions is None else score[positions]
-        selected_truth = truth if positions is None else truth[positions]
+        selected_score = (
+            score
+            if positions is None
+            else score[positions]
+        )
+
+        selected_truth = (
+            truth
+            if positions is None
+            else truth[positions]
+        )
+
         if decision_mode == "2way":
             return _binary_metric_arrays(
                 selected_score,
                 selected_truth,
                 lower,
             )
+
         if decision_mode == "3way":
             return _three_way_metric_arrays(
                 selected_score,
@@ -236,36 +433,100 @@ def _evaluate_threshold_block(
                 lower,
                 upper,
             )
-        raise ValueError(f"Unsupported decision mode: {decision_mode!r}")
+
+        raise ValueError(
+            f"Unsupported decision mode: {decision_mode!r}"
+        )
 
     metrics = evaluate()
+
     image_parts = [
-        evaluate(positions)
-        for positions in _group_positions(frame, "source_image")
+        evaluate(
+            positions
+        )
+        for positions in _group_positions(
+            frame,
+            "source_image",
+        )
     ]
 
     if primary_unit == "source_image":
-        for metric in set(metrics) - _COUNT_METRICS:
-            metrics[metric] = _reduce_metric_parts(
+        # --------------------------------------------------------------
+        # Direct pixel-projection tracks:
+        #
+        # Primary protocol unit remains the source image.
+        # Therefore the existing macro-image metrics are unchanged.
+        # --------------------------------------------------------------
+
+        for metric in (
+            set(metrics)
+            - _COUNT_METRICS
+        ):
+            metrics[
+                metric
+            ] = _reduce_metric_parts(
                 image_parts,
                 metric,
                 "mean",
             )
-    elif primary_unit != "object":
-        raise ValueError(f"Unsupported primary unit: {primary_unit!r}")
 
-    metrics["max_unit_target_miss_rate"] = _reduce_metric_parts(
+        # --------------------------------------------------------------
+        # Additional diagnostic requested for pixel-direct tracks:
+        #
+        # Compute one target miss rate per object from its pixels,
+        # then average equally across target objects.
+        #
+        # Non-target objects have an undefined target miss rate (NaN)
+        # and are naturally ignored by _reduce_metric_parts.
+        # --------------------------------------------------------------
+
+        object_parts = [
+            evaluate(
+                np.asarray(
+                    indices,
+                    dtype=int,
+                )
+            )
+            for indices in frame.groupby(
+                [
+                    "source_image",
+                    "object_id",
+                ],
+                sort=False,
+                dropna=False,
+            ).indices.values()
+        ]
+
+        metrics[
+            "macro_object_target_miss_rate"
+        ] = _reduce_metric_parts(
+            object_parts,
+            "target_miss_rate",
+            "mean",
+        )
+
+    elif primary_unit != "object":
+        raise ValueError(
+            f"Unsupported primary unit: {primary_unit!r}"
+        )
+
+    metrics[
+        "max_unit_target_miss_rate"
+    ] = _reduce_metric_parts(
         image_parts,
         "target_miss_rate",
         "max",
     )
-    metrics["max_unit_false_accept_rate"] = _reduce_metric_parts(
+
+    metrics[
+        "max_unit_false_accept_rate"
+    ] = _reduce_metric_parts(
         image_parts,
         "false_accept_rate",
         "max",
     )
-    return pd.DataFrame(metrics)
 
+    return pd.DataFrame(metrics)
 
 def build_quantile_policies(
     scores: Sequence[float],

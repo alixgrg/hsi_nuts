@@ -49,23 +49,45 @@ par classe d'aire.
 
 Les contraintes centralisées dans
 `SIMCA_CONCAT_REFIT_GUARDRAIL_LIMITS` sont appliquées aux valeurs ponctuelles
-préspécifiées. Le scope global utilise les limites globales du profil de
-risque actif, tandis que `worst_image` utilise ses limites par image. Comptes,
-intervalles et pire image sont conservés. Les statuts possibles incluent `pass`,
-`calculable_but_not_acceptable`, `technical_failure`,
-`unsupported_domain_shift_diagnostic` et
-`not_evaluable_no_calibrated_candidate`.
+selon un contrat versionné à deux niveaux. Les limites de sécurité
+`blocking` peuvent exclure un candidat ; les limites `warning` documentent un
+compromis défavorable sans l'exclure. La décision `direct` est l'endpoint
+primaire des tracks objet comme pixel. Pour les tracks pixel, la projection
+`pixel_to_object` reste disponible comme diagnostic secondaire, mais ne peut
+pas invalider la carte pixel primaire.
+
+Le contrat dur conserve un taux de raté cible global au plus égal à 5 %. Pour
+les tracks pixel soutenus, le taux macro-objet de raté cible doit rester au plus
+égal à 10 %. Le taux de fausse acceptation déclenche un avertissement au-delà
+de 30 % et devient bloquant au-delà de 40 %. En 3-way, la couverture déclenche
+un avertissement sous 70 % et devient bloquante sous 60 % ; l'incertitude cible
+au-delà de 20 %, l'incertitude non-cible au-delà de 30 % et la balanced
+accuracy conditionnelle sous 70 % sont des avertissements.
+
+Le pire taux de raté par image n'est bloquant que si au moins cinq images
+indépendantes contribuent à l'estimation. En dessous, sa valeur et son
+dépassement sont conservés comme diagnostic non bloquant. Les tracks E3/E4,
+non soutenus par le diagnostic de shift 03C, restent entièrement
+`diagnostic_only` : leurs métriques et leur front descriptif sont produits,
+mais aucun garde-fou 04C ne peut les promouvoir vers le chemin protocolaire ni
+les exclure de ce chemin puisqu'ils n'y appartiennent pas.
+
+Ces limites ont été révisées après inspection des résultats du batch 3. Le
+manifeste le déclare avec `batch3_used_to_choose_thresholds=True` et
+`independent_validation_claim=False`. Elles servent donc à la sélection et à
+la description des compromis ; elles ne constituent pas une validation
+prospective indépendante. Une estimation non biaisée des performances devra
+reposer sur un holdout encore non consulté.
 
 Comme les images pures sont monoclasse, la balanced accuracy n'est pas définie
 dans une image isolée. Au niveau macro-image, elle est reconstruite à partir du
 taux de raté sur les images cibles et du taux de fausse acceptation sur les
 images non-cibles. Le scope `worst_image` contrôle uniquement les risques
-conditionnels applicables et l'incertitude 3-way avec les plafonds par image.
-La couverture reste reportée et sa complémentarité exacte avec l'incertitude
-est vérifiée, mais elle ne constitue pas un second garde-fou bloquant
-redondant. Une métrique requise non finie est une erreur technique et non une
-violation scientifique. Cette règle est centralisée, versionnée et hashée
-séparément du plan de refit ; aucun seuil numérique n'est modifié.
+conditionnels applicables. Une métrique primaire requise non finie est une
+erreur technique et non une violation scientifique. Une métrique secondaire
+non évaluable reste diagnostique. Chaque règle possède un `rule_id` stable,
+une sévérité et, si nécessaire, un nombre minimal d'unités indépendantes.
+Cette règle est centralisée, versionnée et hashée séparément du plan de refit.
 
 Aucun seuil numérique de rappel des plus petits fragments n'étant gelé avant
 le batch 3, cette métrique reste diagnostique. Le notebook ne choisit pas de

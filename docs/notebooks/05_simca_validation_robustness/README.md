@@ -31,6 +31,14 @@ Les empreintes enregistrées par 04C sont contrôlées avant calcul. Un artefact
 
 Les lignes 04C sont agrégées par `evaluation_track` et `calibration_id`. Les seeds sont moyennés à poids égal et restent disponibles dans une table de membres pour l'audit. Les métriques pixel utilisent prioritairement les agrégats macro image/objet et les métriques de fragments.
 
+Le front officiel utilise uniquement l'endpoint `direct`, avec une tolérance
+Pareto de 0,01. Les objectifs sont resserrés sur les compromis qui doivent être
+arbitrés : raté cible et fausse acceptation en 2-way ; ajout de l'incertitude
+cible en 3-way ; ajout du raté macro-objet pour les tracks pixel. La projection
+`pixel_to_object`, l'incertitude non-cible et la balanced accuracy restent des
+diagnostics supporting afin d'éviter qu'une multiplication d'objectifs
+corrélés ne rende presque tous les modèles Pareto.
+
 Deux informations sont conservées :
 
 - le front diagnostique, calculé parmi les unités techniquement calculables ;
@@ -42,7 +50,13 @@ Les unités dominées et non soutenues restent dans l'audit avec un motif explic
 
 Toutes les unités Pareto faisant appel à `balanced_pixels` avec stratégie `random` sont refittées sur les dix seeds centralisés. Les seuils, prétraitements, PCA, règle SIMCA et paramètres spatiaux restent verrouillés. Les méthodes déterministes ne subissent pas de répétition artificielle.
 
-Le diagnostic conserve moyenne, dispersion, quantiles, étendue, pire seed et désaccord de décision. Une unité stochastique doit disposer de tous les seeds prévus et satisfaire la politique de sécurité sur chacun d'eux. `robust_with_warning` reste visible mais n'est pas assimilé à `robust` pour le verrou final.
+Le diagnostic conserve moyenne, dispersion, quantiles, étendue, pire seed et
+désaccord de décision. Une unité stochastique doit disposer de tous les seeds
+prévus. Seule l'instabilité des métriques de raté cible préspécifiées est
+bloquante sur les tracks soutenus ; E3/E4 restent diagnostiques. Le désaccord
+de décision sur les entités cibles est bloquant, tandis que le désaccord global
+est un avertissement. `robust_with_supporting_warnings` reste admissible pour
+le registre pré-batch-4, avec ses motifs explicitement conservés.
 
 ## Tâche 36 — Ablations preregistrées
 
@@ -50,11 +64,15 @@ Seules les lignes du plan 04B sont évaluées. Les comparaisons opportunistes d'
 
 Une ablation impossible, une interaction sans quatre cellules gelées ou une métrique manquante produit une ligne `not_estimable` au lieu d'être supprimée.
 
-## Tâche 37 — Politique finale allergène
+## Tâche 37 — Revue pré-batch-4
 
-Le profil `allergen_safety_strict_v1` donne la priorité au risque de rater une peanut. Les garde-fous portent sur le taux de raté cible, la pire image, le pire seed, les faux positifs, l'incertitude 3-way et, pour les tracks pixel, Dice/IoU et les fragments.
-
-Après les contraintes dures, un choix lexicographique déterministe est appliqué dans chaque track : raté cible, pire image, pire seed, rappel des petits fragments, faux positifs, incertitude, stabilité, simplicité du prétraitement, nombre de composantes puis temps de calcul. Les tolérances d'équivalence sont centralisées. Une seule configuration primaire est retenue par track ; les alternatives équivalentes sont verrouillées avec elle.
+05 ne refait pas un choix lexicographique après le Pareto. Il conserve dans le
+registre de test pur les modèles du front protocolaire qui passent les
+garde-fous bloquants 04C, couvrent les seeds requis et ne présentent pas
+d'instabilité bloquante. Les avertissements 04C et de stabilité sont propagés
+sans exclusion. Pour E3/E4, un front diagnostique est calculé et audité, mais
+aucun modèle n'entre dans le registre de test pur tant que le statut amont reste
+`unsupported_domain_shift`.
 
 ## Tâche 38 — Incertitude et contrastes
 
@@ -62,15 +80,18 @@ Les intervalles et tests sur batch 3 sont présentés comme résultats de sélec
 
 ## Sorties
 
-Le répertoire de sortie est `results/05_simca_validation_robustness_8tracks_v3_<RESULTS_TAG>/` et contient :
+Le répertoire de sortie est
+`results/05_simca_validation_robustness_8tracks_v5_<RESULTS_TAG>/` et contient
+notamment :
 
-- `track_pareto_candidates.parquet` et `track_pareto_audit.parquet` ;
-- `robustness_diagnostics.parquet` et `robustness_summary.parquet` ;
-- `ablation_effects.parquet` et `ablation_interactions.parquet` ;
-- `final_safety_guardrails.parquet` ;
-- `final_selected_models.parquet` et `locked_models.parquet` ;
-- `statistical_uncertainty.parquet`, `planned_contrasts.parquet` et `risk_coverage_curves.parquet` ;
-- `final_selection_protocol.json` et `final_lock_manifest.json`.
+- `validation_selection_units.parquet`, `validation_selection_members.parquet`,
+  `validation_pareto_candidates.parquet` et `validation_pareto_audit.parquet` ;
+- `robustness_seed_executions.parquet`, `robustness_seed_metrics.parquet`,
+  `model_seed_stability.parquet` et `seed_decision_disagreement.parquet` ;
+- `robustness_review_guardrails.parquet`, `track_scoring_flags.parquet` et
+  `pure_test_candidate_registry.parquet` ;
+- `statistical_uncertainty.parquet` et `risk_coverage_curves.parquet` ;
+- `robustness_review_protocol.json` et `robustness_review_lock.json`.
 
 Les tables détaillées sont stockées au format long lorsque cela évite une multiplication inutile des colonnes. Les prédictions multi-seeds intermédiaires ne sont pas persistées : seuls les diagnostics nécessaires au protocole sont conservés.
 
